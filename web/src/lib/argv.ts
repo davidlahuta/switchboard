@@ -101,6 +101,10 @@ export function joinArgs(args: string[]): string {
 /**
  * Arguments the daemon manages itself and rejects with a 400. Mirrored here only to warn *before*
  * submitting; the daemon stays the authority and its message is what the dialog shows on failure.
+ *
+ * Two kinds, rejected for two reasons: the first block would break what makes a session *hosted*
+ * (identity, coordination, resuming it elsewhere); the second block has its own control in the
+ * dialog, so passing it here would apply the same setting twice.
  */
 const RESERVED = new Set([
   '--session-id',
@@ -114,6 +118,9 @@ const RESERVED = new Set([
   '-w',
   '--from-pr',
   '--teleport',
+  '--model',
+  '--name',
+  '--dangerously-skip-permissions',
 ]);
 
 /** The reserved flags present in `args`, deduped, in the order they appear. */

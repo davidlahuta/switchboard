@@ -40,8 +40,9 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
 - Each subscription gets its own isolated `CLAUDE_CONFIG_DIR` profile. Transcripts, plugins, skills and settings are shared with `~/.claude`.
 - Live usage per subscription (5‑hour, weekly, per-model weekly) with reset countdowns and 48 h history, plus aggregate capacity across all plans.
 - Subscriptions are ranked by what you can actually use **right now**: plan size scaled by whichever window is tighter, so the one to start on is always first.
-- One-click launch into a Windows Terminal tab, optionally in a fresh worktree or resuming an older session.
-- Per session: model (1M-context models, listed from the API rather than hardcoded), auto-compact and its threshold, and any extra `claude` arguments.
+- One-click launch into a Windows Terminal tab, optionally in a fresh worktree or resuming an older session (including one started before Switchboard existed).
+- Point it at the folder your repos live in and pick from a list instead of typing paths; linked worktrees are shown under the repo they belong to.
+- Per session: model (1M-context models, listed from the API rather than hardcoded), auto-compact and its threshold, whether to skip permission prompts, and any extra `claude` arguments.
 - **Hot swap**: `kill` + `claude --resume <same session>` under another subscription, in the same tab. It triggers:
   - manually,
   - automatically when a session hits a usage limit (then it types `continue` for you),
@@ -88,6 +89,10 @@ already signed in to claude.ai with another account). The card turns *ready* onc
 
 ### 2. Sessions
 
+First tell Switchboard where your repositories live: **Settings → Repositories → Add folder**
+(for example `C:\src`). It scans up to three levels deep for git repositories, so the new-session
+dialog becomes a pick-from-a-list rather than a path to type.
+
 **Sessions → New session**: pick a directory and a subscription (or *Auto*, which picks the one
 with the most headroom). A tab opens in a Windows Terminal window named `switchboard`. From there
 you can:
@@ -97,9 +102,17 @@ you can:
 - Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default).
 
 Each session can override the model (1M-context models only, listed live from the API rather than
-hardcoded), auto-compact and its threshold, and pass extra `claude` arguments. Switchboard refuses
-arguments it manages itself (`--session-id`, `--resume`, `--settings`, …) so a session stays
-resumable and coordinated.
+hardcoded), auto-compact and its threshold, whether to skip permission prompts
+(`--dangerously-skip-permissions`, on by default — sessions running that way are badged
+*no prompts*), and pass extra `claude` arguments.
+
+Switchboard refuses arguments it manages itself (`--session-id`, `--resume`, `--settings`, …) so a
+session stays resumable and coordinated, and refuses ones that have their own control
+(`--model`, `--name`, `--dangerously-skip-permissions`) so a setting is never applied twice.
+
+To continue an existing conversation, use the **Session** dropdown: it lists the conversations
+Claude Code has recorded for that folder, and its last entry lets you paste a session GUID from
+anywhere else.
 
 You can also start a hosted session from any terminal:
 
@@ -217,9 +230,9 @@ apphost.cs          Aspire AppHost for development
 | `SWITCHBOARD_WT_WINDOW`   | `switchboard`                     | Windows Terminal window for hosted tabs   |
 | `SWITCHBOARD_LOG_LEVEL`   | `info`                            | `debug` / `info` / `warn` / `error`       |
 
-Runtime settings (auto-swap, thresholds, continue message, session defaults for model and
-auto-compact, update schedule, conflict window, polling interval) live in the UI under
-**Settings**.
+Runtime settings (auto-swap, thresholds, continue message, repository folders, session defaults
+for model, auto-compact and permission prompts, update schedule, conflict window, polling
+interval) live in the UI under **Settings**.
 
 ## Caveats
 

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import qrcode from 'qrcode-generator';
 import type {
   Device,
+  DiscoveredRepo,
   IntegrationStatus,
   Model,
   PairingCode,
@@ -11,10 +12,11 @@ import type {
   UpdateStatus,
 } from '@shared/types.ts';
 import { PageHead } from '../components/PageHead.tsx';
-import { Badge, ConfirmDialog, Empty, Icon, Section, Spinner, Toggle } from '../components/ui.tsx';
+import { Badge, ConfirmDialog, Empty, Icon, IconButton, Section, Spinner, Toggle } from '../components/ui.tsx';
 import { api, request } from '../lib/api.ts';
 import { contextLabel, plural, tokensShort } from '../lib/format.ts';
 import { joinArgs, splitArgs } from '../lib/argv.ts';
+import { fetchDiscoveredRepos, groupRepos } from '../lib/repos.ts';
 import { countdown, timeAgo, useNow } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
 
@@ -83,7 +85,9 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
 
   const patch = useMemo(() => {
     const p: Partial<Settings> = {};
-    const next = { ...draft, claudeArgs: splitArgs(args) };
+    // Blank rows are what an unfinished "Add folder" looks like; the daemon drops them anyway, so
+    // dropping them here too keeps the form from claiming an unsaved change that saves nothing.
+    const next = { ...draft, claudeArgs: splitArgs(args), repoRoots: cleanRoots(draft.repoRoots) };
     (Object.keys(next) as Array<keyof Settings>).forEach((k) => {
       if (JSON.stringify(next[k]) !== JSON.stringify(settings[k])) (p as Record<string, unknown>)[k] = next[k];
     });
@@ -212,6 +216,67 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
             {tokensShort(draft.defaultAutoCompactTokens)}
           </span>
         </div>
+
+        <div className="setting">
+          <div className="setting-text">
+            <div className="setting-name">Skip permission prompts by default</div>
+            <div className="setting-desc">New sessions run tools without asking you to approve each one.</div>
+          </div>
+          <Toggle
+            checked={draft.defaultSkipPermissions}
+            onChange={(v) => set('defaultSkipPermissions', v)}
+            label="Skip permission prompts by default"
+          />
+        </div>
+      </Section>
+
+      <Section title="Repositories">
+        <p className="muted">
+          These folders are scanned up to three levels deep for git repositories, so starting a session is a pick from a list rather
+          than a typed path.
+        </p>
+
+        {draft.repoRoots.length === 0 ? (
+          <p className="field-hint">
+            No folders configured. Add the folder your repositories live in — for example <span className="mono">C:\src</span>.
+          </p>
+        ) : (
+          <ul className="root-list">
+            {draft.repoRoots.map((root, i) => (
+              // eslint-disable-next-line react/no-array-index-key -- the row *is* the position; the text is the state
+              <li key={i} className="root-row">
+                <input
+                  type="text"
+                  className="input mono"
+                  value={root}
+                  aria-label={`Repository folder ${i + 1}`}
+                  placeholder="C:\src"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  onChange={(e) => set('repoRoots', draft.repoRoots.map((r, j) => (j === i ? e.target.value : r)))}
+                />
+                <IconButton
+                  icon="trash"
+                  label={`Remove ${root.trim() || `folder ${i + 1}`}`}
+                  onClick={() => set('repoRoots', draft.repoRoots.filter((_, j) => j !== i))}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="form-actions">
+          <button type="button" className="btn btn-sm" onClick={() => set('repoRoots', [...draft.repoRoots, ''])}>
+            <Icon name="plus" size={14} />
+            <span>Add folder</span>
+          </button>
+          {cleanRoots(draft.repoRoots).join('|') !== settings.repoRoots.join('|') && (
+            <span className="field-hint">Save to rescan with these folders.</span>
+          )}
+        </div>
+
+        <DiscoveredRepos roots={settings.repoRoots} />
       </Section>
 
       <Section title="Sessions & swapping">
@@ -312,6 +377,125 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
         {dirty && <span className="field-hint">{plural(Object.keys(patch).length, 'unsaved change')}</span>}
       </div>
     </form>
+  );
+}
+
+// ---------------- repositories ----------------
+
+/** Trimmed, non-empty roots — the same shape the daemon stores, so the diff is honest. */
+function cleanRoots(roots: string[]): string[] {
+  return roots.map((r) => r.trim()).filter((r) => r.length > 0);
+}
+
+/**
+ * What the configured roots actually turned into. Shown next to the folder list because "56 repos"
+ * is the only proof that a root is spelled right, and because a missing repo is nearly always a
+ * root that points one level too deep.
+ */
+function DiscoveredRepos({ roots }: { roots: string[] }) {
+  const [repos, setRepos] = useState<DiscoveredRepo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const key = roots.join('|');
+
+  useEffect(() => {
+    let cancelled = false;
+    setRepos(null);
+    setError(null);
+    fetchDiscoveredRepos()
+      .then((r) => !cancelled && setRepos(r))
+      .catch((e: unknown) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [key]);
+
+  const rescan = async () => {
+    setBusy(true);
+    try {
+      const r = await fetchDiscoveredRepos(true);
+      setRepos(r);
+      setError(null);
+      emitToast('success', `${plural(r.length, 'repository', 'repositories')} found`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const groups = useMemo(() => groupRepos(repos ?? []), [repos]);
+
+  return (
+    <div className="discovered">
+      <div className="form-actions">
+        <span className="field-hint">
+          {error
+            ? 'Discovery failed.'
+            : repos === null
+              ? 'Scanning…'
+              : roots.length === 0
+                ? 'No folders configured yet — nothing is scanned.'
+                : `${plural(repos.length, 'repository', 'repositories')} in ${plural(roots.length, 'folder')}.`}
+        </span>
+        <button type="button" className="btn btn-sm" disabled={busy || roots.length === 0} onClick={() => void rescan()}>
+          <Icon name="refresh" size={14} />
+          <span>{busy ? 'Rescanning…' : 'Rescan'}</span>
+        </button>
+      </div>
+
+      {error ? (
+        <div className="callout callout-warn">{error}</div>
+      ) : repos === null ? (
+        <Spinner label="Scanning for repositories" />
+      ) : repos.length === 0 ? (
+        roots.length === 0 ? null : (
+          <Empty icon="repo">No git repositories under those folders. Check the paths above.</Empty>
+        )
+      ) : (
+        <ul className="list discovered-list">
+          {groups.map((g) => (
+            <li key={`${g.repoId}-${g.main.path}`}>
+              <RepoLine repo={g.main} />
+              {g.worktrees.length > 0 && (
+                <ul className="list discovered-worktrees">
+                  {g.worktrees.map((w) => (
+                    <li key={w.path}>
+                      <RepoLine repo={w} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function RepoLine({ repo }: { repo: DiscoveredRepo }) {
+  return (
+    <div className="list-row discovered-row">
+      <Icon name="repo" size={16} />
+      <span className="list-main">
+        <span className="list-title">
+          {repo.name}
+          {repo.isWorktree && (
+            <>
+              {' '}
+              <Badge tone="muted" title={`Linked worktree of ${repo.mainWorktree}`}>
+                worktree
+              </Badge>
+            </>
+          )}
+        </span>
+        <span className="list-sub mono" title={repo.path}>
+          {repo.path}
+        </span>
+      </span>
+      <span className="dim small discovered-branch">{repo.branch ?? '—'}</span>
+    </div>
   );
 }
 

@@ -7,7 +7,9 @@ import { Bus } from './bus.ts';
 import { findClaude } from './claude.ts';
 import { Coordinator } from './coord.ts';
 import { Db } from './db.ts';
+import { RepoScanner } from './discovery.ts';
 import { Launcher } from './launcher.ts';
+import { getSettings } from './settings.ts';
 import { ModelCatalog } from './models.ts';
 import { RunManager } from './runs.ts';
 import { createServer } from './server.ts';
@@ -24,6 +26,7 @@ export async function startDaemon(): Promise<void> {
   const coord = new Coordinator(db, bus);
   const subs = new SubscriptionManager(db, bus, launcher);
   const models = new ModelCatalog(() => subs.anyReadyToken());
+  const scanner = new RepoScanner(() => getSettings(db).repoRoots);
   const runs = new RunManager(db, bus, subs, coord, launcher, models);
   const hub = new AgentHub(coord, runs);
   coord.setPushTarget(hub);
@@ -41,7 +44,7 @@ export async function startDaemon(): Promise<void> {
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
   const servers: Server[] = [];
   for (const host of BIND_HOSTS) {
-    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models });
+    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner });
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') log.error(`${host}:${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
       else if (err.code === 'EADDRNOTAVAIL') log.error(`Cannot bind ${host}: no interface has that address. Check SWITCHBOARD_BIND.`);

@@ -47,6 +47,7 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | Method | Path                                  | Body                                   | Returns        |
 |--------|---------------------------------------|----------------------------------------|----------------|
 | GET    | `/api/repos`                          |                                        | `Repo[]`       |
+| GET    | `/api/repos/discovered?refresh=1`     | git repos under `settings.repoRoots` (cached ~60 s) | `DiscoveredRepo[]` |
 | POST   | `/api/repos`                          | `{ path }` – register a repo manually  | `Repo`         |
 | GET    | `/api/repos/:id`                      |                                        | `RepoDetail`   |
 | POST   | `/api/repos/:id/messages`             | `HumanMessageRequest`                  | `Message`      |

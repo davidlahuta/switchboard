@@ -21,6 +21,7 @@ export interface ManualRunSpec {
   model?: string;
   autoCompact?: boolean;
   autoCompactTokens?: number;
+  skipPermissions?: boolean;
   args?: string[];
 }
 

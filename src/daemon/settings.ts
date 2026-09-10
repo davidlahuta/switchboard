@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultModel: null,
   defaultAutoCompact: true,
   defaultAutoCompactTokens: 700_000,
+  defaultSkipPermissions: true,
   autoSwap: true,
   proactiveSwap: false,
   swapThresholdPct: 95,
@@ -17,6 +18,7 @@ export const DEFAULT_SETTINGS: Settings = {
   usagePollSec: 300,
   conflictWindowMin: 60,
   claudeArgs: [],
+  repoRoots: [],
 };
 
 export function getSettings(db: Db): Settings {
@@ -44,6 +46,7 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
   if (typeof patch.restartAfterUpdate === 'boolean') next.restartAfterUpdate = patch.restartAfterUpdate;
   if (patch.defaultModel !== undefined) next.defaultModel = typeof patch.defaultModel === 'string' && patch.defaultModel ? patch.defaultModel : null;
   if (typeof patch.defaultAutoCompact === 'boolean') next.defaultAutoCompact = patch.defaultAutoCompact;
+  if (typeof patch.defaultSkipPermissions === 'boolean') next.defaultSkipPermissions = patch.defaultSkipPermissions;
   if (patch.defaultAutoCompactTokens !== undefined) {
     next.defaultAutoCompactTokens = n(patch.defaultAutoCompactTokens, 20_000, 990_000, current.defaultAutoCompactTokens);
   }
@@ -54,6 +57,12 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
   if (typeof patch.continueMessage === 'string') next.continueMessage = patch.continueMessage.slice(0, 2000);
   if (patch.conflictWindowMin !== undefined) next.conflictWindowMin = n(patch.conflictWindowMin, 5, 24 * 60, current.conflictWindowMin);
   if (Array.isArray(patch.claudeArgs)) next.claudeArgs = patch.claudeArgs.filter((a) => typeof a === 'string' && a.length > 0);
+  if (Array.isArray(patch.repoRoots)) {
+    next.repoRoots = patch.repoRoots
+      .filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+      .map((r) => r.trim())
+      .slice(0, 20);
+  }
 
   db.tx(() => {
     for (const [key, value] of Object.entries(next)) {

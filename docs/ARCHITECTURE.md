@@ -115,6 +115,14 @@ The updater runs `claude update` on a schedule. When the version changes it rest
 sessions onto the new build — a restart is the same machinery as a subscription swap, minus the
 subscription change, so it resumes the same session GUID and waits for the agent to be idle.
 
+## Repository discovery
+
+The folders in `settings.repoRoots` are scanned up to three levels deep. A directory containing
+`.git` is a repository and is *not* descended into, which stops submodules and nested checkouts
+from exploding the scan; `node_modules`, build output and dotted directories are skipped outright.
+Each hit is resolved through the same `resolveRepo` used for coordination, so a linked worktree
+reports the `repoId` of its main worktree and the UI can group them together.
+
 ## Identity
 
 A session is its **GUID** (Claude Code's session id). Everything durable keys off it: runs,

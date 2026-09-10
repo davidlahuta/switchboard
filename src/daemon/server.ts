@@ -11,6 +11,7 @@ import type { Bus } from './bus.ts';
 import { findClaude } from './claude.ts';
 import type { Coordinator } from './coord.ts';
 import type { Db } from './db.ts';
+import type { RepoScanner } from './discovery.ts';
 import { createHookHandler } from './hooks.ts';
 import { installIntegration, integrationStatus, uninstallIntegration } from './integration.ts';
 import type { Launcher } from './launcher.ts';
@@ -34,6 +35,7 @@ export interface Services {
   hub: AgentHub;
   updater: Updater;
   models: ModelCatalog;
+  scanner: RepoScanner;
 }
 
 type Body = Record<string, any>;
@@ -187,6 +189,8 @@ export function createServer(s: Services): http.Server {
     if (!p || !fs.existsSync(p)) fail(400, 'Directory not found');
     return s.coord.addRepo(p);
   });
+  // Must precede /api/repos/:id, which would otherwise capture "discovered".
+  route('GET', '/api/repos/discovered', ({ url }) => s.scanner.list(url.searchParams.get('refresh') === '1'));
   route('GET', '/api/repos/:id', ({ params }) => s.coord.repoDetail(params[0]) ?? fail(404, 'Unknown repo'));
   route('POST', '/api/repos/:id/messages', ({ params, body }) => {
     const text = String(body.body ?? '').trim();
@@ -226,6 +230,7 @@ export function createServer(s: Services): http.Server {
       model: body.model === undefined ? undefined : typeof body.model === 'string' && body.model ? body.model : null,
       autoCompact: typeof body.autoCompact === 'boolean' ? body.autoCompact : undefined,
       autoCompactTokens: typeof body.autoCompactTokens === 'number' ? body.autoCompactTokens : undefined,
+      skipPermissions: typeof body.skipPermissions === 'boolean' ? body.skipPermissions : undefined,
     });
   });
   route('POST', '/api/runs/:id/swap', ({ params, body }) =>

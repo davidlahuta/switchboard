@@ -61,6 +61,19 @@ export interface UsagePoint {
   sevenDayPct: number | null;
 }
 
+/** A git repository found under one of the configured root folders. */
+export interface DiscoveredRepo {
+  /** Absolute path of the working directory a session would start in */
+  path: string;
+  name: string;
+  branch: string | null;
+  /** true for a linked worktree; it shares its main worktree's coordination group */
+  isWorktree: boolean;
+  /** Coordination group id, matching `Repo.id` once the repo is known */
+  repoId: string;
+  mainWorktree: string;
+}
+
 export interface Repo {
   id: string;
   root: string;
@@ -203,6 +216,7 @@ export interface Run {
   model: string | null;
   autoCompact: boolean;
   autoCompactTokens: number;
+  skipPermissions: boolean;
   /** claude version this session is currently running on, when known */
   version: string | null;
   pid: number | null;
@@ -257,6 +271,8 @@ export interface Settings {
   defaultModel: string | null;
   defaultAutoCompact: boolean;
   defaultAutoCompactTokens: number;
+  /** Pre-tick "skip permission prompts" in the new-session dialog */
+  defaultSkipPermissions: boolean;
   /** Swap automatically when a session hits a usage limit */
   autoSwap: boolean;
   /** Swap idle sessions proactively once their subscription crosses swapThresholdPct */
@@ -268,6 +284,8 @@ export interface Settings {
   conflictWindowMin: number;
   /** Extra CLI args for every launched session, e.g. ["--permission-mode", "auto"] */
   claudeArgs: string[];
+  /** Folders scanned for git repositories, so starting a session is a pick rather than a path */
+  repoRoots: string[];
 }
 
 export interface Device {
@@ -340,6 +358,8 @@ export interface CreateRunRequest {
   autoCompact?: boolean;
   /** context tokens at which auto-compact triggers */
   autoCompactTokens?: number;
+  /** run with --dangerously-skip-permissions (no tool approval prompts) */
+  skipPermissions?: boolean;
 }
 
 export interface SwapRequest {

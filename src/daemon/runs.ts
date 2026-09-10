@@ -43,6 +43,7 @@ interface RunRow {
   model: string | null;
   auto_compact: number | null;
   auto_compact_tokens: number | null;
+  skip_permissions: number | null;
 }
 
 /** A respawn waiting for the session to finish its turn. */
@@ -76,15 +77,24 @@ function parseArgs(json: string | null): string[] {
  * a *hosted* session: identity, coordination and the ability to resume it elsewhere.
  */
 const RESERVED_ARGS = new Set(['--session-id', '--resume', '-r', '--continue', '-c', '--mcp-config', '--settings', '--worktree', '-w', '--from-pr', '--teleport']);
+/** Arguments that have their own control in the dialog, to keep one setting in one place. */
+const DUPLICATED_ARGS = new Map([
+  ['--model', 'the model select'],
+  ['--dangerously-skip-permissions', 'the "skip permission prompts" checkbox'],
+  ['--name', 'the name field'],
+]);
 
 export function rejectReservedArgs(args: string[]): void {
-  const bad = args.filter((a) => RESERVED_ARGS.has(a.split('=')[0]));
+  const flags = args.map((a) => a.split('=')[0]);
+  const bad = flags.filter((a) => RESERVED_ARGS.has(a));
   if (bad.length) {
     throw httpError(
       400,
       `Switchboard manages ${[...new Set(bad)].join(', ')} for hosted sessions. Use the session and worktree fields instead of passing them as arguments.`,
     );
   }
+  const duplicated = flags.find((a) => DUPLICATED_ARGS.has(a));
+  if (duplicated) throw httpError(400, `Set ${duplicated} with ${DUPLICATED_ARGS.get(duplicated)} rather than as an argument, so it is not applied twice.`);
 }
 
 export class RunManager {
@@ -159,6 +169,7 @@ export class RunManager {
       model: r.model,
       autoCompact: r.auto_compact === null ? getSettings(this.db).defaultAutoCompact : bool(r.auto_compact),
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
+      skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
       pid: r.pid,
       cols: r.cols,
       rows: r.rows,
@@ -204,6 +215,7 @@ export class RunManager {
     model?: string | null;
     autoCompact?: boolean;
     autoCompactTokens?: number;
+    skipPermissions?: boolean;
   }): RunRow {
     const cwd = path.resolve(spec.cwd);
     let isDir = false;
@@ -221,12 +233,13 @@ export class RunManager {
     if (model) this.models.validate(model);
     const autoCompact = spec.autoCompact ?? settings.defaultAutoCompact;
     const autoCompactTokens = Math.min(990_000, Math.max(20_000, Math.round(spec.autoCompactTokens ?? settings.defaultAutoCompactTokens)));
+    const skipPermissions = spec.skipPermissions ?? settings.defaultSkipPermissions;
     const subscriptionId = this.resolveSubscription(spec.subscriptionId);
     const id = crypto.randomBytes(4).toString('hex');
     const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
     this.db.run(
-      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       name.slice(0, 80),
       cwd,
@@ -240,6 +253,7 @@ export class RunManager {
       model,
       autoCompact ? 1 : 0,
       autoCompactTokens,
+      skipPermissions ? 1 : 0,
       now(),
     );
     this.subs.syncProfile(subscriptionId);
@@ -275,6 +289,7 @@ export class RunManager {
     if (!hooksInstalledIn(path.join(sub.config_dir, 'settings.json'))) runSettings.hooks = hooksConfig();
     args.push('--settings', writeRuntimeJson(`settings-${r.id}.json`, runSettings));
     if (r.model) args.push('--model', r.model);
+    if (this.dto(r).skipPermissions) args.push('--dangerously-skip-permissions');
     if (!resume && r.worktree) args.push('--worktree', r.worktree);
     if (!resume) args.push('--name', r.name);
     // Global settings first, then this session's own arguments, so a session can override.

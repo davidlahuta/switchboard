@@ -170,7 +170,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
       >
         <p>
           Claude Code will be terminated and its Windows Terminal tab closes. The conversation stays on disk and can be resumed from
-          “New session → Resume session”.
+          “New session → Session”.
         </p>
       </ConfirmDialog>
 

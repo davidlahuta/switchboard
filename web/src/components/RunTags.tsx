@@ -3,8 +3,9 @@ import { modelShort } from '../lib/format.ts';
 import { Badge } from './ui.tsx';
 
 /**
- * The two things you want to know about a running session at a glance beyond its status: which
- * model it is on, and whether its claude build is the one that is installed now.
+ * What you want to know about a running session at a glance beyond its status: which model it is
+ * on, whether its claude build is the one that is installed now, and whether it is running without
+ * tool-approval prompts.
  */
 export function RunTags({
   run,
@@ -20,12 +21,17 @@ export function RunTags({
   const model = modelShort(run.model, models);
   const latest = update.currentVersion;
   const outdated = !!run.version && !!latest && run.version !== latest;
-  if (!model && !run.version) return null;
+  if (!model && !run.version && !run.skipPermissions) return null;
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
       {model && (
         <Badge tone="neutral" title={run.model ? `Model ${run.model}` : undefined}>
           {model}
+        </Badge>
+      )}
+      {run.skipPermissions && (
+        <Badge tone="muted" title="Started with --dangerously-skip-permissions: tools run without asking for approval">
+          no prompts
         </Badge>
       )}
       {run.version && (

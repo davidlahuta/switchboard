@@ -12,6 +12,7 @@ Usage:
       --cwd <dir>                    Working directory (default: current)
       --model <id>                   Model to use (switchboard status lists them)
       --no-auto-compact              Disable auto-compact for this session
+      --ask-permissions              Keep permission prompts (default: skipped)
       --compact-at <tokens>          Auto-compact threshold (default from settings)
       -- <args...>                   Everything after a bare -- is passed to claude
   switchboard mcp                    Stdio MCP server (spawned by Claude Code)
@@ -127,6 +128,7 @@ async function main(): Promise<void> {
                 resumeSessionId: str(f.resume),
                 model: str(f.model) ?? undefined,
                 autoCompact: f['no-auto-compact'] ? false : undefined,
+                skipPermissions: f['ask-permissions'] ? false : undefined,
                 autoCompactTokens: Number.isFinite(compactAt) && compactAt > 0 ? compactAt : undefined,
                 args: passthrough.length ? passthrough : undefined,
               },

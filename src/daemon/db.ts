@@ -182,6 +182,9 @@ const MIGRATIONS: string[] = [
   ALTER TABLE runs ADD COLUMN auto_compact INTEGER;
   ALTER TABLE runs ADD COLUMN auto_compact_tokens INTEGER;
   `,
+  `
+  ALTER TABLE runs ADD COLUMN skip_permissions INTEGER;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;
