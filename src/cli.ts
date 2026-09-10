@@ -8,8 +8,12 @@ Usage:
   switchboard run [options]          Run a Claude Code session hosted by Switchboard in this terminal
       --sub <id|auto>                Subscription to start on (default: auto)
       --name <name>                  Display name
-      --resume <session-id>          Resume an existing session
+      --resume <session-id>          Resume an existing session (its GUID)
       --cwd <dir>                    Working directory (default: current)
+      --model <id>                   Model to use (switchboard status lists them)
+      --no-auto-compact              Disable auto-compact for this session
+      --compact-at <tokens>          Auto-compact threshold (default from settings)
+      -- <args...>                   Everything after a bare -- is passed to claude
   switchboard mcp                    Stdio MCP server (spawned by Claude Code)
   switchboard install                Register the MCP server + hooks globally for all sessions
   switchboard uninstall              Remove the global registration
@@ -90,6 +94,11 @@ async function status(): Promise<void> {
     console.log(`  ${sub.enabled ? '●' : '○'} ${sub.label.padEnd(28)} ${sub.status.padEnd(13)} 5h ${pct(u?.fiveHour)}  7d ${pct(u?.sevenDay)}  ${sub.email ?? ''}`);
   }
   for (const r of s.repos.filter((x) => x.agentsOnline > 0)) console.log(`  ${r.name}: ${r.agentsOnline} agent(s), ${r.openConflicts} open conflict(s)`);
+  if (s.models.length) {
+    const mark = (id: string): string => (id === s.settings.defaultModel ? ' (default)' : '');
+    console.log(`Models (>=1M context): ${s.models.map((m) => m.id + mark(m.id)).join(', ')}`);
+  }
+  console.log(`claude ${s.update.currentVersion ?? '?'}${s.update.lastError ? ` · update issue: ${s.update.lastError}` : ''}`);
 }
 
 async function main(): Promise<void> {
@@ -103,10 +112,25 @@ async function main(): Promise<void> {
     case 'run': {
       const { runRunner } = await import('./runner/runner.ts');
       const runId = str(f['run-id']);
+      // Everything after a bare `--` goes to claude untouched.
+      const sep = rest.indexOf('--');
+      const passthrough = sep === -1 ? [] : rest.slice(sep + 1);
+      const compactAt = Number(str(f['compact-at']));
       return runRunner(
         runId
           ? { runId }
-          : { manual: { cwd: str(f.cwd) ?? process.cwd(), subscriptionId: str(f.sub) ?? 'auto', name: str(f.name), resumeSessionId: str(f.resume) } },
+          : {
+              manual: {
+                cwd: str(f.cwd) ?? process.cwd(),
+                subscriptionId: str(f.sub) ?? 'auto',
+                name: str(f.name),
+                resumeSessionId: str(f.resume),
+                model: str(f.model) ?? undefined,
+                autoCompact: f['no-auto-compact'] ? false : undefined,
+                autoCompactTokens: Number.isFinite(compactAt) && compactAt > 0 ? compactAt : undefined,
+                args: passthrough.length ? passthrough : undefined,
+              },
+            },
       );
     }
     case 'login-shell':

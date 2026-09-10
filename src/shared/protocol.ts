@@ -18,6 +18,10 @@ export interface ManualRunSpec {
   subscriptionId: string;
   name?: string;
   resumeSessionId?: string;
+  model?: string;
+  autoCompact?: boolean;
+  autoCompactTokens?: number;
+  args?: string[];
 }
 
 export type RunnerToDaemon =

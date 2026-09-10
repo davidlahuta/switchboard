@@ -14,7 +14,7 @@ Switchboard is a single always-on local daemon with three jobs:
 
 ```
                ┌──────────────────────── switchboard daemon (127.0.0.1:4477) ────────────────────────┐
-               │  HTTP API · WebSocket hub · HTTP hook endpoint · SQLite (node:sqlite) · usage poller │
+               │  HTTP API · WebSocket hub · hook endpoint · SQLite · usage poller · updater · models │
                └──────▲──────────────▲──────────────────▲──────────────────▲──────────────────▲──────┘
           /ws/agent   │    /hooks/*  │        /ws/runner│         /ws/ui   │     /ws/term/:id │
                       │              │                  │                  │                  │
@@ -90,7 +90,49 @@ Adding a subscription opens a terminal running `claude auth login` inside the ne
 daemon watches for credentials and reads the account (email, plan) from the OAuth profile endpoint.
 
 Usage (5-hour and weekly utilisation + reset times) is polled from the OAuth usage endpoint that
-Claude Code's own `/usage` uses. It is undocumented and may change; failures are shown as *stale*.
+Claude Code's own `/usage` uses. It is undocumented and may change; failures are shown as *stale*
+with the reason.
+
+That endpoint rate-limits per account, not per subscription, so the poller treats a 429 as a
+global signal: it honours `Retry-After` (falling back to capped exponential backoff), pauses every
+subscription until it expires, and refuses manual refreshes in the meantime rather than extending
+the penalty. Requests are also spaced apart so several subscriptions never burst together, and
+subscriptions with no live session poll far less often.
+
+**Headroom** is the ranking metric: `weight × (100 − max(5h%, 7d%)) / 100`. Both windows gate
+every request, so the tighter one decides; the plan weight converts a percentage into something
+comparable across plans. The daemon computes it so the overview's ordering and the automatic swap
+target cannot drift apart.
+
+## Models and updates
+
+The model list comes from `/v1/models` and is filtered to models whose `max_input_tokens` is at
+least 1M, so new models appear without a code change. Per-session, the model is passed as
+`--model`; auto-compact is a *setting*, not a flag, so it travels in the per-run settings file
+alongside the hooks.
+
+The updater runs `claude update` on a schedule. When the version changes it restarts hosted
+sessions onto the new build — a restart is the same machinery as a subscription swap, minus the
+subscription change, so it resumes the same session GUID and waits for the agent to be idle.
+
+## Identity
+
+A session is its **GUID** (Claude Code's session id). Everything durable keys off it: runs,
+resumes, swaps, restarts, agent rows, message delivery. Display names exist only for humans and
+for agents addressing each other; they are unique among *live* agents and can be reused once a
+session goes offline. Name lookup therefore prefers live agents and refuses an ambiguous match
+rather than guessing, telling the caller to use the GUID.
+
+## Always on
+
+`switchboard service install` registers a Task Scheduler **logon** task that runs a supervisor
+script: it launches the daemon hidden, waits for it, and relaunches it about ten seconds after any
+exit. Task Scheduler's own restart-on-failure cannot do this, because a task that launches a
+detached process is considered finished immediately.
+
+It is a logon task rather than a startup one because opening terminal tabs needs an interactive
+desktop, which a session-0 service does not have. The cost is that after an unattended reboot the
+daemon returns when the desk signs in.
 
 ## Session runner and subscription swap
 
@@ -100,11 +142,18 @@ console (the Windows Terminal tab). It always passes:
 * `--session-id <uuid>` (new) or `--resume <uuid>` (after a swap),
 * `--mcp-config <file>` registering the `switchboard` stdio shim,
 * `--dangerously-load-development-channels server:switchboard` so pushes work,
-* `--settings <file>` with Switchboard's HTTP hooks (unless installed globally).
+* `--settings <file>` carrying the session's auto-compact settings, plus Switchboard's HTTP hooks
+  when the profile does not already have them,
+* `--model <id>` and any extra arguments configured for the session. Arguments Switchboard owns
+  (`--session-id`, `--resume`, `--mcp-config`, `--settings`, `--worktree`, …) are refused, because
+  overriding them would break the session's identity or its coordination.
 
 **Swap** = wait until the agent is idle (or it just hit a limit) → kill claude → reset the terminal →
 respawn `claude --resume <same id>` in the session's last cwd with the new `CLAUDE_CONFIG_DIR` →
-when the `SessionStart(resume)` hook arrives, optionally type the continue message.
+when the `SessionStart(resume)` hook arrives, optionally type the continue message. The continue
+message is only sent once that hook confirms a live prompt: typing blindly could answer a dialog
+(folder trust, a permission prompt) instead. Folder trust is copied into the target profile first,
+for the same reason.
 
 Triggers: manual (UI), `StopFailure` hook with `rate_limit` (auto-swap + continue), a limit
 message detected in the PTY output (fallback), or proactive (usage above threshold while idle).
