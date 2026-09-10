@@ -8,6 +8,15 @@ type IPty = ReturnType<typeof pty.spawn>;
 // Undo whatever modes the TUI left enabled before printing our own output.
 const RESET_TERMINAL = '\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[<u\x1b[?25h\x1b[0m';
 const CLEAR = '\x1b[2J\x1b[3J\x1b[H';
+/**
+ * How long after a spawn the console's own size changes are treated as it settling rather than as
+ * somebody reaching for the window.
+ *
+ * A Windows Terminal tab does not open at its final size: it reports one, then another as the window
+ * lays itself out, sometimes seconds later. Taking those for a person asking for the session back is
+ * how a session opened from a phone ended up drawn for the desk it was opened on.
+ */
+const CONSOLE_SETTLE_MS = 20_000;
 /** Shown in the console the session lives in while a web viewer owns the pseudo-terminal size. */
 const PARKED = (cols: number, rows: number): string =>
   `\x1b[1;36m[switchboard]\x1b[0m this session is being driven from the web at ${cols}\u00d7${rows}.\r\n` +
@@ -81,6 +90,20 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
    * looking at it, and the first thing the viewer sees is a frame drawn for the wrong screen.
    */
   let webSize: { cols: number; rows: number } | null = null;
+  /** When the current claude was started, so the console's settling resizes can be told apart. */
+  let spawnedAt = 0;
+  /**
+   * The size the pseudo-terminal actually has, kept here rather than read back from it. node-pty
+   * applies a resize through a deferred callback, so asking it a moment later can still answer with
+   * the dimensions it was spawned at — which is how a session that had already been fitted to a
+   * browser reported itself as the shape of the console a second after starting.
+   */
+  let childSize = { cols: 0, rows: 0 };
+  const resizeChild = (cols: number, rows: number): void => {
+    if (!child) return;
+    childSize = { cols, rows };
+    child.resize(cols, rows);
+  };
   let swapping = false;
   let stopping = false;
   let ws: WebSocket | null = null;
@@ -113,29 +136,33 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     const { cols, rows } = size();
     webSized = false;
     webSize = null;
-    child.resize(cols, rows);
+    resizeChild(cols, rows);
     out.write(CLEAR);
     send({ type: 'resize', cols, rows });
     // Nudge a full repaint: claude only redraws its frame when the size actually changes, and it
     // has just been told about this one.
     setTimeout(() => {
       if (!child || webSized) return;
-      child.resize(Math.max(20, cols - 1), rows);
+      resizeChild(Math.max(20, cols - 1), rows);
       setTimeout(() => {
-        if (child && !webSized) child.resize(cols, rows);
+        if (child && !webSized) resizeChild(cols, rows);
       }, 60);
     }, 60);
   };
 
   out.on('resize', () => {
     if (!child) return;
-    // Resizing this window is also how you take the session back from a web viewer.
+    // Resizing this window is also how you take the session back from a web viewer — but only once
+    // the window has stopped resizing itself. A tab that has just opened reports its size more than
+    // once while it lays out, and reading that as a request would hand the session straight back to
+    // a console nobody is looking at.
     if (webSized) {
+      if (Date.now() - spawnedAt < CONSOLE_SETTLE_MS) return;
       unpark();
       return;
     }
     const { cols, rows } = size();
-    child.resize(cols, rows);
+    resizeChild(cols, rows);
     send({ type: 'resize', cols, rows });
   });
 
@@ -209,6 +236,8 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       return;
     }
     child = p;
+    spawnedAt = Date.now();
+    childSize = { cols, rows };
     if (webSize && !webSized) {
       // Parked from the moment it starts, rather than painting one frame here first.
       out.write(CLEAR + PARKED(webSize.cols, webSize.rows));
@@ -238,10 +267,17 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     });
     out.write(setTitle(s.title));
     send({ type: 'spawned', pid: p.pid, cols, rows });
-    // ConPTY resolves the child pid asynchronously; report it once it is known.
+    /*
+     * ConPTY resolves the child pid asynchronously; report it once it is known.
+     *
+     * With the size it has by then, not the one it started with. A browser that asked for its size
+     * while the session was starting has already resized this pty in the meantime, and repeating the
+     * spawn dimensions a second later told the daemon the session was still the shape of the console
+     * — which is the shape it then drew its mirror at, for a viewer looking at something else.
+     */
     if (!p.pid) {
       setTimeout(() => {
-        if (child === p && p.pid) send({ type: 'spawned', pid: p.pid, cols, rows });
+        if (child === p && p.pid) send({ type: 'spawned', pid: p.pid, cols: childSize.cols, rows: childSize.rows });
       }, 1000);
     }
   };
@@ -290,7 +326,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
           unpark();
           break;
         }
-        child.resize(msg.cols, msg.rows);
+        resizeChild(msg.cols, msg.rows);
         send({ type: 'resize', cols: msg.cols, rows: msg.rows });
         break;
       }
@@ -310,9 +346,9 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       case 'redraw': {
         // Nudge the TUI into a full repaint so the daemon's mirror catches up.
         const { cols, rows } = size();
-        child?.resize(Math.max(20, cols - 1), rows);
+        resizeChild(Math.max(20, cols - 1), rows);
         await sleep(80);
-        child?.resize(cols, rows);
+        resizeChild(cols, rows);
         break;
       }
       case 'stop':
