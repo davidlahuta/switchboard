@@ -219,9 +219,12 @@ into the grid goes through the browser's hidden input where autocorrect rewrites
 there is nowhere to read a prompt back before sending it.
 
 The browser view is always fitted to its own screen — there is no unfitted mode to choose, because
-a mirror of a TUI at someone else's dimensions is not useful. It carries no scrollback either: this
-is a frame the session repaints, so scrolling away from it shows history that is about to be
-overwritten and leaves a scrollbar that does nothing. The terminal is pinned to the bottom of its
+a mirror of a TUI at someone else's dimensions is not useful. It keeps no scrollback of its own:
+the session tracks the mouse, so xterm hands wheel events to it and the session scrolls its own
+view, which is what a reader wants and leaves no second scrollbar to get lost in. Touch is bridged
+to the same path — xterm's own touch scrolling bows out whenever a program tracks the mouse, so a
+vertical drag is turned into wheel events and, being consumed, no longer leaves iOS rubber-banding
+the page for want of anything to scroll. The terminal is pinned to the bottom of its
 box at a fixed height rather than stretched to it, so a phone's keyboard covers the top of the frame
 and leaves the prompt visible; re-fitting on the keyboard instead would resize the pseudo-terminal
 twice per message and reflow the whole session each time. **Hand back** returns the size to the

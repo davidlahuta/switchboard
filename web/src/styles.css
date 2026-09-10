@@ -99,6 +99,16 @@ body {
 body {
   overscroll-behavior-y: none;
 }
+/*
+ * While the terminal page is open. It is one fixed panel with nothing behind it that scrolls, and
+ * iOS rubber-bands the document for any drag that finds nothing to scroll — which is what made the
+ * whole page bounce. Regions that do scroll opt back in with touch-action below.
+ */
+body.term-open {
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+}
 a {
   color: var(--accent);
   text-decoration: none;
@@ -2246,8 +2256,9 @@ a.list-main:hover {
   right: 0;
   height: 100vh;
   height: 100dvh;
-  /* A double tap on the grid is a tap, not a zoom. */
-  touch-action: manipulation;
+  /* Nothing here pans the page: the grid turns drags into scrolling for the session itself, and
+     the two strips that do scroll say so. */
+  touch-action: none;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -2488,6 +2499,7 @@ a.list-main:hover {
   border-top: 1px solid var(--t-border);
 }
 .term-composer .input {
+  touch-action: pan-y;
   background: #0b0e13;
   border-color: #2b3440;
   color: #e6edf3;
@@ -2501,6 +2513,8 @@ a.list-main:hover {
   box-shadow: 0 0 0 3px rgba(77, 141, 255, 0.2);
 }
 .keybar {
+  /* The one thing on this page that pans, and only sideways. */
+  touch-action: pan-x;
   flex: none;
   display: flex;
   gap: 5px;

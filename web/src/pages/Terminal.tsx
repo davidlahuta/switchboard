@@ -214,13 +214,61 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data } satisfies TermClientFrame));
     });
     if (window.matchMedia('(pointer: fine)').matches) term.focus();
+
+    /**
+     * Drag to scroll, by turning the drag into the wheel events xterm already knows what to do
+     * with — which, while the session is tracking the mouse, means handing them to it so it
+     * scrolls its own view, exactly as a mouse wheel does on the desktop.
+     *
+     * xterm has touch scrolling of its own but gives up the moment a program tracks the mouse,
+     * which Claude Code's interface always does. The touch then reached Safari with nothing to
+     * scroll and it bounced the whole page instead. Taps are left alone so the session still
+     * receives them; only a deliberate vertical drag is taken, and taking it stops the bounce.
+     */
+    const screen = host.querySelector('.xterm-screen') ?? host;
+    let anchor = 0;
+    let travelled = 0;
+    let dragging = false;
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      anchor = e.touches[0].clientY;
+      travelled = 0;
+      dragging = false;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      const y = e.touches[0].clientY;
+      const step = anchor - y;
+      anchor = y;
+      travelled += Math.abs(step);
+      if (!dragging && travelled < 8) return;
+      dragging = true;
+      e.preventDefault();
+      e.stopPropagation();
+      screen.dispatchEvent(new WheelEvent('wheel', { deltaY: step, deltaMode: 0, bubbles: true, cancelable: true }));
+    };
+    host.addEventListener('touchstart', onTouchStart, { capture: true, passive: true });
+    host.addEventListener('touchmove', onTouchMove, { capture: true, passive: false });
+
     return () => {
+      host.removeEventListener('touchstart', onTouchStart, { capture: true });
+      host.removeEventListener('touchmove', onTouchMove, { capture: true });
       sub.dispose();
       term.dispose();
       termRef.current = null;
       fitAddonRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * iOS rubber-bands the document whenever a drag finds nothing to scroll, which on a page that is
+   * a single fixed panel is every drag that misses the terminal. Nothing here scrolls the
+   * document, so it is held still for as long as this page is open.
+   */
+  useEffect(() => {
+    document.body.classList.add('term-open');
+    return () => document.body.classList.remove('term-open');
   }, []);
 
   // ---- websocket with reconnect ----
