@@ -1210,6 +1210,9 @@ export class RunManager {
     // The process is where it was told to be, so nothing is owed on the next id it reports.
     if (r.resuming) this.db.run('UPDATE runs SET resuming = NULL WHERE id = ?', runId);
     if (decision === 'adopt') {
+      // Before the run moves on: the board has to retire the conversation this terminal used to
+      // hold and carry its channel across, and it can only do that while both ids are in hand.
+      this.coord.sessionReplaced(r.session_id, sessionId);
       this.db.run('UPDATE runs SET session_id = ?, resume = 1 WHERE id = ?', sessionId, runId);
       this.bus.invalidate('state');
     }

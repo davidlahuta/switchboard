@@ -42,12 +42,17 @@ export class AgentHub implements PushTarget {
       });
     });
     ws.on('close', () => {
-      if (!sessionId || this.conns.get(sessionId)?.ws !== ws) return;
-      this.conns.delete(sessionId);
-      // The shim is a child of claude, so this is usually the session ending. Usually is not always
-      // — a daemon restart closes every one of these — so the coordinator weighs it rather than
-      // acting on it. See Coordinator.shimClosed.
-      this.coord.shimClosed(sessionId);
+      // Found by socket rather than by the id this connection said hello with, because a session
+      // that cleared its conversation has since been re-keyed to a new one; see rekey.
+      for (const [id, conn] of this.conns) {
+        if (conn.ws !== ws) continue;
+        this.conns.delete(id);
+        // The shim is a child of claude, so this is usually the session ending. Usually is not
+        // always — a daemon restart closes every one of these — so the coordinator weighs it
+        // rather than acting on it. See Coordinator.shimClosed.
+        this.coord.shimClosed(id);
+        return;
+      }
     });
   }
 
@@ -99,5 +104,24 @@ export class AgentHub implements PushTarget {
   isConnected(agentId: string): boolean {
     const c = this.conns.get(agentId);
     return !!c && c.ws.readyState === c.ws.OPEN;
+  }
+
+  /**
+   * Move a live shim to the session id it now belongs to.
+   *
+   * The shim takes its session id from the environment when the process starts and repeats it on
+   * every reconnect, so a `/clear` — which starts a new conversation without restarting MCP
+   * servers — leaves the only channel into that terminal filed under a conversation that has ended.
+   * The socket is the same socket; only the name on it is out of date.
+   */
+  rekey(oldId: string, newId: string): boolean {
+    const conn = this.conns.get(oldId);
+    if (!conn || oldId === newId) return false;
+    this.conns.delete(oldId);
+    const previous = this.conns.get(newId);
+    if (previous && previous.ws !== conn.ws) previous.ws.close();
+    this.conns.set(newId, conn);
+    log.debug('shim re-keyed', { from: oldId, to: newId });
+    return true;
   }
 }

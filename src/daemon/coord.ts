@@ -106,6 +106,8 @@ interface ConflictRow {
 export interface PushTarget {
   push(agentId: string, content: string, meta: Record<string, string>): boolean;
   isConnected(agentId: string): boolean;
+  /** Follow a live connection to the session id it now belongs to. See sessionReplaced. */
+  rekey(oldId: string, newId: string): boolean;
 }
 
 interface BlockRow {
@@ -259,11 +261,13 @@ export class Coordinator {
 
   private readonly db: Db;
   private readonly bus: Bus;
-  private pushTarget: PushTarget = { push: () => false, isConnected: () => false };
+  private pushTarget: PushTarget = { push: () => false, isConnected: () => false, rekey: () => false };
   private readonly warned = new Map<string, number>();
   private readonly waiters = new Map<number, Array<(m: Message) => void>>();
   /** When each session's tools last went away, for the sweep. */
   private readonly shimGone = new Map<string, number>();
+  /** Sessions that are about to take over a terminal from another one; see sessionReplaced. */
+  private readonly replacing = new Map<string, { startedAt: string; readThrough: number }>();
   /** Whether a session Switchboard hosts has ended. Unhosted sessions answer false: not "alive". */
   private sessionGone: (sessionId: string) => boolean = () => false;
 
@@ -350,6 +354,10 @@ export class Coordinator {
     const repo = this.ensureRepo(info.root);
     const existing = this.agent(input.sessionId);
     const ts = now();
+    // Taking over a terminal rather than joining, if so: consumed either way, so a takeover that
+    // never arrives cannot be applied to some later session that happens to reuse the id.
+    const takeover = this.replacing.get(input.sessionId) ?? null;
+    this.replacing.delete(input.sessionId);
     if (existing) {
       const name = input.name ? this.uniqueName(repo.id, input.name, existing.id) : existing.name;
       this.db.run(
@@ -375,10 +383,13 @@ export class Coordinator {
       if (existing.status === 'offline') this.event(repo.id, existing.id, 'joined', `${name} is back`);
     } else {
       const name = this.uniqueName(repo.id, input.name || this.defaultName(info.branch, info.worktree, input.sessionId), input.sessionId);
+      // A takeover inherits when the seat was taken and how far through the repo's messages that
+      // seat had read, so nothing said to it while the previous conversation held it is either lost
+      // or read out a second time. See sessionReplaced.
       this.db.run(
         `INSERT INTO agents (id, repo_id, name, worktree, branch, cwd, pid, status, subscription_id, run_id, has_channel, started_at, last_seen, read_through_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?,
-           (SELECT COALESCE(MAX(id), 0) FROM messages WHERE repo_id = ?))`,
+           COALESCE(?, (SELECT COALESCE(MAX(id), 0) FROM messages WHERE repo_id = ?)))`,
         input.sessionId,
         repo.id,
         name,
@@ -389,8 +400,9 @@ export class Coordinator {
         input.subscriptionId ?? null,
         input.runId ?? null,
         input.hasChannel ? 1 : 0,
+        takeover?.startedAt ?? ts,
         ts,
-        ts,
+        takeover?.readThrough ?? null,
         repo.id,
       );
       this.event(repo.id, input.sessionId, 'joined', `${name} joined${info.branch ? ` on ${info.branch}` : ''}`);
@@ -473,6 +485,45 @@ export class Coordinator {
 
   setSubscription(id: string, subscriptionId: string): void {
     this.db.run('UPDATE agents SET subscription_id = ? WHERE id = ?', subscriptionId, id);
+  }
+
+  /**
+   * The session in a terminal became a different session: `/clear` starts a fresh conversation
+   * under a new id, and Claude Code neither ends the old one nor restarts its MCP servers.
+   *
+   * Left alone, that is two failures at once. The old agent stays on the board forever, because the
+   * shim is still announcing the id it was launched with and the liveness sweep believes a
+   * connected shim — so the ghost keeps the name, the intent nobody is working on any more, and the
+   * claims nobody will release. Meanwhile the session that is actually there is registered under an
+   * id the channel does not reach, so every question put to it fails to arrive and waits for its
+   * next hook instead of waking it.
+   *
+   * So the connection follows the session, what was asked of it and never shown follows too, and
+   * the conversation it used to be is retired — releasing its claims and, incidentally, freeing the
+   * name for whoever is in that terminal now.
+   */
+  sessionReplaced(oldId: string, newId: string): void {
+    if (oldId === newId) return;
+    const old = this.agent(oldId);
+    if (!old) return;
+    this.pushTarget.rekey(oldId, newId);
+    // Never shown to it, so it is not something the cleared conversation has already had its chance
+    // at: whoever asked is still waiting on whoever is in that terminal.
+    this.db.run(
+      `UPDATE messages SET to_id = ? WHERE to_id = ?
+         AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = messages.id AND d.agent_id = ?)`,
+      newId,
+      oldId,
+      oldId,
+    );
+    // A session is only offered messages from after it joined, so that a new one is not handed
+    // months of backlog. The conversation taking over this terminal is not new in that sense — it
+    // is the same seat in the same room — so it inherits when that seat was taken, and what was
+    // said to it while the previous conversation held it is still addressed to whoever is there.
+    this.replacing.set(newId, { startedAt: old.started_at, readThrough: old.read_through_id });
+    this.shimGone.delete(oldId);
+    this.markOffline(oldId, 'its conversation was cleared');
+    log.info('session replaced in the same terminal', { was: old.name, from: oldId, to: newId });
   }
 
   markOffline(id: string, why: string): void {

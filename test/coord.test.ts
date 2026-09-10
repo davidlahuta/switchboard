@@ -55,6 +55,11 @@ describe('coordinator', () => {
         return true;
       },
       isConnected: (id) => channelAgents.has(id),
+      rekey: (oldId, newId) => {
+        if (!channelAgents.delete(oldId)) return false;
+        channelAgents.add(newId);
+        return true;
+      },
     };
     coord.setPushTarget(target);
   });
@@ -227,7 +232,7 @@ describe('pushing agents to use the board', () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-nudge-'));
     db = new Db(':memory:');
     coord = new Coordinator(db, new Bus());
-    coord.setPushTarget({ push: () => false, isConnected: () => false });
+    coord.setPushTarget({ push: () => false, isConnected: () => false, rekey: () => false });
     repoId = (await coord.registerAgent({ sessionId: 'n1111111', cwd: dir, name: 'ann' })).repo_id;
     await coord.registerAgent({ sessionId: 'n2222222', cwd: dir, name: 'bob' });
   });
@@ -362,7 +367,7 @@ describe('a board that keeps itself honest', () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-honest-'));
     db = new Db(':memory:');
     coord = new Coordinator(db, new Bus());
-    coord.setPushTarget({ push: () => false, isConnected: () => false });
+    coord.setPushTarget({ push: () => false, isConnected: () => false, rekey: () => false });
     coord.setSessionGone((id) => ended.has(id));
     repoId = (await coord.registerAgent({ sessionId: 'h1111111', cwd: dir, name: 'hilda' })).repo_id;
     await coord.registerAgent({ sessionId: 'h2222222', cwd: dir, name: 'igor' });
@@ -496,5 +501,89 @@ describe('a board that keeps itself honest', () => {
     ended.add('h5555555');
     coord.sweep();
     assert.equal(coord.agent('h5555555')!.status, 'offline');
+  });
+});
+
+describe('a session that clears its conversation', () => {
+  let dir: string;
+  let db: Db;
+  let coord: Coordinator;
+  let repoId: string;
+  const connected = new Set<string>();
+  const pushed: string[] = [];
+
+  before(async () => {
+    dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sb-clear-')));
+    execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
+    db = new Db(':memory:');
+    coord = new Coordinator(db, new Bus());
+    coord.setPushTarget({
+      push: (id) => {
+        if (!connected.has(id)) return false;
+        pushed.push(id);
+        return true;
+      },
+      isConnected: (id) => connected.has(id),
+      rekey: (oldId, newId) => {
+        if (!connected.delete(oldId)) return false;
+        connected.add(newId);
+        return true;
+      },
+    });
+    repoId = (await coord.registerAgent({ sessionId: 'old11111', cwd: dir, name: 'mara', hasChannel: true })).repo_id;
+    connected.add('old11111');
+    await coord.registerAgent({ sessionId: 'peer2222', cwd: dir, name: 'nils' });
+  });
+
+  after(() => {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('retires the conversation it used to be, and frees what that was holding', async () => {
+    coord.setIntent('old11111', 'rewriting the importer', []);
+    coord.claim('old11111', ['src/import/**'], true, 'importer', 240);
+
+    coord.sessionReplaced('old11111', 'new33333');
+    await coord.registerAgent({ sessionId: 'new33333', cwd: dir, name: 'mara' });
+
+    assert.equal(coord.agent('old11111')!.status, 'offline', 'the conversation that ended is off the board');
+    assert.equal(
+      (await coord.preEdit('peer2222', path.join(dir, 'src', 'import', 'csv.ts'))).deny,
+      undefined,
+      'and it is not still holding a lock nobody can release',
+    );
+    assert.equal(coord.agent('new33333')!.name, 'mara', 'the terminal keeps its name rather than becoming mara-2');
+    assert.equal(coord.agent('new33333')!.intent, null, 'but not an intent it has no memory of');
+  });
+
+  it('carries the channel across, so questions still reach the terminal', () => {
+    assert.ok(!connected.has('old11111'));
+    assert.ok(connected.has('new33333'), 'the shim socket is the same socket, under the id that is now live');
+
+    pushed.length = 0;
+    coord.send('peer2222', repoId, 'mara', 'question', 'is the importer yours?');
+    assert.deepEqual(pushed, ['new33333'], 'pushed to the session that is actually there');
+  });
+
+  it('carries over what was asked of it and never shown', async () => {
+    // A question reaches a connected session at once, so that one has had its chance; an info
+    // waits for a hook, and the clear happens before one arrives.
+    const seen = coord.send('peer2222', repoId, 'mara', 'question', 'already delivered, already missed');
+    const unseen = coord.send('peer2222', repoId, 'mara', 'info', 'never shown to anyone');
+
+    coord.sessionReplaced('new33333', 'new44444');
+    await coord.registerAgent({ sessionId: 'new44444', cwd: dir, name: 'mara' });
+
+    const to = (id: number): string | null => coord.raw.get<{ to_id: string }>('SELECT to_id FROM messages WHERE id = ?', id)!.to_id;
+    assert.equal(to(unseen.id), 'new44444', 'a question nobody has answered follows the terminal');
+    assert.equal(to(seen.id), 'new33333', 'one the cleared conversation already had its chance at does not');
+    assert.match(coord.piggyback('new44444') ?? '', /never shown to anyone/);
+  });
+
+  it('does nothing when the id has not actually changed', () => {
+    const before = coord.agent('new44444')!.status;
+    coord.sessionReplaced('new44444', 'new44444');
+    assert.equal(coord.agent('new44444')!.status, before);
   });
 });

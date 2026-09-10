@@ -114,6 +114,19 @@ it keeps it and is told somebody is standing in front of it. A ring of agents ea
 next one's claim (`findWaitCycle`) never resolves on its own however patient everyone is, so it is
 opened as a `deadlock` conflict and broken at the claim whose holder has been quiet longest.
 
+**A terminal that changes conversation stays one seat on the board.** `/clear` starts a fresh
+conversation under a new session id, and Claude Code neither fires `SessionEnd` for the old one
+(that runs only on shutdown) nor restarts MCP servers — so the shim goes on announcing the id it was
+launched with. Left alone that is a ghost agent the liveness sweep will never retire, still holding
+the name, an intent nobody is working on and claims nobody will release, while the session actually
+in that terminal sits under an id the push channel cannot reach. `RunManager.rebind` holds both ids
+at the moment of the swap, so `Coordinator.sessionReplaced` re-keys the shim socket to the new id,
+carries across anything asked of it that it was never shown, and retires the old conversation —
+releasing its claims and freeing its name for the session now in that seat, which inherits when the
+seat was taken and how far it had read. (`/clear` also restores the session's working directory to
+the one it was launched in; that arrives as `CwdChanged` and on `SessionStart`, and is handled like
+any other move.)
+
 **A turn does not end owing the repo something.** The `Stop` hook is held once — and only once per
 agent per ten minutes — when the agent has read a question and not answered it, or holds an
 exclusive claim somebody is currently blocked on, or has push-worthy messages it has never been
