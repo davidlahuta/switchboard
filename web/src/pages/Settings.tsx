@@ -8,6 +8,7 @@ import type {
   Model,
   PairingCode,
   ServiceStatus,
+  Run,
   Settings,
   StateSnapshot,
   UpdateStatus,
@@ -35,6 +36,7 @@ export function SettingsPage({ state }: { state: StateSnapshot }) {
     <div className="page settings-page">
       <PageHead title="Settings" subtitle={`Switchboard v${state.daemon.version} · port ${state.daemon.port}`} />
       <SettingsForm settings={state.settings} update={state.update} models={state.models} />
+      <FleetSection runs={state.runs} />
       <IntegrationSection />
       {state.daemon.local ? (
         <>
@@ -537,6 +539,59 @@ function RepoLine({ repo }: { repo: DiscoveredRepo }) {
       </span>
       <span className="dim small discovered-branch">{repo.branch ?? '—'}</span>
     </div>
+  );
+}
+
+// ---------------- every session at once ----------------
+
+/**
+ * The fleet equivalents of the two things the per-session Restart menu does.
+ *
+ * Both are queued, not forced: a session mid-turn is taken the moment its turn ends, and one that
+ * is idle goes straight away. That is what makes these safe to press on a working desk — the reason
+ * to have them at all is that the alternative was opening nine menus, which is enough friction that
+ * a fleet on an old build stays on it.
+ */
+function FleetSection({ runs }: { runs: Run[] }) {
+  const [busy, setBusy] = useState<'restart' | 'relaunch' | null>(null);
+  const live = runs.filter((r) => r.status !== 'exited');
+  const queued = live.filter((r) => r.waiting).length;
+  const stale = live.filter((r) => r.staleRunner).length;
+
+  const all = async (kind: 'restart' | 'relaunch') => {
+    setBusy(kind);
+    const res = await api.post<{ queued: number }>('/api/runs/restart-all', { kind });
+    setBusy(null);
+    if (!res) return;
+    const what = kind === 'relaunch' ? 'move to a new terminal' : 'restart';
+    emitToast('info', res.queued > 0 ? `${plural(res.queued, 'session')} will ${what} as soon as it is idle` : 'No live sessions to take');
+  };
+
+  return (
+    <Section title="All sessions">
+      <p className="muted">
+        {live.length === 0
+          ? 'Nothing is running.'
+          : `${plural(live.length, 'live session')}${queued > 0 ? `, ${queued} already queued` : ''}${
+              stale > 0 ? `, ${stale} on an out-of-date host` : ''
+            }.`}
+      </p>
+      <div className="form-actions">
+        <button type="button" className="btn" disabled={busy !== null || live.length === 0} onClick={() => void all('restart')}>
+          <Icon name="refresh" size={16} />
+          <span>{busy === 'restart' ? 'Queueing…' : 'Restart claude in every session'}</span>
+        </button>
+        <button type="button" className="btn" disabled={busy !== null || live.length === 0} onClick={() => void all('relaunch')}>
+          <Icon name="terminal" size={16} />
+          <span>{busy === 'relaunch' ? 'Queueing…' : 'Give every session a new terminal'}</span>
+        </button>
+      </div>
+      <p className="muted small">
+        Neither interrupts anything: each session waits for its own turn to end. A restart resumes the same conversation on
+        the installed claude; a new terminal also reloads the Switchboard code hosting it, which a restart in place cannot —
+        though a session whose host is already out of date gets a new terminal either way.
+      </p>
+    </Section>
   );
 }
 

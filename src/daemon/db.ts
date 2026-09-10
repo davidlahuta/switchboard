@@ -248,6 +248,12 @@ const MIGRATIONS: string[] = [
   CREATE UNIQUE INDEX blocks_open ON blocks (waiter_id, claim_id);
   CREATE INDEX blocks_repo ON blocks (repo_id, cleared_at);
   `,
+  `
+  -- What set a swap going, as a word rather than as prose. The reason line beside it reads well and
+  -- parses badly, so the history could say "usage limit on Max 20x" without the UI being able to
+  -- tell an operator's click from a limit from an update. Rows written before this say nothing.
+  ALTER TABLE swaps ADD COLUMN trigger_kind TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

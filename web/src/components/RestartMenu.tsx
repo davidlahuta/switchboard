@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import type { RelaunchRequest, RestartRequest, Run, UpdateRunRequest } from '@shared/types.ts';
 import { api } from '../lib/api.ts';
+import { respawnToast, willWaitForTurn } from '../lib/respawn.ts';
 import { emitToast } from '../lib/toast.ts';
 import { Icon, Popover } from './ui.tsx';
 
 /**
  * Restart the session in place: same subscription, same session GUID, resumed. Used to pick up a
- * new claude version. Same "Force now" affordance as the swap menu, because a restart interrupts
- * the agent exactly the same way.
+ * new claude version.
+ *
+ * Neither item here refuses to act mid-turn. Both are queued behind the turn and taken the moment
+ * it ends, which is what an operator asking for a restart means by it; "Force now" is for when they
+ * mean the other thing. The labels say which of the two the click is about to do.
  */
 export function RestartMenu({
   run,
@@ -21,6 +25,9 @@ export function RestartMenu({
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
   const disabled = run.status === 'exited' || run.status === 'swapping' || busy;
+  // Says "now" or "when this turn ends" on the buttons themselves, because the difference is the
+  // whole question an operator is weighing when they open this menu mid-turn.
+  const queues = willWaitForTurn(run, force);
 
   const restart = async (close: () => void) => {
     close();
@@ -28,7 +35,7 @@ export function RestartMenu({
     const body: RestartRequest = { force: force || undefined };
     const res = await api.post<Run>(`/api/runs/${encodeURIComponent(run.id)}/restart`, body);
     setBusy(false);
-    if (res) emitToast('info', `Restarting ${res.name}`);
+    if (res) emitToast('info', respawnToast(res, 'Restarting', 'restarts'));
   };
 
   /**
@@ -46,7 +53,7 @@ export function RestartMenu({
     const body: RelaunchRequest = { force: force || undefined };
     const res = await api.post<Run>(`/api/runs/${encodeURIComponent(run.id)}/relaunch`, body);
     setBusy(false);
-    if (res) emitToast('info', `Relaunching ${res.name} in a new terminal`);
+    if (res) emitToast('info', respawnToast(res, 'Relaunching', 'moves to a new terminal'));
   };
 
   return (
@@ -72,7 +79,7 @@ export function RestartMenu({
           <button type="button" role="menuitem" className="menu-item" onClick={() => void restart(close)}>
             <Icon name="refresh" size={16} />
             <span className="menu-item-main">
-              <strong>Restart now</strong>
+              <strong>{queues ? 'Restart when the turn ends' : 'Restart now'}</strong>
               <span className="menu-sub">
                 stays on {run.subscriptionLabel}, resumes {run.sessionId.slice(0, 8)}
               </span>
@@ -83,7 +90,7 @@ export function RestartMenu({
           <button type="button" role="menuitem" className="menu-item" onClick={() => void relaunch(close)}>
             <Icon name="terminal" size={16} />
             <span className="menu-item-main">
-              <strong>Relaunch in a new terminal</strong>
+              <strong>{queues ? 'New terminal when the turn ends' : 'Relaunch in a new terminal'}</strong>
               <span className="menu-sub">{run.staleRunner ? 'this session is hosted by older Switchboard code' : 'picks up Switchboard updates'}</span>
             </span>
           </button>
@@ -95,6 +102,10 @@ export function RestartMenu({
             <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
             Force now (even mid-turn)
           </label>
+          <p className="menu-note">
+            Without this, a session that is mid-turn is queued and taken the moment the turn ends — nothing in flight is
+            lost. Forcing kills the turn where it stands.
+          </p>
           <div className="menu-heading">When it comes back</div>
           <label className="menu-check">
             <input type="checkbox" checked={run.continueOnResume} onChange={(e) => void setContinue(e.target.checked)} />

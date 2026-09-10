@@ -180,7 +180,7 @@ export class Updater {
       log.info('claude updated', { from: before, to: after });
       this.bus.toast('info', `Claude Code updated: ${before} → ${after}`);
       if (getSettings(this.db).restartAfterUpdate) {
-        const n = this.runs.restartAll(`claude ${after}`);
+        const n = this.runs.restartAll(`claude ${after}`, { trigger: 'update' });
         if (n > 0) this.bus.toast('info', `${n} session(s) will restart on ${after} once idle.`);
       }
     } else {

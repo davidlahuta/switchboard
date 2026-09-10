@@ -266,15 +266,15 @@ export function createServer(s: Services): http.Server {
     });
   });
   route('POST', '/api/runs/:id/swap', ({ params, body }) =>
-    s.runs.swap(params[0], typeof body.subscriptionId === 'string' ? body.subscriptionId : 'auto', 'manual switch', { force: body.force === true }),
+    s.runs.swap(params[0], typeof body.subscriptionId === 'string' ? body.subscriptionId : 'auto', 'you asked', { force: body.force === true, trigger: 'manual' }),
   );
-  route('POST', '/api/runs/:id/restart', ({ params, body }) => s.runs.restart(params[0], 'manual restart', body.force === true));
+  route('POST', '/api/runs/:id/restart', ({ params, body }) => s.runs.restart(params[0], 'you asked', body.force === true, 'manual'));
   route('PATCH', '/api/runs/:id', ({ params, body }) => {
     if (typeof body.continueOnResume === 'boolean') return s.runs.setContinueOnResume(params[0], body.continueOnResume);
     if (typeof body.name === 'string') return s.runs.rename(params[0], body.name);
     return fail(400, 'Nothing to change');
   });
-  route('POST', '/api/runs/:id/relaunch', ({ params, body }) => s.runs.relaunch(params[0], body.force === true));
+  route('POST', '/api/runs/:id/relaunch', ({ params, body }) => s.runs.relaunch(params[0], body.force === true, 'you asked', 'manual'));
   route('POST', '/api/runs/:id/handoff', ({ params }) => (s.runs.handoff(params[0]), { ok: true }));
   route('POST', '/api/runs/:id/stop', ({ params }) => (s.runs.stop(params[0]), { ok: true }));
   route('DELETE', '/api/runs/:id', ({ params }) => (s.runs.forget(params[0]), { ok: true }));
@@ -305,7 +305,22 @@ export function createServer(s: Services): http.Server {
   // claude version
   route('GET', '/api/update', () => s.updater.status());
   route('POST', '/api/update/check', () => s.updater.check(true));
-  route('POST', '/api/update/restart-sessions', () => ({ queued: s.runs.restartAll(`claude ${s.updater.currentVersion ?? 'latest'}`) }));
+  route('POST', '/api/update/restart-sessions', () => ({
+    queued: s.runs.restartAll(`claude ${s.updater.currentVersion ?? 'latest'}`, { trigger: 'update' }),
+  }));
+
+  /**
+   * Every session at once, from Settings. Each one is queued behind its own turn exactly as a
+   * single restart is, so this is safe to press while the fleet is working: nothing is interrupted,
+   * and the sessions that are idle go straight away.
+   */
+  route('POST', '/api/runs/restart-all', ({ body }) => ({
+    queued: s.runs.restartAll(body.kind === 'relaunch' ? 'you asked for a new terminal' : 'you asked', {
+      kind: body.kind === 'relaunch' ? 'relaunch' : 'restart',
+      trigger: 'manual',
+      force: body.force === true,
+    }),
+  }));
 
   // models
   route('GET', '/api/models', () => s.models.list());

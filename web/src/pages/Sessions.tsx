@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import type { Run, StateSnapshot } from '@shared/types.ts';
 import { byAttention } from '../components/AttentionDot.tsx';
 import { sessionMark } from '@shared/marks.ts';
+import { triggerLabel } from '@shared/respawn.ts';
 import { orderOf, useReorder } from '../lib/reorder.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { HandoffButton } from '../components/HandoffButton.tsx';
@@ -149,9 +150,14 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                     </td>
                     <td data-label="Swaps">
                       {r.swapCount > 0 ? (
-                        <span title={r.lastSwap ? absTime(r.lastSwap.ts) : undefined}>
+                        <span title={r.lastSwap ? `${absTime(r.lastSwap.ts)} — ${r.lastSwap.reason}` : undefined}>
                           {r.swapCount}
-                          {r.lastSwap && <span className="dim small"> · {r.lastSwap.reason} {timeAgo(r.lastSwap.ts, now)}</span>}
+                          {r.lastSwap && (
+                            <span className="dim small">
+                              {' '}
+                              · {r.lastSwap.trigger ? triggerLabel(r.lastSwap.trigger) : r.lastSwap.reason} {timeAgo(r.lastSwap.ts, now)}
+                            </span>
+                          )}
                         </span>
                       ) : (
                         <span className="dim">—</span>

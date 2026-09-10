@@ -209,10 +209,31 @@ export interface FileTouch {
 
 export type RunStatus = 'starting' | 'running' | 'swapping' | 'exited' | 'disconnected';
 
+/**
+ * A session going down and coming back up. Kind is what changes while it is down; trigger is who or
+ * what asked. They are separate on purpose: the same restart means one thing when an operator
+ * clicked it and another when an update queued it behind an hour-long turn.
+ */
+export type RespawnKind = 'swap' | 'restart' | 'relaunch';
+
+export type RespawnTrigger =
+  /** an operator asked for it, from the web or the API */
+  | 'manual'
+  /** a newer claude was installed */
+  | 'update'
+  /** the subscription it was on ran out */
+  | 'limit'
+  /** the subscription it was on crossed the threshold while it sat idle */
+  | 'proactive'
+  /** it had stopped on a limit and somewhere got its capacity back */
+  | 'rescue';
+
 export interface Swap {
   fromSubscriptionId: string | null;
   toSubscriptionId: string;
   reason: string;
+  /** what set it going; null on swaps recorded before Switchboard kept track */
+  trigger: RespawnTrigger | null;
   ts: string;
 }
 
@@ -453,7 +474,9 @@ export interface Attention {
 
 /** A respawn queued behind a turn that is still running. */
 export interface WaitingRespawn {
-  kind: 'swap' | 'restart';
+  kind: RespawnKind;
+  /** what set it going, so the UI can say so without parsing the reason */
+  trigger: RespawnTrigger;
   reason: string;
   /** ISO timestamp it was queued */
   since: string;
@@ -473,20 +496,20 @@ export interface UpdateRunRequest {
 }
 
 export interface RelaunchRequest {
-  /** relaunch even if the agent is mid-turn */
+  /** take the session now even if it is mid-turn; without it, the relaunch waits for the turn to end */
   force?: boolean;
 }
 
 export interface SwapRequest {
   /** subscription id or 'auto' */
   subscriptionId: string;
-  /** swap even if the agent is mid-turn */
+  /** take the session now even if it is mid-turn; without it, the swap waits for the turn to end */
   force?: boolean;
 }
 
 /** POST /api/runs/:id/restart — same subscription, resumes the same session GUID. */
 export interface RestartRequest {
-  /** restart even if the agent is mid-turn */
+  /** take the session now even if it is mid-turn; without it, the restart waits for the turn to end */
   force?: boolean;
 }
 

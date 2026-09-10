@@ -108,6 +108,9 @@ of Switchboard's own if you prefer (Settings → *Open sessions in the terminal 
 From there you can:
 
 - **Swap** it to another subscription at any time. If the agent is mid-turn, the swap waits for the turn to finish.
+  So do a restart and a relaunch: asking for one mid-turn queues it and takes the session the moment the turn ends,
+  rather than refusing or cutting the work off. *Force now* is there for when you mean the other thing. Whatever is
+  queued shows as a badge on the session saying what it is and what asked for it — you, a claude update, a usage limit.
   Where it lands is the subscription with the most room once the sessions already there are counted, so work
   spreads out rather than piling up, and a session is not moved for a margin too small to be worth the turn
   it costs — or moved back where it has just come from.
@@ -130,7 +133,9 @@ From there you can:
   while a browser is fitted to its own screen it owns that size, and the desktop window is parked
   rather than shown a frame drawn for other dimensions. The browser then follows the desktop
   terminal until you ask it to fit again.
-- **Relaunch** it in a new terminal. A restart in place reuses the window Switchboard opened, which
+- **Relaunch** it in a new terminal, or give every session one at once from Settings → *All sessions*, alongside
+  *Restart claude in every session*. Both are queued per session, so pressing either on a working desk interrupts
+  nothing. A restart in place reuses the window Switchboard opened, which
   hosts part of Switchboard itself, so it keeps running the code it started with; sessions in that
   state are badged *old host*. You rarely have to ask for it: a session badged that way gets a new
   terminal automatically the next time anything brings it back — a swap, a restart, an update —

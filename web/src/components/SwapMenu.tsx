@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Run, Subscription, SwapRequest } from '@shared/types.ts';
 import { api } from '../lib/api.ts';
 import { pctText, usableSubs, usageLevel } from '../lib/format.ts';
+import { respawnToast, willWaitForTurn } from '../lib/respawn.ts';
 import { emitToast } from '../lib/toast.ts';
 import { Icon, Popover } from './ui.tsx';
 
@@ -20,6 +21,8 @@ export function SwapMenu({
   const [busy, setBusy] = useState(false);
   const options = usableSubs(subs);
   const disabled = run.status === 'exited' || run.status === 'swapping' || busy;
+  // Mid-turn a swap is queued rather than refused, so say which one picking a subscription asks for.
+  const queues = willWaitForTurn(run, force);
 
   const swap = async (subscriptionId: string, close: () => void) => {
     close();
@@ -27,7 +30,7 @@ export function SwapMenu({
     const body: SwapRequest = { subscriptionId, force: force || undefined };
     const res = await api.post<Run>(`/api/runs/${encodeURIComponent(run.id)}/swap`, body);
     setBusy(false);
-    if (res) emitToast('info', `Swapping ${run.name} → ${res.subscriptionLabel || 'next subscription'}`);
+    if (res) emitToast('info', respawnToast(res, 'Swapping', `moves to another subscription`));
   };
 
   return (
@@ -49,7 +52,7 @@ export function SwapMenu({
     >
       {(close) => (
         <div className="swap-menu">
-          <div className="menu-heading">Swap to</div>
+          <div className="menu-heading">{queues ? 'Swap to, when the turn ends' : 'Swap to'}</div>
           <button type="button" role="menuitem" className="menu-item" onClick={() => void swap('auto', close)}>
             <Icon name="bolt" size={16} />
             <span className="menu-item-main">
@@ -87,6 +90,10 @@ export function SwapMenu({
             <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
             Force now (even mid-turn)
           </label>
+          <p className="menu-note">
+            Without this, a session that is mid-turn is queued and moved the moment the turn ends — nothing in flight is
+            lost. Forcing kills the turn where it stands.
+          </p>
         </div>
       )}
     </Popover>

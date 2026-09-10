@@ -311,6 +311,15 @@ for the same reason.
 Triggers: manual (UI), `StopFailure` hook with `rate_limit`, a limit message detected in the PTY
 output (fallback), or proactive (usage above threshold while idle).
 
+**Restart** and **relaunch** are the same machinery with a different thing changed while the session
+is down — the claude binary, or the terminal itself — so they queue the same way. A request that
+lands mid-turn is held rather than refused: the operator asked for a restart, not for a ruling on
+whether now is a good moment, and "not now, try again later" only means they come back and ask
+again. `force` is how they say they meant now. Whatever is queued is written to `runs.pending_respawn`
+so it survives a daemon restart, carries the `trigger` that asked for it — an operator, a claude
+update, a usage limit, the proactive threshold, a subscription coming back — and is reported with
+that trigger wherever it is shown. Settings → *All sessions* queues one across the fleet.
+
 **When it happens** matters more than it looks, because a swap kills whatever the turn had in
 flight, subagents included. Only a session positively known to be at a prompt is taken — not one
 that merely fails to look busy, since a turn can run for an hour without a hook and a session at a

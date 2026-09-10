@@ -6,7 +6,18 @@ import { DAEMON_URL, HOME_CLAUDE_DIR } from '../config.ts';
 import { logger } from '../log.ts';
 import { tabTitle } from '../shared/marks.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
-import type { AgentStatus, Attention, CreateRunRequest, Run, RunStatus, Subscription, Swap, TermClientFrame } from '../shared/types.ts';
+import type {
+  AgentStatus,
+  Attention,
+  CreateRunRequest,
+  RespawnKind,
+  RespawnTrigger,
+  Run,
+  RunStatus,
+  Subscription,
+  Swap,
+  TermClientFrame,
+} from '../shared/types.ts';
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, writeRuntimeJson } from './claude.ts';
 import type { Coordinator } from './coord.ts';
@@ -59,7 +70,9 @@ interface PendingRespawn {
   target: string;
   reason: string;
   continueAfter: boolean;
-  kind: 'swap' | 'restart';
+  kind: RespawnKind;
+  /** who asked, kept beside the reason so the UI can label it without reading English */
+  trigger: RespawnTrigger;
   queuedAt: number;
   /**
    * When to stop waiting for the turn to end and take the session anyway, or null to wait however
@@ -173,6 +186,19 @@ export function rescueDecision(input: { ownUsedPct: number; bestElsewherePct: nu
   if (input.ownUsedPct < input.threshold) return 'continue';
   if (input.bestElsewherePct !== null && input.bestElsewherePct < SPENT_PCT) return 'move';
   return 'wait';
+}
+
+/**
+ * Whether a session coming back comes back into the terminal it was in, or into a new one.
+ *
+ * A relaunch is the request for a new terminal, so it always gets one. The rest of the time it
+ * turns on the host: the process running the terminal holds the Switchboard code it started with,
+ * so respawning inside a stale one brings the session back on a new claude and an old everything
+ * else. That is true whoever asked — an operator, an update, a swap made on a usage limit — so the
+ * question is asked here, once, for all of them.
+ */
+export function respawnPlacement(input: { kind: RespawnKind; staleHost: boolean }): 'new-terminal' | 'in-place' {
+  return input.kind === 'relaunch' || input.staleHost ? 'new-terminal' : 'in-place';
 }
 
 export function safeToRespawn(status: AgentStatus | undefined): boolean {
@@ -324,11 +350,19 @@ export class RunManager {
   }
 
   private dto(r: RunRow): Run {
-    const swap = this.db.get<{ from_sub: string | null; to_sub: string; reason: string; ts: string }>(
-      'SELECT from_sub, to_sub, reason, ts FROM swaps WHERE run_id = ? ORDER BY id DESC LIMIT 1',
+    const swap = this.db.get<{ from_sub: string | null; to_sub: string; reason: string; trigger_kind: string | null; ts: string }>(
+      'SELECT from_sub, to_sub, reason, trigger_kind, ts FROM swaps WHERE run_id = ? ORDER BY id DESC LIMIT 1',
       r.id,
     );
-    const lastSwap: Swap | null = swap ? { fromSubscriptionId: swap.from_sub, toSubscriptionId: swap.to_sub, reason: swap.reason, ts: swap.ts } : null;
+    const lastSwap: Swap | null = swap
+      ? {
+          fromSubscriptionId: swap.from_sub,
+          toSubscriptionId: swap.to_sub,
+          reason: swap.reason,
+          trigger: (swap.trigger_kind as RespawnTrigger | null) ?? null,
+          ts: swap.ts,
+        }
+      : null;
     const waiting = this.pendingRespawn.get(r.id) ?? null;
     const status: RunStatus = waiting && r.status === 'running' ? 'swapping' : r.status;
     const agent = this.coord.agent(r.session_id);
@@ -358,6 +392,7 @@ export class RunManager {
       waiting: waiting
         ? {
             kind: waiting.kind,
+            trigger: waiting.trigger,
             reason: waiting.reason,
             since: new Date(waiting.queuedAt).toISOString(),
             deadline: waiting.deadline === null ? null : new Date(waiting.deadline).toISOString(),
@@ -485,7 +520,9 @@ export class RunManager {
       'SELECT id, pending_respawn FROM runs WHERE pending_respawn IS NOT NULL',
     )) {
       try {
-        this.pendingRespawn.set(r.id, JSON.parse(r.pending_respawn!) as PendingRespawn);
+        // A plan queued by an older build has no trigger; it was reachable from the UI, so say so.
+        const plan = JSON.parse(r.pending_respawn!) as PendingRespawn;
+        this.pendingRespawn.set(r.id, { ...plan, trigger: plan.trigger ?? 'manual' });
       } catch {
         this.savePending(r.id, null);
       }
@@ -965,26 +1002,51 @@ export class RunManager {
 
   // ----------------------------------------------------------------- swap
 
-  swap(runId: string, targetRef: string, reason: string, opts: { force?: boolean; continueAfter?: boolean; deadline?: number | null; atLimit?: boolean } = {}): Run {
+  swap(
+    runId: string,
+    targetRef: string,
+    reason: string,
+    opts: { force?: boolean; continueAfter?: boolean; deadline?: number | null; atLimit?: boolean; trigger?: RespawnTrigger } = {},
+  ): Run {
     const r = this.liveRun(runId);
     const target = this.resolveSubscription(targetRef, r.subscription_id, r.id, opts.atLimit ?? false);
     if (target === r.subscription_id) throw httpError(400, 'Session already runs on that subscription');
     return this.respawn(
       r,
-      { target, reason, continueAfter: opts.continueAfter ?? false, kind: 'swap', queuedAt: Date.now(), deadline: opts.deadline ?? null },
+      {
+        target,
+        reason,
+        continueAfter: opts.continueAfter ?? false,
+        kind: 'swap',
+        trigger: opts.trigger ?? 'manual',
+        queuedAt: Date.now(),
+        deadline: opts.deadline ?? null,
+      },
       opts.force ?? false,
     );
   }
 
   /** Restart a session on the same subscription, e.g. to pick up a new claude build. */
-  restart(runId: string, reason: string, force = false): Run {
+  restart(runId: string, reason: string, force = false, trigger: RespawnTrigger = 'manual'): Run {
     const r = this.liveRun(runId);
     // An update can always wait: no deadline, however long the turn runs.
-    return this.respawn(r, { target: r.subscription_id, reason, continueAfter: false, kind: 'restart', queuedAt: Date.now(), deadline: null }, force);
+    return this.respawn(
+      r,
+      { target: r.subscription_id, reason, continueAfter: false, kind: 'restart', trigger, queuedAt: Date.now(), deadline: null },
+      force,
+    );
   }
 
-  /** Queue every live session for a restart; each one waits until its turn finishes. */
-  restartAll(reason: string): number {
+  /**
+   * Queue every live session to come back; each one waits until its own turn finishes.
+   *
+   * `kind` is what they come back into: `restart` reuses the terminal, which is enough to pick up a
+   * new claude, and `relaunch` opens a fresh one, which is the only way to pick up new Switchboard
+   * code — though a session whose host is already out of date gets a new terminal either way.
+   */
+  restartAll(reason: string, opts: { kind?: RespawnKind; trigger?: RespawnTrigger; force?: boolean } = {}): number {
+    const kind = opts.kind ?? 'restart';
+    const trigger = opts.trigger ?? 'update';
     let queued = 0;
     for (const r of this.db.all<RunRow>(`SELECT * FROM runs WHERE status IN ('running', 'starting', 'swapping')`)) {
       if (!this.conns.has(r.id)) continue;
@@ -992,10 +1054,11 @@ export class RunManager {
       // queueing a restart behind that swap would only take the turn twice.
       if (this.pendingRespawn.has(r.id)) continue;
       try {
-        this.restart(r.id, reason);
+        if (kind === 'relaunch') this.relaunch(r.id, opts.force ?? false, reason, trigger);
+        else this.restart(r.id, reason, opts.force ?? false, trigger);
         queued++;
       } catch (err) {
-        log.warn('could not queue restart', { run: r.id, error: err instanceof Error ? err.message : err });
+        log.warn('could not queue respawn', { run: r.id, kind, error: err instanceof Error ? err.message : err });
       }
     }
     return queued;
@@ -1031,7 +1094,12 @@ export class RunManager {
     if (!force && this.busy(r)) {
       this.pendingRespawn.set(r.id, plan);
       this.savePending(r.id, plan);
-      const what = plan.kind === 'swap' ? `switch to ${this.subs.row(plan.target)?.label}` : `restart (${plan.reason})`;
+      const what =
+        plan.kind === 'swap'
+          ? `switch to ${this.subs.row(plan.target)?.label}`
+          : plan.kind === 'relaunch'
+            ? `open a new terminal (${plan.reason})`
+            : `restart (${plan.reason})`;
       const patience = plan.deadline ? ` (at the latest in ${Math.round((plan.deadline - Date.now()) / 60_000)} min)` : '';
       this.bus.toast('info', `${r.name}: will ${what} when the current turn ends${patience}`);
       this.bus.invalidate('state');
@@ -1052,7 +1120,15 @@ export class RunManager {
     if (kind === 'swap') {
       this.subs.syncProfile(target);
       this.subs.propagateTrust(from, target, r.last_cwd ?? r.cwd);
-      this.db.run('INSERT INTO swaps (run_id, from_sub, to_sub, reason, ts) VALUES (?, ?, ?, ?, ?)', r.id, from, target, reason, now());
+      this.db.run(
+        'INSERT INTO swaps (run_id, from_sub, to_sub, reason, trigger_kind, ts) VALUES (?, ?, ?, ?, ?, ?)',
+        r.id,
+        from,
+        target,
+        reason,
+        plan.trigger,
+        now(),
+      );
       this.db.run('UPDATE runs SET subscription_id = ?, swap_count = swap_count + 1, resume = 1 WHERE id = ?', target, r.id);
       this.coord.setSubscription(r.session_id, target);
       const fromLabel = this.subs.row(from)?.label ?? from;
@@ -1060,7 +1136,7 @@ export class RunManager {
       banner = `\x1b[1;36m[switchboard]\x1b[0m ${fromLabel} → \x1b[1m${toLabel}\x1b[0m (${reason}). Resuming session…\r\n`;
     } else {
       this.db.run('UPDATE runs SET resume = 1 WHERE id = ?', r.id);
-      banner = `\x1b[1;36m[switchboard]\x1b[0m Restarting on \x1b[1m${reason}\x1b[0m. Resuming session…\r\n`;
+      banner = `\x1b[1;36m[switchboard]\x1b[0m Restarting — \x1b[1m${reason}\x1b[0m. Resuming session…\r\n`;
     }
     this.setStatus(r.id, 'swapping');
     /*
@@ -1072,14 +1148,20 @@ export class RunManager {
      * that respawning inside it does not already cost, so a stale host is replaced here, whatever
      * brought the session back: a swap, a restart, an update.
      */
-    const staleHost = this.runnerStale(r.id);
+    const placement = respawnPlacement({ kind, staleHost: this.runnerStale(r.id) });
     if (continueAfter) this.armRespawnContinue(r, interrupted);
-    if (staleHost) {
+    if (placement === 'new-terminal') {
       try {
-        log.info('replacing an out-of-date terminal rather than respawning inside it', { run: r.id, kind, reason });
+        log.info(kind === 'relaunch' ? 'opening the new terminal that was asked for' : 'replacing an out-of-date terminal rather than respawning inside it', { run: r.id, kind, reason });
         this.relaunch(r.id, true);
-        if (r.repo_id) this.coord.event(r.repo_id, r.session_id, kind, `${r.name}: ${kind === 'swap' ? `moved to ${this.subs.row(target)?.label ?? target}` : 'restarted'} in a new terminal (${reason})`);
-        this.bus.toast('info', `${r.name}: ${kind === 'swap' ? 'moved' : 'restarted'} in a new terminal — its old one predated the current build (${reason})`);
+        const moved = kind === 'swap' ? `moved to ${this.subs.row(target)?.label ?? target}` : kind === 'relaunch' ? 'relaunched' : 'restarted';
+        if (r.repo_id) this.coord.event(r.repo_id, r.session_id, kind, `${r.name}: ${moved} in a new terminal (${reason})`);
+        this.bus.toast(
+          'info',
+          kind === 'relaunch'
+            ? `${r.name}: relaunched in a new terminal (${reason})`
+            : `${r.name}: ${moved} in a new terminal — its old one predated the current build (${reason})`,
+        );
         return;
       } catch (err) {
         // Its folder is gone, or there is nothing to relaunch: respawning in place still works.
@@ -1195,15 +1277,21 @@ export class RunManager {
    * there is no terminal left to reuse at all. Nothing is lost either way: the conversation is
    * addressed by GUID, and Claude Code resumes it.
    */
-  relaunch(runId: string, force = false): Run {
+  relaunch(runId: string, force = false, reason = 'new terminal', trigger: RespawnTrigger = 'manual'): Run {
     const r = this.row(runId);
     if (!r) throw httpError(404, 'Unknown run');
     if (!this.workDir(r)) {
       throw httpError(409, `${r.last_cwd ?? r.cwd} no longer exists. Start a session in another folder and resume ${r.session_id} there.`);
     }
-    const agent = this.coord.agent(r.session_id);
-    if (!force && r.status !== 'exited' && agent && agent.status === 'working') {
-      throw httpError(409, 'The agent is mid-turn. Wait for it to finish, or relaunch with force.');
+    // Mid-turn, this is queued rather than refused, exactly as a swap or a restart is: the operator
+    // asked for a new terminal, not for a decision about whether now is a good moment, and being
+    // told "not now" only leaves them to come back and ask again later.
+    if (!force && r.status === 'running' && this.busy(r)) {
+      return this.respawn(
+        r,
+        { target: r.subscription_id, reason, continueAfter: false, kind: 'relaunch', trigger, queuedAt: Date.now(), deadline: null },
+        false,
+      );
     }
     if (r.status === 'exited') {
       // It ended — on its own, or because the machine did. Clear that so it is a live run again.
@@ -1374,7 +1462,7 @@ export class RunManager {
       try {
         // Already stopped, so the threshold that keeps a running session from moving for a small
         // gain does not apply: anywhere with capacity left beats a subscription with none.
-        this.swap(r.id, 'auto', `usage limit on ${label}`, { ...limitSwapPlan(source), continueAfter: true, atLimit: true });
+        this.swap(r.id, 'auto', `usage limit on ${label}`, { ...limitSwapPlan(source), continueAfter: true, atLimit: true, trigger: 'limit' });
       } catch (err) {
         this.bus.toast('error', `${r.name} hit the limit on ${label} and cannot switch: ${err instanceof Error ? err.message : err}`);
       }
@@ -1420,7 +1508,7 @@ export class RunManager {
       this.lastRescue.set(r.id, Date.now());
       if (decision === 'move' && best) {
         try {
-          this.swap(r.id, best.row.id, `${own.label} is spent; ${best.row.label} has room`, { continueAfter: true, atLimit: true });
+          this.swap(r.id, best.row.id, `${own.label} is spent; ${best.row.label} has room`, { continueAfter: true, atLimit: true, trigger: 'rescue' });
         } catch (err) {
           log.warn('could not move a session that was waiting out a limit', { run: r.id, error: err instanceof Error ? err.message : err });
         }
@@ -1463,7 +1551,7 @@ export class RunManager {
       const staying = this.subs.scoreOf(r.subscription_id);
       if (best.score < staying * SWAP_MARGIN) continue;
       try {
-        this.swap(r.id, best.row.id, `${sub.label} at ${Math.round(used)}%`);
+        this.swap(r.id, best.row.id, `${sub.label} at ${Math.round(used)}%`, { trigger: 'proactive' });
       } catch {
         // nothing better available; stay put
       }
