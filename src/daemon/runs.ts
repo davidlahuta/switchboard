@@ -630,6 +630,8 @@ export class RunManager {
     const args: string[] = canResume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
     // Before the process exists, so it never reaches the trust dialog: the folder was chosen here.
     this.subs.trustFolder(subscriptionId, r.last_cwd ?? r.cwd);
+    // And so the channel this session is about to ask for resolves to something.
+    this.subs.ensureMcpRegistered(subscriptionId);
     /*
      * Always, rather than only when the user's own config lacks the server.
      *

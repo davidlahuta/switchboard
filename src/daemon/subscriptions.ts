@@ -8,7 +8,7 @@ import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, IS_WINDOWS, PROFILES_DIR, SPAWN_CWD,
 import { logger } from '../log.ts';
 import type { Subscription, SubscriptionKind, SubscriptionStatus, Usage, UsagePoint } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
-import { claudeCommand, findClaude, readJson, writeJson } from './claude.ts';
+import { claudeCommand, findClaude, mcpServerEntry, readJson, writeJson } from './claude.ts';
 import { bool, type Db, now } from './db.ts';
 import type { Launcher } from './launcher.ts';
 import { getSettings } from './settings.ts';
@@ -394,6 +394,34 @@ export class SubscriptionManager {
   }
 
   /** Refresh shared settings/config in a profile before launching a session on it. */
+  /**
+   * Make sure a profile knows where Switchboard's MCP server lives.
+   *
+   * Sessions are launched asking for a channel on "server:switchboard", and that name is looked up
+   * among the servers the profile has registered — passing the same definition on the command line
+   * with --mcp-config does not answer it. The registration reaches a profile through syncProfile,
+   * which declines to write while any session on that subscription is running rather than race a
+   * live claude rewriting the same file, so a subscription that is never idle never got it.
+   *
+   * This writes the one key, on its own, whatever else is going on. The race it accepts is losing
+   * that key again when a running claude next rewrites the file, which the next spawn puts back.
+   */
+  ensureMcpRegistered(id: string): void {
+    const r = this.row(id);
+    const dir = r?.kind === 'profile' ? r.config_dir : HOME_CLAUDE_DIR;
+    const file = path.join(dir, '.claude.json');
+    try {
+      const json = readJson<Record<string, unknown>>(file) ?? {};
+      const servers = (json.mcpServers ?? {}) as Record<string, unknown>;
+      if (servers.switchboard) return;
+      json.mcpServers = { ...servers, switchboard: mcpServerEntry() };
+      writeJson(file, json);
+      log.info('registered the MCP server in a profile that was missing it', { subscription: r?.label ?? id });
+    } catch (err) {
+      log.warn('could not register the MCP server in the profile', err instanceof Error ? err.message : err);
+    }
+  }
+
   syncProfile(id: string): void {
     const r = this.row(id);
     if (!r || r.kind !== 'profile') return;
