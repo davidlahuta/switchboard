@@ -308,7 +308,10 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
         <div className="setting">
           <div className="setting-text">
             <div className="setting-name">Proactive swap</div>
-            <div className="setting-desc">Swap idle sessions before they hit the limit, once their subscription crosses the threshold.</div>
+            <div className="setting-desc">
+              Swap idle sessions before they hit the limit, once their subscription crosses the threshold. A swap can only
+              happen between turns, so this is what keeps a long turn from being cut in half by one.
+            </div>
           </div>
           <Toggle checked={draft.proactiveSwap} onChange={(v) => set('proactiveSwap', v)} label="Proactive swap" />
         </div>
@@ -318,7 +321,10 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
             <span className="setting-name">
               Swap threshold <span className="mono">{draft.swapThresholdPct}%</span>
             </span>
-            <span className="setting-desc">5-hour utilisation at which proactive swapping kicks in.</span>
+            <span className="setting-desc">
+              Utilisation at which an idle session moves on. Lower it if your turns run long: whatever is left above it has
+              to carry a whole turn, or the swap ends up happening mid-turn instead.
+            </span>
           </span>
           <input
             type="range"

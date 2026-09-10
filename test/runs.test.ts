@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { rejectReservedArgs, titleDecision } from '../src/daemon/runs.ts';
+import { rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, weightFor } from '../src/daemon/subscriptions.ts';
 import type { Usage } from '../src/shared/types.ts';
@@ -18,6 +18,22 @@ const usage = (five: number | null, seven: number | null): Usage => ({
   error: null,
   errorKind: null,
   retryAt: null,
+});
+
+describe('when a session may be swapped', () => {
+  it('swaps only a session known to be at a prompt', () => {
+    assert.ok(safeToRespawn('idle'));
+    assert.ok(safeToRespawn('limited'), 'the turn is already lost to the limit; swapping is the fix');
+    assert.ok(safeToRespawn(undefined), 'no hooks ever ran, so nothing here can speak for it');
+  });
+
+  it('waits out anything that would cost a turn', () => {
+    assert.ok(!safeToRespawn('working'));
+    assert.ok(!safeToRespawn('waiting'), 'a permission prompt on screen goes with the process');
+    assert.ok(!safeToRespawn('starting'));
+    // An hour-long turn with no tool calls looks exactly like this once the sweep gives up on it.
+    assert.ok(!safeToRespawn('offline'));
+  });
 });
 
 describe('subscription headroom', () => {

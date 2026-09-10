@@ -10,8 +10,11 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultAutoCompactTokens: 700_000,
   defaultSkipPermissions: true,
   autoSwap: true,
-  proactiveSwap: false,
-  swapThresholdPct: 95,
+  // Waiting for the limit means the swap lands mid-turn, which is the one time it costs something.
+  // Moving an idle session while there is still headroom left spends a little of a subscription to
+  // buy the next turn room to run long; 85 leaves enough for a turn of an hour or so.
+  proactiveSwap: true,
+  swapThresholdPct: 85,
   continueMessage: 'continue',
   continueOnResume: true,
   // The usage endpoint is shared across all subscriptions and rate-limits aggressively; five

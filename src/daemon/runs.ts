@@ -5,7 +5,7 @@ import type { WebSocket } from 'ws';
 import { DAEMON_URL, HOME_CLAUDE_DIR } from '../config.ts';
 import { logger } from '../log.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
-import type { CreateRunRequest, Run, RunStatus, Subscription, Swap, TermClientFrame } from '../shared/types.ts';
+import type { AgentStatus, CreateRunRequest, Run, RunStatus, Subscription, Swap, TermClientFrame } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, writeRuntimeJson } from './claude.ts';
 import type { Coordinator } from './coord.ts';
@@ -71,6 +71,14 @@ const CONFIRM_FOOTER = /Enter\s*to\s*confirm/i;
 const CONTINUE_RETRY_MS = 4000;
 const CONTINUE_RETRIES = 15;
 const CONTINUE_FALLBACK_MS = 25_000;
+/**
+ * What a session is told when the swap could not wait for the end of its turn. "continue" on its
+ * own invites it to carry on from a plan whose later half never ran: the tools it called last may
+ * have finished, been killed halfway, or never started, and any subagents went down with the
+ * process. It has to look before it trusts the transcript.
+ */
+const INTERRUPTED_MESSAGE =
+  'Your previous turn was cut short mid-way by Switchboard moving this session to another subscription. Anything still running at that moment, subagents included, was killed with it. Check what actually landed on disk before you trust the last part of the transcript, then carry on.';
 const LIMIT_DEBOUNCE_MS = 90_000;
 
 const httpError = (status: number, message: string): Error => Object.assign(new Error(message), { status });
@@ -81,6 +89,22 @@ const httpError = (status: number, message: string): Error => Object.assign(new 
  * Claude generates from a first prompt) and Switchboard follows. Otherwise a name that has moved
  * away from the shadow is the operator's, and it goes the other way. Exported for tests.
  */
+/**
+ * Whether a session in this state can be killed and resumed without costing anything.
+ *
+ * The test is that it is positively known to be at a prompt, not that it fails to look busy. A turn
+ * can run for an hour — subagents, a long build — with no hook firing for any of it, so a session
+ * waiting at a permission prompt, one still starting, and one the liveness sweep gave up on after
+ * three hours of silence all read from here exactly like one that has finished. Killing any of the
+ * three costs a turn; waiting costs a swap that happens a few minutes later instead.
+ *
+ * A session with no agent record ran no hooks at all, so nothing here can speak for it: it swaps.
+ * 'limited' has already lost its turn to the subscription, which is what the swap is there to fix.
+ */
+export function safeToRespawn(status: AgentStatus | undefined): boolean {
+  return status === undefined || status === 'idle' || status === 'limited';
+}
+
 export function titleDecision(name: string, shadow: string | null, reported: string | null): { adopt?: string; push?: string } {
   const title = reported?.trim() || null;
   // Adopting a title that already matches the name is a no-op rename that records the shadow, so
@@ -717,9 +741,13 @@ export class RunManager {
     return r;
   }
 
+  private busy(r: RunRow): boolean {
+    return !safeToRespawn(this.coord.agent(r.session_id)?.status);
+  }
+
   /** Defer until the agent is idle unless forced, so a respawn never interrupts a turn. */
   private respawn(r: RunRow, plan: PendingRespawn, force: boolean): Run {
-    if (!force && this.coord.agent(r.session_id)?.status === 'working') {
+    if (!force && this.busy(r)) {
       this.pendingRespawn.set(r.id, plan);
       const what = plan.kind === 'swap' ? `switch to ${this.subs.row(plan.target)?.label}` : `restart (${plan.reason})`;
       this.bus.toast('info', `${r.name}: will ${what} when the current turn ends`);
@@ -732,6 +760,8 @@ export class RunManager {
 
   private executeRespawn(r: RunRow, plan: PendingRespawn): void {
     const { target, reason, continueAfter, kind } = plan;
+    // Read before the kill, because after it the session comes back with no memory of being cut off.
+    const interrupted = this.busy(r);
     this.pendingRespawn.delete(r.id);
     const from = r.subscription_id;
     let banner: string;
@@ -754,7 +784,7 @@ export class RunManager {
     this.mirrors.get(r.id)?.reset();
     this.send(r.id, { type: 'swap', spec, banner });
     if (continueAfter) {
-      const text = getSettings(this.db).continueMessage.trim();
+      const text = interrupted ? INTERRUPTED_MESSAGE : getSettings(this.db).continueMessage.trim();
       if (text) {
         const old = this.pendingContinue.get(r.id);
         if (old) clearTimeout(old.timer);
@@ -764,8 +794,8 @@ export class RunManager {
       }
     }
     const what = kind === 'swap' ? `switched to ${spec.subscriptionLabel}` : 'restarted';
-    if (r.repo_id) this.coord.event(r.repo_id, r.session_id, kind, `${r.name}: ${what} (${reason})`);
-    this.bus.toast('info', `${r.name}: ${what} (${reason})`);
+    if (r.repo_id) this.coord.event(r.repo_id, r.session_id, kind, `${r.name}: ${what} (${reason})${interrupted ? ', mid-turn' : ''}`);
+    this.bus.toast(interrupted ? 'warn' : 'info', `${r.name}: ${what} (${reason})${interrupted ? ' — mid-turn, its work in flight was lost' : ''}`);
     log.info(kind, { run: r.id, session: r.session_id, from, to: target, reason });
   }
 
