@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Run, StateSnapshot } from '@shared/types.ts';
+import { byAttention } from '../components/AttentionDot.tsx';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { HandoffButton } from '../components/HandoffButton.tsx';
 import { SessionName } from '../components/SessionName.tsx';
@@ -22,11 +23,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
   const [showExited, setShowExited] = useState(true);
   const [repoFilter, setRepoFilter] = useState('all');
 
-  // Live sessions first, then whichever was worked on most recently: with a dozen open at once the
-  // one being used has to be at the top, not the one that happened to be started last.
-  const runs = [...state.runs].sort(
-    (a, b) => Number(a.status === 'exited') - Number(b.status === 'exited') || b.lastActivity.localeCompare(a.lastActivity),
-  );
+  const runs = [...state.runs].sort(byAttention);
   const repoOf = (r: Run) => r.repoId ?? '';
   const usedRepos = state.repos.filter((repo) => runs.some((r) => r.repoId === repo.id));
   const hasLoose = runs.some((r) => !r.repoId);

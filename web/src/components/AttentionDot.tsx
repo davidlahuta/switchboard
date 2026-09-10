@@ -9,6 +9,32 @@ import type { Run } from '@shared/types.ts';
  * nothing. What earns one is the session being stopped on something only a person can clear, having
  * addressed the operator directly, or having finished something nobody has read yet.
  */
+/** Whether this session has a dot — the same test the dot itself makes. */
+export function wantsAttention(run: Run): boolean {
+  const { waiting, unread, unseen } = run.attention;
+  return waiting || unread > 0 || unseen;
+}
+
+/**
+ * One order for every list of sessions, so the overview and the sessions table cannot disagree
+ * about which session is at the top.
+ *
+ * What wants the operator comes first — that is what a dot is for, and a list that shows dots and
+ * then buries them below a dozen quiet rows has made the reader do the sorting. Then the most
+ * recently active, because with a dozen sessions open the one being worked on is the one being
+ * looked for; then by name, so a list of idle sessions holds still between refreshes rather than
+ * shuffling on every tick. Sessions that have exited stay at the bottom whatever they are asking
+ * for: they are history, and the live ones are the work.
+ */
+export function byAttention(a: Run, b: Run): number {
+  return (
+    Number(a.status === 'exited') - Number(b.status === 'exited') ||
+    Number(wantsAttention(b)) - Number(wantsAttention(a)) ||
+    b.lastActivity.localeCompare(a.lastActivity) ||
+    a.name.localeCompare(b.name)
+  );
+}
+
 export function AttentionDot({ run }: { run: Run }) {
   const { waiting, unread, unseen } = run.attention;
   if (!waiting && !unread && !unseen) return null;

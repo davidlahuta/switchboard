@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Run, StateSnapshot, Subscription } from '@shared/types.ts';
-import { AttentionDot } from '../components/AttentionDot.tsx';
+import { AttentionDot, byAttention } from '../components/AttentionDot.tsx';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { PageHead } from '../components/PageHead.tsx';
 import { RestartMenu } from '../components/RestartMenu.tsx';
@@ -15,7 +15,7 @@ export function Overview({ state }: { state: StateSnapshot }) {
   const now = useNow(1000);
   const [newOpen, setNewOpen] = useState(false);
   const { totals } = state;
-  const liveRuns = state.runs.filter((r) => r.status !== 'exited');
+  const liveRuns = state.runs.filter((r) => r.status !== 'exited').sort(byAttention);
   // Most immediately usable first: headroom already accounts for both windows and plan size.
   // Exhausted ones tie at zero, so break that by which frees up soonest — a spent 5-hour window
   // is back in hours, a spent weekly one in days.
