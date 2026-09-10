@@ -1,6 +1,8 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { Run, StateSnapshot } from '@shared/types.ts';
 import { byAttention } from '../components/AttentionDot.tsx';
+import { sessionMark } from '@shared/marks.ts';
+import { orderOf, useReorder } from '../lib/reorder.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { HandoffButton } from '../components/HandoffButton.tsx';
 import { SessionName } from '../components/SessionName.tsx';
@@ -30,6 +32,10 @@ export function Sessions({ state }: { state: StateSnapshot }) {
   const inRepo = repoFilter === 'all' ? runs : runs.filter((r) => repoOf(r) === repoFilter);
   const visible = showExited ? inRepo : inRepo.filter((r) => r.status !== 'exited');
   const exitedCount = inRepo.filter((r) => r.status === 'exited').length;
+  const markOf = (r: Run): string => sessionMark(r)?.glyph ?? '';
+  // Rows slide to their new places rather than jumping there; see lib/reorder.ts.
+  const body = useRef<HTMLTableSectionElement>(null);
+  useReorder(body, orderOf(visible.map((r) => ({ id: r.id, mark: markOf(r) }))));
 
   const stop = async () => {
     if (!stopping) return;
@@ -96,12 +102,12 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                 </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody ref={body}>
               {visible.map((r) => {
                 const repo = r.repoId ? state.repos.find((x) => x.id === r.repoId) : undefined;
                 const exited = r.status === 'exited';
                 return (
-                  <tr key={r.id} className={exited ? 'row-muted' : undefined}>
+                  <tr key={r.id} data-reorder-key={r.id} data-mark={markOf(r)} className={exited ? 'row-muted' : undefined}>
                     <td data-label="Session" className="cell-title">
                       <SessionName run={r} href={href.terminal(r.id)} dot />
                       {r.autoSwap && (
