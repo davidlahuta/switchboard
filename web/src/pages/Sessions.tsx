@@ -47,7 +47,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
         subtitle="Claude Code sessions hosted by Switchboard"
         actions={
           <>
-            {(usedRepos.length > 1 || (usedRepos.length === 1 && hasLoose)) && (
+            {runs.length > 0 && (
               <label className="check check-inline">
                 <span className="sr-only">Filter by repository</span>
                 <select className="input select-inline" value={repoFilter} onChange={(e) => setRepoFilter(e.target.value)} aria-label="Filter by repository">
@@ -112,8 +112,9 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                           auto
                         </span>
                       )}
-                      <span className="mono dim small" title={`session ${r.sessionId}`}>
-                        {r.sessionId.slice(0, 8)} · {exited && r.endedAt ? `ended ${timeAgo(r.endedAt, now)}` : `started ${timeAgo(r.createdAt, now)}`}
+                      <span className="mono dim small" title={`session ${r.sessionId}, started ${absTime(r.createdAt)}`}>
+                        {r.sessionId.slice(0, 8)} ·{' '}
+                        {exited && r.endedAt ? `ended ${timeAgo(r.endedAt, now)}` : `active ${timeAgo(r.lastActivity, now)}`}
                       </span>
                       <RunTags run={r} models={state.models} update={state.update} />
                       <RunArgs args={r.args} />

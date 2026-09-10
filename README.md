@@ -112,8 +112,8 @@ From there you can:
   hosts part of Switchboard itself, so it keeps running the code it started with; sessions in that
   state are badged *old host*. A relaunch resumes the same session GUID, so nothing is lost.
 
-The session list is ordered by activity, so whatever you are working on is at the top, and can be
-filtered to one repository when a dozen are open at once.
+The session list is ordered by activity — live sessions first, most recently active at the top —
+and can be filtered to one repository. Each row says when its session was last active.
 
 Each session can override the model (1M-context models only, listed live from the API rather than
 hardcoded; a later `/model` inside the session is picked up automatically), auto-compact and its

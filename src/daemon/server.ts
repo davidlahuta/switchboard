@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
@@ -26,6 +27,24 @@ import type { Updater } from './updater.ts';
 const log = logger('http');
 
 const STARTED_AT = new Date().toISOString();
+
+let webBuild: { at: number; value: string } | null = null;
+
+/**
+ * Fingerprint of the web build on disk. index.html names the hashed asset files, so its contents
+ * change whenever the UI is rebuilt — which an already-open tab has no other way to notice.
+ */
+function webBuildId(): string {
+  if (webBuild && Date.now() - webBuild.at < 10_000) return webBuild.value;
+  let value = 'none';
+  try {
+    value = crypto.createHash('sha1').update(fs.readFileSync(path.join(WEB_DIST, 'index.html'))).digest('hex').slice(0, 12);
+  } catch {
+    // no build on disk (dev server); the UI simply never sees it change
+  }
+  webBuild = { at: Date.now(), value };
+  return value;
+}
 
 export interface Services {
   db: Db;
@@ -121,6 +140,7 @@ export function createServer(s: Services): http.Server {
         wtAvailable: !!s.launcher.wtPath,
         integrationInstalled: integ.mcpInstalled && integ.hooksInstalled,
         startedAt: STARTED_AT,
+        webBuildId: webBuildId(),
         sourceChangedAt: sourceChanged ? new Date(sourceChanged).toISOString() : null,
         staleCode: sourceChanged > Date.parse(STARTED_AT),
         supervised: isSupervised(),

@@ -338,6 +338,11 @@ export interface DaemonInfo {
   staleCode: boolean;
   /** A supervisor (the logon task) will relaunch the daemon if it exits, so restarting is safe. */
   supervised: boolean;
+  /**
+   * Identifies the web build being served. A browser tab keeps the scripts it loaded for as long as
+   * it stays open, so this changing is how an open tab learns it is running an older UI.
+   */
+  webBuildId: string;
   /** true when the current request is local (no pairing needed) */
   local: boolean;
 }

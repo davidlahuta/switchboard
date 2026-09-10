@@ -6,6 +6,29 @@ import { timeAgo, useNow } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
 import { Icon, IconButton, Spinner } from './ui.tsx';
 
+/**
+ * The UI this tab is running was rebuilt since it loaded.
+ *
+ * A browser tab holds the scripts it fetched for as long as it stays open, so a rebuilt UI reaches
+ * it only on a reload. Without saying so, a change made and deployed looks like a change that did
+ * not work — which is the same trap as a stale daemon, one step further out.
+ */
+export function StaleWebBanner({ daemon }: { daemon: DaemonInfo }) {
+  const loaded = useRef(daemon.webBuildId);
+  if (daemon.webBuildId === 'none' || daemon.webBuildId === loaded.current) return null;
+  return (
+    <div className="stale-banner" role="status">
+      <Icon name="refresh" size={16} />
+      <span className="stale-text">
+        <strong>This page is running an older Switchboard UI.</strong> It was rebuilt after you opened this tab.
+      </span>
+      <button type="button" className="btn btn-sm" onClick={() => window.location.reload()}>
+        Reload
+      </button>
+    </div>
+  );
+}
+
 /** POST /api/service/restart — mirrored from the daemon route, not in shared/types.ts. */
 interface RestartDaemonResult {
   ok: boolean;
