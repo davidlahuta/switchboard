@@ -24,12 +24,21 @@ const cache = new Map<string, { info: RepoInfo; at: number }>();
  */
 const inflight = new Map<string, Promise<RepoInfo>>();
 
-async function git(dir: string, args: string[]): Promise<string | null> {
+/**
+ * Run git, distinguishing an answer from a failure to answer.
+ *
+ * git exits 128 for "this is not a repository", which is a fact about the directory and as good an
+ * answer as a path. Everything else — a timeout while the object store is being repacked, a locked
+ * index, git missing from PATH — says nothing about the directory at all, and treating the two alike
+ * is how a worktree ends up filed as a repository of its own.
+ */
+async function git(dir: string, args: string[]): Promise<{ out: string } | { failed: boolean }> {
   try {
     const { stdout } = await run('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 5000, windowsHide: true });
-    return stdout.trim();
-  } catch {
-    return null;
+    return { out: stdout.trim() };
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    return { failed: code !== 128 };
   }
 }
 
@@ -55,19 +64,28 @@ export async function resolveRepo(dir: string): Promise<RepoInfo> {
   if (running) return running;
 
   const pending = (async (): Promise<RepoInfo> => {
-    let info: RepoInfo = { root: path.resolve(dir), worktree: path.resolve(dir), branch: null, isGit: false };
-    const out = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel']);
-    if (out) {
-      const [common, top] = out.split(/\r?\n/);
-      const root = path.basename(common) === '.git' ? path.dirname(common) : common;
-      const branch = await git(dir, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-      info = {
-        root: path.resolve(root),
-        worktree: path.resolve(top ?? root),
-        branch: branch || null,
-        isGit: true,
-      };
+    const alone: RepoInfo = { root: path.resolve(dir), worktree: path.resolve(dir), branch: null, isGit: false };
+    const res = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel']);
+    if (!('out' in res)) {
+      /*
+       * git could not say. Answer for now with the directory standing alone, but remember nothing:
+       * caching this would keep a worktree separated from its repository for a full minute after git
+       * recovered, and an agent that registers inside that window is filed under a repository of its
+       * own — on its own board, invisible to the agents it shares a tree with.
+       */
+      if (res.failed) return alone;
+      cache.set(key, { info: alone, at: Date.now() });
+      return alone;
     }
+    const [common, top] = res.out.split(/\r?\n/);
+    const root = path.basename(common) === '.git' ? path.dirname(common) : common;
+    const branch = await git(dir, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+    const info: RepoInfo = {
+      root: path.resolve(root),
+      worktree: path.resolve(top ?? root),
+      branch: 'out' in branch ? branch.out || null : null,
+      isGit: true,
+    };
     cache.set(key, { info, at: Date.now() });
     return info;
   })().finally(() => inflight.delete(key));
