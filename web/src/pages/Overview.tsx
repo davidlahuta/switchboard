@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import type { Run, StateSnapshot, Subscription } from '@shared/types.ts';
 import { AttentionDot, byAttention } from '../components/AttentionDot.tsx';
+import { BurnPanel } from '../components/BurnPanel.tsx';
 import { sessionMark } from '@shared/marks.ts';
 import { orderOf, useReorder } from '../lib/reorder.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
@@ -64,6 +65,8 @@ export function Overview({ state }: { state: StateSnapshot }) {
           <span className="tile-sub">across {state.repos.filter((r) => r.agentsOnline > 0).length} repos</span>
         </div>
       </div>
+
+      <BurnPanel burn={state.burn} now={now} />
 
       <Section
         title="Subscriptions"

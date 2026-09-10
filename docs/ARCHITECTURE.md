@@ -320,6 +320,32 @@ so it survives a daemon restart, carries the `trigger` that asked for it — an 
 update, a usage limit, the proactive threshold, a subscription coming back — and is reported with
 that trigger wherever it is shown. Settings → *All sessions* queues one across the fleet.
 
+## Burn rate
+
+The subscription cards answer "where should the next session go". They do not answer the question
+that decides an afternoon — whether the desk is about to stop — because that one is about the pool:
+several sessions across several subscriptions spend one budget, and either it lasts until the
+windows turn over or it does not.
+
+`src/daemon/burn.ts` measures the rate from the usage samples already stored every five minutes,
+since nothing reports a rate. Each subscription's own percentage is differenced and scaled by its
+plan weight (percent does not add up across plans: a 20x at 50% and a Pro at 50% are not "50% of the
+desk"), and a **fall** is read as the window turning over rather than as usage being handed back, so
+only the climbs count. Under half an hour of samples is treated as no rate at all rather than as a
+confident one.
+
+The forecast is then walked forward rather than divided, because dividing headroom by rate answers a
+different question: capacity coming back at 16:40 is exactly what decides whether the desk stops.
+Each subscription carries its own reset, spending is drawn from whoever has the most left — the way
+a swap would actually place the sessions doing the spending — and the answer is the first moment
+there is nothing anywhere. Reaching the horizon with headroom left is reported as **never**: at this
+rate the windows hand capacity back faster than the desk can spend it, which is the common case and
+is worth saying out loud.
+
+Both windows are forecast separately and either one stops the desk, so the Overview headline is
+whichever arrives first. The whole thing is cached for thirty seconds — a snapshot is rendered far
+more often than usage moves.
+
 ## What a session still has running
 
 A session's status answers a narrower question than it looks like it does. `Stop` fires when the
