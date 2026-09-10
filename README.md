@@ -111,16 +111,30 @@ hooks and tools. Only hosted sessions receive real-time pushes, because channels
 
 ## Remote access (phone)
 
-The daemon only listens on `127.0.0.1`. To reach it from your phone, put it on your tailnet:
+The daemon listens on `127.0.0.1` only, so `http://localhost:4477` works on the desk and nowhere
+else — on your phone, `localhost` means the phone. Pick one of two ways to bridge it:
+
+**Tailscale serve (recommended).** On the desk:
 
 ```powershell
-tailscale serve --bg 4477
+tailscale serve --bg 4477          # tailnet only, no public exposure
 ```
 
-Then, on the desk: **Settings → Remote access → Pair a device**. Scan the QR code with your phone
-(or type the code on `https://<desk>.<tailnet>.ts.net`). Paired devices can be revoked at any time.
-Anything that doesn't come straight from the desk needs a paired device, including requests proxied
-by `tailscale serve`.
+This gives you `https://<machine>.<tailnet>.ts.net` with a real certificate. Your tailnet admin
+must have the Serve feature enabled; the CLI prints an approval link if it isn't.
+
+**Direct bind.** If you'd rather not use `serve`, listen on the tailnet interface as well:
+
+```powershell
+$env:SWITCHBOARD_BIND = "100.x.y.z"   # your Tailscale IP; loopback stays bound either way
+```
+
+Then reach it at `http://100.x.y.z:4477` (Windows Firewall must allow inbound on that port).
+
+Either way, finish on the desk with **Settings → Remote access → Pair a device** and scan the QR
+code with your phone. Only requests that come straight from the desk skip pairing; anything
+proxied or arriving on another interface must present a paired device, which you can revoke at any
+time.
 
 ## How agents use it
 
@@ -160,6 +174,7 @@ apphost.cs          Aspire AppHost for development
 | Variable                  | Default                           | Meaning                                   |
 |---------------------------|-----------------------------------|-------------------------------------------|
 | `SWITCHBOARD_PORT`        | `4477`                            | Daemon port                               |
+| `SWITCHBOARD_BIND`        | *(loopback only)*                 | Extra addresses to listen on, comma-separated |
 | `SWITCHBOARD_DATA_DIR`    | `%LOCALAPPDATA%\switchboard`      | Database, profiles, runtime files         |
 | `SWITCHBOARD_CLAUDE_PATH` | `claude` on `PATH`                | Claude Code executable                    |
 | `SWITCHBOARD_WT_WINDOW`   | `switchboard`                     | Windows Terminal window for hosted tabs   |

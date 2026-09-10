@@ -1,4 +1,5 @@
-import { BIND_HOST, DATA_DIR, PORT, VERSION, ensureDirs } from '../config.ts';
+import type { Server } from 'node:http';
+import { BIND_HOSTS, DATA_DIR, PORT, VERSION, ensureDirs } from '../config.ts';
 import { logger } from '../log.ts';
 import { AgentHub } from './agents.ts';
 import { Auth } from './auth.ts';
@@ -29,24 +30,31 @@ export async function startDaemon(): Promise<void> {
   subs.start();
   const sweep = setInterval(() => coord.sweep(), 60_000);
 
-  const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub });
-  server.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EADDRINUSE') log.error(`Port ${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
-    else log.error('server error', err);
-    process.exit(1);
-  });
-  server.listen(PORT, BIND_HOST, () => {
-    log.info(`Switchboard ${VERSION} listening on http://${BIND_HOST}:${PORT}`);
-    log.info(`data: ${DATA_DIR}`);
-    log.info(`claude: ${findClaude() ?? 'NOT FOUND on PATH'}; terminal: ${launcher.wtPath ?? 'fallback'}`);
-  });
+  // One server per bound address: loopback for the desk's own hooks/shims/runners, plus any
+  // extra address (a Tailscale IP, say) for direct remote access. They share all state.
+  const servers: Server[] = [];
+  for (const host of BIND_HOSTS) {
+    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub });
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') log.error(`${host}:${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
+      else if (err.code === 'EADDRNOTAVAIL') log.error(`Cannot bind ${host}: no interface has that address. Check SWITCHBOARD_BIND.`);
+      else log.error('server error', err);
+      process.exit(1);
+    });
+    server.listen(PORT, host, () => log.info(`Switchboard ${VERSION} listening on http://${host}:${PORT}`));
+    servers.push(server);
+  }
+  log.info(`data: ${DATA_DIR}`);
+  log.info(`claude: ${findClaude() ?? 'NOT FOUND on PATH'}; terminal: ${launcher.wtPath ?? 'fallback'}`);
 
   const shutdown = (): void => {
     log.info('shutting down');
     clearInterval(sweep);
     subs.stop();
-    server.close();
-    server.closeAllConnections();
+    for (const server of servers) {
+      server.close();
+      server.closeAllConnections();
+    }
     try {
       db.raw.close();
     } catch {

@@ -5,7 +5,19 @@ import path from 'node:path';
 export const VERSION = '0.1.0';
 
 export const PORT = Number(process.env.SWITCHBOARD_PORT ?? 4477);
-export const BIND_HOST = '127.0.0.1';
+/**
+ * Loopback is always bound: hooks, MCP shims and session runners all reach the daemon at
+ * 127.0.0.1. SWITCHBOARD_BIND adds further addresses (comma-separated), e.g. your Tailscale IP,
+ * for direct remote access without `tailscale serve`. Requests arriving that way are not treated
+ * as local, so they still need a paired device.
+ */
+export const BIND_HOSTS: string[] = [
+  '127.0.0.1',
+  ...(process.env.SWITCHBOARD_BIND ?? '')
+    .split(',')
+    .map((h) => h.trim())
+    .filter(Boolean),
+].filter((h, i, all) => all.indexOf(h) === i);
 export const DAEMON_URL = process.env.SWITCHBOARD_URL ?? `http://127.0.0.1:${PORT}`;
 export const DAEMON_WS = DAEMON_URL.replace(/^http/, 'ws');
 
