@@ -1,5 +1,5 @@
 import type { Model, Run, UpdateStatus } from '@shared/types.ts';
-import { kindLabel, triggerLabel } from '@shared/respawn.ts';
+import { kindLabel, triggerLabel, workSummary } from '@shared/respawn.ts';
 import { modelShort } from '../lib/format.ts';
 import { Badge } from './ui.tsx';
 
@@ -31,9 +31,22 @@ export function RunTags({
   const latest = update.currentVersion;
   const outdated = !!run.version && !!latest && run.version !== latest;
   const settings = !compact && (run.skipPermissions || run.continueOnResume || !!run.version);
-  if (!model && !settings && !run.staleRunner && !run.waiting) return null;
+  const work = workSummary(run.work);
+  if (!model && !settings && !run.staleRunner && !run.waiting && !work) return null;
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
+      {work && (
+        <Badge
+          tone="accent"
+          title={
+            `Still running: ${run.work.map((w) => `${w.kind}${w.label ? ` (${w.label})` : ''}`).join(', ')}. ` +
+            'A session reports itself idle when its own turn ends, so this is what it is still waiting on. ' +
+            'A restart or swap waits for subagents; background shells and monitors it does not wait for.'
+          }
+        >
+          {work}
+        </Badge>
+      )}
       {run.waiting && (
         <Badge
           tone="warn"

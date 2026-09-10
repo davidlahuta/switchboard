@@ -254,6 +254,26 @@ const MIGRATIONS: string[] = [
   -- tell an operator's click from a limit from an update. Rows written before this say nothing.
   ALTER TABLE swaps ADD COLUMN trigger_kind TEXT;
   `,
+  `
+  -- What a session has running besides its own turn: subagents, background shells, monitors.
+  --
+  -- The main thread going quiet is not the same as the session being done. Claude Code reports
+  -- subagents starting and stopping, and stamps every hook a subagent causes with its agent_id;
+  -- background shells and monitors announce themselves in the tool result that starts them. Held in
+  -- the database rather than in memory because a daemon restart in the middle of a twenty-minute
+  -- subagent must not forget it is there.
+  CREATE TABLE session_work (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    label TEXT,
+    started_at TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    ended_at TEXT,
+    end_reason TEXT
+  );
+  CREATE INDEX session_work_live ON session_work (session_id, ended_at);
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

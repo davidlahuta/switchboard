@@ -115,6 +115,12 @@ From there you can:
   spreads out rather than piling up, and a session is not moved for a margin too small to be worth the turn
   it costs — or moved back where it has just come from.
 - Open it in the browser and keep working.
+- Trust it to wait for **subagents**. A session says it is idle the moment its own turn ends, but a
+  subagent launched in the background keeps running — and spending — for minutes after that, so a
+  queued restart or swap waits for the subagents too, and the session lists say what it still has
+  open. Background shells and monitors are shown the same way but do not hold anything up: a dev
+  server would block a restart for ever, and re-running one costs nothing like a subagent's tokens.
+
 - Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default), or before it gets there
   (*Proactive swap*, on by default at 85%). Waiting for the limit means every swap lands mid-turn; whatever
   sits above the threshold has to carry one whole turn, so lower it if your turns run long. A session that

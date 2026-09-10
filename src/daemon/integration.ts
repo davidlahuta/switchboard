@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, SPAWN_CWD, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
 import type { IntegrationStatus } from '../shared/types.ts';
-import { claudeCommand, findClaude, hooksConfig, isSwitchboardHookUrl, mcpServerEntry, readJson, writeJson } from './claude.ts';
+import { claudeCommand, findClaude, HOOK_EVENTS, type HookEvent, hooksConfig, isSwitchboardHookUrl, mcpServerEntry, readJson, writeJson } from './claude.ts';
 
 const log = logger('integration');
 const run = promisify(execFile);
@@ -30,6 +30,34 @@ export function stripHooks(settings: SettingsFile): void {
 export function hooksInstalledIn(settingsFile: string): boolean {
   const s = readJson<SettingsFile>(settingsFile);
   return !!s?.hooks && Object.values(s.hooks).some((entries) => (entries ?? []).some(isOurs));
+}
+
+/**
+ * Hook events Switchboard needs that this settings file does not have.
+ *
+ * Installed once is not installed for ever: the set grows as Switchboard learns to watch something
+ * new, and a desk that installed the integration a month ago would otherwise keep reporting itself
+ * integrated while the daemon waited for events nobody had subscribed it to. Subagent tracking is
+ * exactly that case — without SubagentStart and SubagentStop a session looks idle while a subagent
+ * is still spending.
+ */
+export function missingHookEvents(settingsFile: string): HookEvent[] {
+  const s = readJson<SettingsFile>(settingsFile);
+  if (!s?.hooks) return [];
+  return HOOK_EVENTS.filter((event) => !(s.hooks?.[event] ?? []).some(isOurs));
+}
+
+/**
+ * Bring an existing installation up to the current set of hooks, if it is behind. Does nothing when
+ * the integration was never installed: that is the operator's choice to make, not a repair.
+ */
+export async function repairIntegration(): Promise<HookEvent[]> {
+  if (!hooksInstalledIn(SETTINGS)) return [];
+  const missing = missingHookEvents(SETTINGS);
+  if (!missing.length) return [];
+  await installIntegration();
+  log.info('added hooks this build needs', { events: missing });
+  return missing;
 }
 
 export function integrationStatus(): IntegrationStatus {

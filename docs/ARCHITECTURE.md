@@ -320,6 +320,54 @@ so it survives a daemon restart, carries the `trigger` that asked for it — an 
 update, a usage limit, the proactive threshold, a subscription coming back — and is reported with
 that trigger wherever it is shown. Settings → *All sessions* queues one across the fleet.
 
+## What a session still has running
+
+A session's status answers a narrower question than it looks like it does. `Stop` fires when the
+**main thread's** turn ends, and a subagent launched in the background outlives that turn — measured
+on 2.1.268, with a hook recorder in front of `claude -p`:
+
+```
+49623 SubagentStart  agent_id=aa23…
+49639 PostToolUse    Agent  (main)      ← the Agent tool returns immediately
+50871 Stop           (main)             ← the session now reports idle
+52556 PreToolUse     Bash   agent_id=aa23…
+93298 PostToolUse    Bash   agent_id=aa23…
+95181 SubagentStop   agent_id=aa23…     ← 44s after it looked finished
+```
+
+A subagent that calls no tools at all leaves 13 seconds of total hook silence in the same shape, and
+a real research subagent leaves minutes. Taking the session in that window kills the subagent
+mid-flight and throws away every token it has spent, which is the most expensive thing Switchboard
+can do by accident.
+
+Every hook payload carries **`agent_id`** — "present only when the hook fires from within a
+subagent" — so a subagent's own tool calls are told apart from the main thread's rather than, as
+before, being counted as the main thread working. That reading was accidental cover: it held only
+while the subagent kept calling tools.
+
+Three kinds of work are tracked in `session_work`, in the database so that a daemon restart during a
+twenty-minute subagent does not forget it:
+
+- **subagents** — authoritative, from `SubagentStart` / `SubagentStop`.
+- **background shells** — inferred, because nothing announces them: a `Bash` with
+  `run_in_background` returns `backgroundTaskId` in its tool result and fires no hook when it ends.
+- **monitors** — the same handle, from the `Monitor` tool.
+
+Ends are taken from `SubagentStop`, from a later `KillShell`/`TaskStop` naming the id, or from a
+`BashOutput`/`TaskOutput` whose result says the task is over. Anything else is caught by silence
+(half an hour for a subagent, six hours for a shell), and everything a session owns is ended
+wholesale when its process restarts, ends, or stops on a usage limit — a limit kills the subagents
+too, and waiting for them to announce an end that will never come would hold off the very swap that
+fixes it.
+
+**Only subagents hold a respawn.** `readyForRespawn` in `src/shared/respawn.ts` is the one rule, used
+by the daemon to decide and by the web to label the button, so the two cannot drift. A background
+shell does not hold anything: a dev server started this morning would block a restart for ever, and
+re-running it costs nothing like what a subagent costs. A respawn that comes due on its deadline
+gives way to a live subagent for up to twenty minutes; `SubagentStop` then takes the queued respawn
+after a few seconds' pause, which is long enough for the session to wake up and read the report the
+wait was for.
+
 **When it happens** matters more than it looks, because a swap kills whatever the turn had in
 flight, subagents included. Only a session positively known to be at a prompt is taken — not one
 that merely fails to look busy, since a turn can run for an hour without a hook and a session at a

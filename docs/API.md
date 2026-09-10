@@ -78,6 +78,10 @@ all three behave the same way about timing: a request that lands mid-turn is **q
 refused, and taken the moment the turn ends. `force` takes it now and loses whatever the turn had in
 flight. A queued respawn survives a daemon restart.
 
+`work` lists what the session still has running that its own turn does not cover — subagents,
+background shells, monitors — each with the id Claude Code gave it, a label, and when it started. A
+swap, restart or relaunch waits for subagents; shells and monitors are reported but not waited for.
+
 A `Run` carries two fields worth reading together. `waiting` is the swap, restart or relaunch queued
 behind a turn that has not finished — its `kind`, the `trigger` that asked for it (`manual`,
 `update`, `limit`, `proactive`, `rescue`), when it was queued, and whether anything eventually
