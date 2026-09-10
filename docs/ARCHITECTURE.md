@@ -185,8 +185,11 @@ console (the Windows Terminal tab). It always passes:
 
 **Name and model** are shared with Claude Code rather than mirrored. `SessionStart` and
 `UserPromptSubmit` report the session's title and can set it, so a rename in the web UI reaches the
-session on its next prompt and a `/rename` in the session reaches the UI the same way; a shadow copy
-of the last reported title is what says which side moved. The model is read back from the session
+session on its next prompt; a shadow copy of the last reported title is what says which side moved.
+The other direction cannot wait for a prompt — `/rename` is a local command, and someone who renames
+a session and then looks at the web UI types nothing at all — so the file Claude Code writes it to,
+`<config>/projects/<slug>/<session>/custom-title.json`, is polled for live sessions instead. The
+poll only ever adopts: pushing is the hook's job, and consuming a pending push here would lose it. The model is read back from the session
 transcript on `Stop`, because Claude Code names the model in `SessionStart` only and a mid-session
 `/model` would otherwise go unnoticed until the next restart.
 

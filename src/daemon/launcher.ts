@@ -11,6 +11,11 @@ export interface TerminalSpec {
   cwd: string;
   /** Arguments for the switchboard CLI (e.g. ['run', '--run-id', id]). */
   args: string[];
+  /**
+   * Windows Terminal window to open the tab in. '0' is the one you were last using, which is
+   * created if there is none; a name keeps Switchboard's tabs together in a window of their own.
+   */
+  window?: string;
 }
 
 function findOnPath(name: string): string | null {
@@ -32,8 +37,11 @@ function findOnPath(name: string): string | null {
 /** Opens new terminal windows/tabs running the switchboard CLI. */
 export class Launcher {
   readonly wtPath: string | null = IS_WINDOWS ? findOnPath('wt.exe') : null;
-  /** All Switchboard tabs go into one named Windows Terminal window. */
-  readonly windowName = process.env.SWITCHBOARD_WT_WINDOW ?? 'switchboard';
+  /**
+   * Windows Terminal window for session tabs when the caller does not name one. '0' means the
+   * window you were last using; Windows Terminal opens one if there is none.
+   */
+  readonly windowName = process.env.SWITCHBOARD_WT_WINDOW ?? '0';
 
   get available(): boolean {
     return IS_WINDOWS || process.platform === 'darwin';
@@ -47,7 +55,7 @@ export class Launcher {
       const esc = (s: string): string => s.replace(/;/g, '\\;');
       // Deliberately not --suppressApplicationTitle: the runner sets the title itself, so renaming
       // a session reaches its tab instead of leaving the name it was opened with.
-      const args = ['-w', this.windowName, 'new-tab', '--title', esc(spec.title), '-d', esc(cwd), esc(node), esc(CLI_PATH), ...spec.args.map(esc)];
+      const args = ['-w', spec.window ?? this.windowName, 'new-tab', '--title', esc(spec.title), '-d', esc(cwd), esc(node), esc(CLI_PATH), ...spec.args.map(esc)];
       log.info('opening Windows Terminal tab', { title: spec.title, cwd });
       spawn(this.wtPath, args, { detached: true, stdio: 'ignore' }).unref();
       return;

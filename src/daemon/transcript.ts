@@ -50,3 +50,25 @@ export function readSessionModel(file: string): string | null {
   }
   return null;
 }
+
+/**
+ * The name shown for a session inside Claude Code, if it has been renamed there.
+ *
+ * `/rename` writes this file immediately, which is the only live signal of it: the title also
+ * arrives on the SessionStart and UserPromptSubmit hooks, but those do not fire when someone
+ * renames a session and then looks at the web UI without typing anything.
+ */
+export function readCustomTitle(file: string): string | null {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  try {
+    const title = (JSON.parse(text) as { customTitle?: unknown }).customTitle;
+    return typeof title === 'string' && title.trim() ? title.trim() : null;
+  } catch {
+    return null;
+  }
+}

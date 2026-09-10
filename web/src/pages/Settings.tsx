@@ -230,6 +230,21 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
             label="Skip permission prompts by default"
           />
         </div>
+
+        <div className="setting">
+          <div className="setting-text">
+            <div className="setting-name">Open sessions in the terminal window I am using</div>
+            <div className="setting-desc">
+              A new session joins the Windows Terminal window you were last in, as another tab. Turn this off to keep
+              Switchboard's tabs together in a window of their own.
+            </div>
+          </div>
+          <Toggle
+            checked={draft.terminalWindow === 'current'}
+            onChange={(v) => set('terminalWindow', v ? 'current' : 'switchboard')}
+            label="Open sessions in the terminal window I am using"
+          />
+        </div>
       </Section>
 
       <Section title="Repositories">

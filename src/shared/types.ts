@@ -304,6 +304,12 @@ export interface Settings {
   claudeArgs: string[];
   /** Folders scanned for git repositories, so starting a session is a pick rather than a path */
   repoRoots: string[];
+  /**
+   * Where a new session's tab opens: 'current' joins the Windows Terminal window you were last
+   * using (opening one if there is none), 'switchboard' keeps them together in a window of their
+   * own. SWITCHBOARD_WT_WINDOW overrides both.
+   */
+  terminalWindow: 'current' | 'switchboard';
 }
 
 export interface Device {

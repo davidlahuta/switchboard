@@ -95,14 +95,16 @@ First tell Switchboard where your repositories live: **Settings → Repositories
 dialog becomes a pick-from-a-list rather than a path to type.
 
 **Sessions → New session**: pick a directory and a subscription (or *Auto*, which picks the one
-with the most headroom). A tab opens in a Windows Terminal window named `switchboard`. From there
-you can:
+with the most headroom). A tab opens in the Windows Terminal window you were last using, or in one
+of Switchboard's own if you prefer (Settings → *Open sessions in the terminal window I am using*).
+From there you can:
 
 - **Swap** it to another subscription at any time. If the agent is mid-turn, the swap waits for the turn to finish.
 - Open it in the browser and keep working.
 - Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default).
 - **Rename** it from the pencil next to its name, or with `/rename` inside the session — there is one
-  name, and whichever side you change it on the other follows. The same goes for `/model`.
+  name, and whichever side you change it on the other follows, tab title included. The same goes for
+  `/model`.
 - **Hand back** the terminal when you are done with it on the phone. A pseudo-terminal has one size:
   while a browser is fitted to its own screen it owns that size, and the desktop window is parked
   rather than shown a frame drawn for other dimensions.
@@ -240,7 +242,7 @@ apphost.cs          Aspire AppHost for development
 | `SWITCHBOARD_BIND`        | *(loopback only)*                 | Extra addresses to listen on, comma-separated |
 | `SWITCHBOARD_DATA_DIR`    | `%LOCALAPPDATA%\switchboard`      | Database, profiles, runtime files         |
 | `SWITCHBOARD_CLAUDE_PATH` | `claude` on `PATH`                | Claude Code executable                    |
-| `SWITCHBOARD_WT_WINDOW`   | `switchboard`                     | Windows Terminal window for hosted tabs   |
+| `SWITCHBOARD_WT_WINDOW`   | the window you are using          | Windows Terminal window for hosted tabs; overrides the setting |
 | `SWITCHBOARD_LOG_LEVEL`   | `info`                            | `debug` / `info` / `warn` / `error`       |
 
 Runtime settings (auto-swap, thresholds, continue message, repository folders, session defaults

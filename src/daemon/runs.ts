@@ -11,7 +11,7 @@ import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, wr
 import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
 import { newestSourceMtime } from './source.ts';
-import { readSessionModel } from './transcript.ts';
+import { readCustomTitle, readSessionModel } from './transcript.ts';
 import { hooksInstalledIn, integrationStatus } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import { TermMirror } from './mirror.ts';
@@ -212,6 +212,67 @@ export class RunManager {
 
   // ------------------------------------------------------------ session name
 
+  /** The Windows Terminal window a new session's tab should join. */
+  private terminalWindow(): string | undefined {
+    // An explicit SWITCHBOARD_WT_WINDOW is the operator's word on it, so the setting steps aside.
+    if (process.env.SWITCHBOARD_WT_WINDOW) return undefined;
+    return getSettings(this.db).terminalWindow === 'switchboard' ? 'switchboard' : '0';
+  }
+
+  /** Where Claude Code keeps this session's name, once found. */
+  private readonly titleFiles = new Map<string, string>();
+
+  private customTitlePath(r: RunRow): string | null {
+    const cached = this.titleFiles.get(r.id);
+    if (cached && fs.existsSync(cached)) return cached;
+    const roots = [this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR].filter((x): x is string => !!x);
+    const remember = (file: string): string => {
+      this.titleFiles.set(r.id, file);
+      return file;
+    };
+    for (const root of roots) {
+      for (const dir of new Set([r.last_cwd ?? r.cwd, r.cwd])) {
+        const file = path.join(root, 'projects', projectSlug(dir), r.session_id, 'custom-title.json');
+        if (fs.existsSync(file)) return remember(file);
+      }
+    }
+    // The session may have been started somewhere else entirely (a resumed GUID, a moved cwd).
+    for (const root of roots) {
+      let projects: string[];
+      try {
+        projects = fs.readdirSync(path.join(root, 'projects'));
+      } catch {
+        continue;
+      }
+      for (const slug of projects) {
+        const file = path.join(root, 'projects', slug, r.session_id, 'custom-title.json');
+        if (fs.existsSync(file)) return remember(file);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Pick up renames made inside a session with `/rename`.
+   *
+   * Only the adopt direction: a rename made here is carried into the session by a hook response,
+   * and this must not consume that. See titleDecision.
+   */
+  pollTitles(): void {
+    for (const r of this.db.all<RunRow>("SELECT * FROM runs WHERE status <> 'exited'")) {
+      const file = this.customTitlePath(r);
+      if (!file) continue;
+      const title = readCustomTitle(file);
+      // Adopting a title that already matches the name is a no-op rename that records the shadow.
+      if (!title || title === r.claude_title) continue;
+      this.db.run('UPDATE runs SET name = ?, claude_title = ? WHERE id = ?', title, title, r.id);
+      this.send(r.id, { type: 'title', text: title });
+      this.coord.renameAgent(r.session_id, title);
+      this.bus.invalidate('state');
+      log.info('session renamed in claude', { run: r.id, name: title });
+    }
+  }
+
   /**
    * Switchboard and Claude Code hold one name between them; see titleDecision. Returns the title to
    * push into the session, if any.
@@ -346,7 +407,7 @@ export class RunManager {
   create(req: CreateRunRequest): Run {
     if (!findClaude()) throw httpError(500, 'claude executable not found on PATH');
     const r = this.insertRun(req);
-    this.launcher.openTerminal({ title: r.name, cwd: r.cwd, args: ['run', '--run-id', r.id] });
+    this.launcher.openTerminal({ title: r.name, cwd: r.cwd, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
     log.info('run created', { id: r.id, name: r.name, subscription: r.subscription_id });
     return this.dto(r);
   }
@@ -673,7 +734,7 @@ export class RunManager {
   private openTerminalFor(r: RunRow): void {
     this.relaunching.delete(r.id);
     this.db.run('UPDATE runs SET resume = 1 WHERE id = ?', r.id);
-    this.launcher.openTerminal({ title: r.name, cwd: r.last_cwd ?? r.cwd, args: ['run', '--run-id', r.id] });
+    this.launcher.openTerminal({ title: r.name, cwd: r.last_cwd ?? r.cwd, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
   }
 
   /**

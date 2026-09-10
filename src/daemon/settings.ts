@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS: Settings = {
   conflictWindowMin: 60,
   claudeArgs: [],
   repoRoots: [],
+  terminalWindow: 'current',
 };
 
 export function getSettings(db: Db): Settings {
@@ -63,6 +64,8 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
       .map((r) => r.trim())
       .slice(0, 20);
   }
+
+  if (patch.terminalWindow === 'current' || patch.terminalWindow === 'switchboard') next.terminalWindow = patch.terminalWindow;
 
   db.tx(() => {
     for (const [key, value] of Object.entries(next)) {
