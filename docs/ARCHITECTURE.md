@@ -386,6 +386,12 @@ wholesale when its process restarts, ends, or stops on a usage limit — a limit
 too, and waiting for them to announce an end that will never come would hold off the very swap that
 fixes it.
 
+The marks read from the same data, so a tab and a list cannot disagree about what a session is
+doing: `◐` says its own turn has ended but its subagents have not, `◌` says it is idle while still
+holding a background shell or monitor. And "it has finished something you have not seen" is no
+longer decided by the main thread alone — a session whose subagents are still running has not
+finished anything yet, so it does not get a `✓` for going quiet.
+
 **Only subagents hold a respawn.** `readyForRespawn` in `src/shared/respawn.ts` is the one rule, used
 by the daemon to decide and by the web to label the button, so the two cannot drift. A background
 shell does not hold anything: a dev server started this morning would block a restart for ever, and

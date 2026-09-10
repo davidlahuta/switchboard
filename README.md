@@ -132,9 +132,11 @@ From there you can:
   name, and whichever side you change it on the other follows, tab title included. The same goes for
   `/model`. The tab carries the same mark the session lists draw, so a strip of terminals and the web
   read as one thing: `❗` stopped on a prompt only you can answer, `✉` it has said something to you,
-  `✓` finished something you have not looked at, `●` working, `⏳` waiting out a limit, and nothing
-  at all when it is idle and read. The lists sort the first three to the top — a session that is
-  merely working wants nothing from you and will finish on its own.
+  `✓` finished something you have not looked at, `●` working, `◐` working through subagents (its own
+  turn has ended, theirs has not), `◌` idle but still holding a background shell or monitor open,
+  `⏳` waiting out a limit, and nothing at all when it is idle and read. The lists sort the first
+  three to the top — a session that is merely working wants nothing from you and will finish on its
+  own.
 - **Hand back** the terminal when you are done with it on the phone. A pseudo-terminal has one size:
   while a browser is fitted to its own screen it owns that size, and the desktop window is parked
   rather than shown a frame drawn for other dimensions. The browser then follows the desktop

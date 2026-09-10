@@ -139,7 +139,10 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
           if (agentId) coord.workSeen(agentId);
           else coord.setStatus(sid, 'working', tool);
           const started = startedWork(tool, p.tool_response);
-          if (started) coord.workStarted(sid, { ...started, label: describeWork(p.tool_input) });
+          if (started) {
+            coord.workStarted(sid, { ...started, label: describeWork(p.tool_input) });
+            runs.onWorkChanged(sid);
+          }
           const about = taskIdOf(p.tool_input);
           if (about && tool && STOP_TOOLS.has(tool)) coord.workEnded(about, 'stopped by the session');
           else if (about && tool && OUTPUT_TOOLS.has(tool)) {
@@ -151,7 +154,10 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
         }
         case 'SubagentStart': {
           const type = typeof p.agent_type === 'string' ? p.agent_type : null;
-          if (agentId) coord.workStarted(sid, { id: agentId, kind: 'subagent', label: type });
+          if (agentId) {
+            coord.workStarted(sid, { id: agentId, kind: 'subagent', label: type });
+            runs.onWorkChanged(sid);
+          }
           return {};
         }
         case 'SubagentStop': {
