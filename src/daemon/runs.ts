@@ -10,6 +10,7 @@ import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, writeRuntimeJson } from './claude.ts';
 import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
+import { newestSourceMtime } from './source.ts';
 import { readSessionModel } from './transcript.ts';
 import { hooksInstalledIn, integrationStatus } from './integration.ts';
 import type { Launcher } from './launcher.ts';
@@ -161,6 +162,16 @@ export class RunManager {
     return this.db.get<{ n: number }>(sql, ...params)?.n ?? 0;
   }
 
+  /** When each attached runner process was started, for staleRunner. */
+  private readonly runnerStartedAt = new Map<string, number>();
+  /** Runs waiting for their terminal to close so a fresh one can be opened for them. */
+  private readonly relaunching = new Set<string>();
+
+  private runnerStale(runId: string): boolean {
+    const started = this.runnerStartedAt.get(runId);
+    return started !== undefined && newestSourceMtime() > started;
+  }
+
   private dto(r: RunRow): Run {
     const swap = this.db.get<{ from_sub: string | null; to_sub: string; reason: string; ts: string }>(
       'SELECT from_sub, to_sub, reason, ts FROM swaps WHERE run_id = ? ORDER BY id DESC LIMIT 1',
@@ -184,6 +195,7 @@ export class RunManager {
       lastSwap,
       args: parseArgs(r.extra_args),
       version: r.version,
+      staleRunner: this.runnerStale(r.id),
       model: r.model,
       autoCompact: r.auto_compact === null ? getSettings(this.db).defaultAutoCompact : bool(r.auto_compact),
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
@@ -444,6 +456,9 @@ export class RunManager {
     const previous = this.conns.get(r.id);
     if (previous && previous !== ws) previous.close();
     this.conns.set(r.id, ws);
+    // A runner that does not report its start time predates the field, which makes it stale by
+    // definition — the opposite of what treating it as new would say.
+    this.runnerStartedAt.set(r.id, msg.startedAt ? Date.parse(msg.startedAt) : 0);
     const mirror = this.mirror(r, msg.cols, msg.rows);
     if (msg.alive) {
       // Daemon restarted while the runner kept claude alive: just reattach and repaint.
@@ -483,6 +498,11 @@ export class RunManager {
         this.mirror(r).resize(msg.cols, msg.rows);
         break;
       case 'exit':
+        if (this.relaunching.has(runId)) {
+          // The terminal is closing so a fresh one can take over, resuming the same session.
+          this.openTerminalFor(r);
+          break;
+        }
         if (msg.intentional && r.status === 'swapping') break;
         this.db.run('UPDATE runs SET ended_at = ?, exit_code = ? WHERE id = ?', now(), msg.code, runId);
         this.setStatus(runId, 'exited');
@@ -644,6 +664,49 @@ export class RunManager {
     this.pendingContinue.delete(runId);
     const r = this.row(runId);
     this.bus.toast('warn', `${r?.name ?? runId}: resumed on the new subscription but never reached a prompt — check the terminal (it may be waiting on a dialog).`);
+  }
+
+  /**
+   * Open a new terminal for a run that already exists. The runner reconnects with this run's id,
+   * finds no live claude, and is told to resume the same session GUID.
+   */
+  private openTerminalFor(r: RunRow): void {
+    this.relaunching.delete(r.id);
+    this.db.run('UPDATE runs SET resume = 1 WHERE id = ?', r.id);
+    this.launcher.openTerminal({ title: r.name, cwd: r.last_cwd ?? r.cwd, args: ['run', '--run-id', r.id] });
+  }
+
+  /**
+   * Close this session's terminal and open a new one, resuming the same session GUID.
+   *
+   * Restarting in place reuses the process hosting the terminal, which is where half of
+   * Switchboard's own code lives; only a new terminal picks up a change to it. Nothing is lost:
+   * the conversation is addressed by GUID and resumed.
+   */
+  relaunch(runId: string, force = false): Run {
+    const r = this.liveRun(runId);
+    const agent = this.coord.agent(r.session_id);
+    if (!force && agent && agent.status === 'working') {
+      throw httpError(409, 'The agent is mid-turn. Wait for it to finish, or relaunch with force.');
+    }
+    if (!this.send(r.id, { type: 'stop' })) {
+      // Nothing attached, so there is no terminal to wait for.
+      this.openTerminalFor(r);
+      return this.dto(this.row(runId)!);
+    }
+    this.relaunching.add(r.id);
+    // If the runner never reports an exit (it was already gone), open one anyway.
+    setTimeout(() => {
+      if (!this.relaunching.has(r.id)) return;
+      const fresh = this.row(r.id);
+      if (fresh) this.openTerminalFor(fresh);
+    }, 8000);
+    return this.dto(this.row(runId)!);
+  }
+
+  /** Give the pseudo-terminal size back to the console the session runs in. */
+  handoff(runId: string): void {
+    if (!this.send(runId, { type: 'restore-size' })) throw httpError(409, 'This session has no terminal attached.');
   }
 
   stop(runId: string): void {

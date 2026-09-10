@@ -29,6 +29,9 @@ const ANSI_RE = /\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** This process's start time. The daemon compares it with the source to spot a stale runner. */
+const STARTED_AT = new Date().toISOString();
+
 /**
  * Hosts one Claude Code session in a pseudo-terminal inside the current console window, relays
  * all I/O, mirrors the screen to the daemon and restarts claude under another subscription when
@@ -239,7 +242,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       everConnected = true;
       backoff = 500;
       const { cols, rows } = size();
-      send({ type: 'hello', runId, manual: runId ? undefined : opts.manual, alive: !!child, pid: child?.pid ?? null, cols, rows });
+      send({ type: 'hello', runId, manual: runId ? undefined : opts.manual, alive: !!child, pid: child?.pid ?? null, cols, rows, startedAt: STARTED_AT });
     });
     socket.on('message', (raw) => {
       try {

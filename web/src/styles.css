@@ -2394,12 +2394,10 @@ a.list-main:hover {
 .term-scroller {
   flex: 1;
   min-height: 0;
-  /* xterm owns vertical scrolling in both modes — it is the one that knows where the scrollback
-     ends. A second vertical scrollbar here scrolled the grid itself, which just moved the TUI off
-     the screen. Unfitted, the terminal keeps the PTY's width, so this is how you reach the rest of
-     it sideways; that is all this box ever scrolls. */
-  overflow-x: auto;
-  overflow-y: hidden;
+  /* Unfitted, the terminal is laid out at the pseudo-terminal's own size, which is usually larger
+     than this box — this is how you reach the rest of it, the prompt at the bottom included. Fitted
+     it is the box, and the rule below turns this off so no gutter appears next to xterm's own. */
+  overflow: auto;
   position: relative;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
@@ -2429,11 +2427,6 @@ a.list-main:hover {
   display: inline-block;
   padding: 4px 6px;
   min-width: 100%;
-  /* Bounded by the scroller so xterm's own viewport does the vertical scrolling. Left to its
-     natural height the grid would overflow instead, and the outer box would scroll the whole
-     terminal out of view. */
-  height: 100%;
-  box-sizing: border-box;
 }
 .term-host.fit {
   display: block;

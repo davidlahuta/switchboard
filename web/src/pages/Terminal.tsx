@@ -5,6 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { RunStatus, StateSnapshot, TermClientFrame, TermServerFrame } from '@shared/types.ts';
 import { RestartMenu } from '../components/RestartMenu.tsx';
+import { HandoffButton } from '../components/HandoffButton.tsx';
 import { SessionName } from '../components/SessionName.tsx';
 import { RunTags } from '../components/RunTags.tsx';
 import { SwapMenu } from '../components/SwapMenu.tsx';
@@ -164,7 +165,14 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
    */
   const toggleFit = useCallback(() => {
     setFit((f) => {
-      if (f) sendFrame({ type: 'release-size' });
+      if (f) {
+        sendFrame({ type: 'release-size' });
+        // Unfitted the grid is taller than the box; land at the prompt, not at the top of it.
+        requestAnimationFrame(() => {
+          const sc = scrollerRef.current;
+          if (sc) sc.scrollTop = sc.scrollHeight;
+        });
+      }
       return !f;
     });
   }, [sendFrame]);
@@ -220,6 +228,18 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       const sc = scrollerRef.current;
       if (sc) sc.scrollTop = sc.scrollHeight;
     };
+    /**
+     * Unfitted, the grid is taller than this box and the prompt sits at its bottom, so the view has
+     * to follow it down — otherwise you are looking at the top of the screen with no way to see
+     * what you are typing. Only when the reader is already at the bottom: scrolling up to read
+     * something must not be undone by the next line of output.
+     */
+    const keepBottom = () => {
+      const sc = scrollerRef.current;
+      if (!sc || fitOnRef.current) return;
+      const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 48;
+      if (atBottom) requestAnimationFrame(scrollToBottom);
+    };
 
     const connect = () => {
       if (disposed) return;
@@ -248,11 +268,12 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             if (fitOnRef.current) requestAnimationFrame(requestFit);
             break;
           case 'data':
-            term.write(f.data);
+            term.write(f.data, keepBottom);
             break;
           case 'resize': {
             term.resize(f.cols, f.rows);
             setSize({ cols: f.cols, rows: f.rows });
+            keepBottom();
             const lr = lastRequested.current;
             if (fitOnRef.current && lr && lr.key !== `${f.cols}x${f.rows}` && Date.now() - lr.at > 1500) {
               fitOnRef.current = false;
@@ -483,6 +504,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
           >
             <Icon name="fit" />
           </button>
+          {run && <HandoffButton run={{ ...run, status: status ?? run.status }} compact />}
           {run && <SwapMenu run={{ ...run, status: status ?? run.status }} subs={state.subscriptions} compact />}
           {run && <RestartMenu run={{ ...run, status: status ?? run.status }} compact />}
         </div>

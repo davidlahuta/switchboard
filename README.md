@@ -103,6 +103,12 @@ you can:
 - Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default).
 - **Rename** it from the pencil next to its name, or with `/rename` inside the session — there is one
   name, and whichever side you change it on the other follows. The same goes for `/model`.
+- **Hand back** the terminal when you are done with it on the phone. A pseudo-terminal has one size:
+  while a browser is fitted to its own screen it owns that size, and the desktop window is parked
+  rather than shown a frame drawn for other dimensions.
+- **Relaunch** it in a new terminal. A restart in place reuses the window Switchboard opened, which
+  hosts part of Switchboard itself, so it keeps running the code it started with; sessions in that
+  state are badged *old host*. A relaunch resumes the same session GUID, so nothing is lost.
 
 The session list is ordered by activity, so whatever you are working on is at the top, and can be
 filtered to one repository when a dozen are open at once.

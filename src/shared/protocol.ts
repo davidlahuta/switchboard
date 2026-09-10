@@ -26,7 +26,7 @@ export interface ManualRunSpec {
 }
 
 export type RunnerToDaemon =
-  | { type: 'hello'; runId: string | null; manual?: ManualRunSpec; alive: boolean; pid: number | null; cols: number; rows: number }
+  | { type: 'hello'; runId: string | null; manual?: ManualRunSpec; alive: boolean; pid: number | null; cols: number; rows: number; startedAt?: string }
   | { type: 'spawned'; pid: number; cols: number; rows: number }
   | { type: 'data'; data: string }
   | { type: 'resize'; cols: number; rows: number }

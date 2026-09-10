@@ -226,6 +226,12 @@ export interface Run {
   skipPermissions: boolean;
   /** claude version this session is currently running on, when known */
   version: string | null;
+  /**
+   * The process hosting this session's terminal was started before the current Switchboard source
+   * was written, so it is running older code. Only a relaunch (a fresh terminal tab) picks the
+   * change up — restarting in place reuses the same host process.
+   */
+  staleRunner: boolean;
   pid: number | null;
   cols: number;
   rows: number;
@@ -394,6 +400,11 @@ export interface UpdateRunRequest {
    */
   name?: string;
   autoSwap?: boolean;
+}
+
+export interface RelaunchRequest {
+  /** relaunch even if the agent is mid-turn */
+  force?: boolean;
 }
 
 export interface SwapRequest {

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { Run, StateSnapshot } from '@shared/types.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
+import { HandoffButton } from '../components/HandoffButton.tsx';
 import { SessionName } from '../components/SessionName.tsx';
 import { PageHead } from '../components/PageHead.tsx';
 import { RestartMenu } from '../components/RestartMenu.tsx';
@@ -152,6 +153,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                           <Icon name="terminal" size={16} />
                           <span>Terminal</span>
                         </a>
+                        {!exited && <HandoffButton run={r} compact />}
                         {!exited && <SwapMenu run={r} subs={state.subscriptions} compact />}
                         {!exited && <RestartMenu run={r} compact />}
                         {!exited ? (

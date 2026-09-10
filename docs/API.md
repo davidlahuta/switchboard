@@ -65,7 +65,9 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | POST   | `/api/runs`              | `CreateRunRequest` – opens a Windows Terminal tab. Besides `cwd`/`subscriptionId` it takes `name`, `worktree`, `resumeSessionId` (a GUID), `autoSwap`, `model`, `autoCompact`, `autoCompactTokens` and `args` (extra `claude` arguments; ones Switchboard manages are refused with 400) | `Run` |
 | PATCH  | `/api/runs/:id`          | `UpdateRunRequest` – `{ name }` renames the session; Claude Code is renamed with it on its next hook | `Run` |
 | POST   | `/api/runs/:id/swap`     | `SwapRequest`      | `Run`   |
-| POST   | `/api/runs/:id/restart`  | `{ force? }` – same subscription, resumes the same session GUID | `Run` |
+| POST   | `/api/runs/:id/restart`  | `{ force? }` – same subscription, resumes the same session GUID, same terminal | `Run` |
+| POST   | `/api/runs/:id/relaunch` | `RelaunchRequest` – closes the terminal and opens a new one, resuming the same session GUID. The only way to pick up a change to Switchboard's own runner | `Run` |
+| POST   | `/api/runs/:id/handoff`  | give the terminal size back to the window the session runs in | `{ ok }` |
 | POST   | `/api/runs/:id/stop`     |                    | `{ ok }`|
 | DELETE | `/api/runs/:id`          | forget an exited run | `{ ok }` |
 | GET    | `/api/sessions/recent?cwd=` | recent Claude sessions for a directory (for "resume") | `{ id, title, mtime }[]` |

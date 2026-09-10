@@ -18,6 +18,7 @@ import type { Launcher } from './launcher.ts';
 import type { ModelCatalog } from './models.ts';
 import type { RunManager } from './runs.ts';
 import { installService, isSupervised, serviceStatus, startService, uninstallService } from './service.ts';
+import { newestSourceMtime } from './source.ts';
 import { getSettings, updateSettings } from './settings.ts';
 import type { SubscriptionManager } from './subscriptions.ts';
 import type { Updater } from './updater.ts';
@@ -25,39 +26,6 @@ import type { Updater } from './updater.ts';
 const log = logger('http');
 
 const STARTED_AT = new Date().toISOString();
-let srcMtime: { at: number; value: number } | null = null;
-
-/**
- * Newest mtime under src/. The daemon executes TypeScript directly and its supervisor only
- * relaunches it on exit, so an edit or a git pull leaves it serving old code until it restarts.
- * Reporting this lets the UI say so, instead of the change looking like a bug.
- */
-function newestSourceMtime(): number {
-  if (srcMtime && Date.now() - srcMtime.at < 10_000) return srcMtime.value;
-  let newest = 0;
-  const walk = (dir: string): void => {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (e.name.endsWith('.ts')) {
-        try {
-          newest = Math.max(newest, fs.statSync(full).mtimeMs);
-        } catch {
-          // vanished mid-scan
-        }
-      }
-    }
-  };
-  walk(path.join(PACKAGE_ROOT, 'src'));
-  srcMtime = { at: Date.now(), value: newest };
-  return newest;
-}
 
 export interface Services {
   db: Db;
@@ -281,6 +249,8 @@ export function createServer(s: Services): http.Server {
     if (typeof body.name === 'string') return s.runs.rename(params[0], body.name);
     return fail(400, 'Nothing to change');
   });
+  route('POST', '/api/runs/:id/relaunch', ({ params, body }) => s.runs.relaunch(params[0], body.force === true));
+  route('POST', '/api/runs/:id/handoff', ({ params }) => (s.runs.handoff(params[0]), { ok: true }));
   route('POST', '/api/runs/:id/stop', ({ params }) => (s.runs.stop(params[0]), { ok: true }));
   route('DELETE', '/api/runs/:id', ({ params }) => (s.runs.forget(params[0]), { ok: true }));
   route('GET', '/api/sessions/recent', ({ url }) => s.runs.recentSessions(url.searchParams.get('cwd') ?? fail(400, 'cwd is required')));
