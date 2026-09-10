@@ -210,8 +210,15 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       if (swapping) return;
       send({ type: 'exit', code: exitCode, intentional: stopping });
       out.write(RESET_TERMINAL);
-      if (!stopping) say(`claude exited (${exitCode}). Resume later with: claude --resume ${s.sessionId}`);
-      setTimeout(() => process.exit(exitCode ?? 0), 400);
+      if (!stopping) say(`claude exited (${exitCode}). Resume it from Switchboard, or here with: claude --resume ${s.sessionId}`);
+      /*
+       * Windows Terminal keeps a tab whose process exited non-zero (closeOnExit: automatic), which
+       * is what you want for a crash — the screen is the only account of it at the desk — and not
+       * what you want for a stop or a relaunch, where the tab was asked to go and killing claude
+       * returns non-zero anyway. So an exit that was asked for reports success, and only a session
+       * that fell over on its own leaves its tab behind.
+       */
+      setTimeout(() => process.exit(stopping ? 0 : (exitCode ?? 0)), 400);
     });
     out.write(setTitle(s.title));
     send({ type: 'spawned', pid: p.pid, cols, rows });
