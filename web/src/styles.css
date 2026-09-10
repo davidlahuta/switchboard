@@ -884,6 +884,37 @@ select.input {
   align-items: baseline;
   font-size: 12px;
 }
+.usage-binding {
+  color: var(--accent);
+  font-size: 9px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.rank-pip {
+  color: var(--accent);
+  margin-right: 5px;
+}
+
+.sub-headroom {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin: 2px 0 6px;
+}
+
+.sub-headroom-value {
+  font-size: 19px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.sub-headroom-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .usage-label {
   color: var(--text-2);
   font-weight: 550;

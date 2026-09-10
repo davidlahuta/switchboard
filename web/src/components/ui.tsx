@@ -125,18 +125,28 @@ export function UsageBar({
   window: w,
   now,
   compact,
+  binding,
 }: {
   label: string;
   window: UsageWindow | null | undefined;
   now: number;
   compact?: boolean;
+  /** Marks the window that currently caps what you can use. */
+  binding?: boolean;
 }) {
   const pct = w ? Math.max(0, Math.min(100, w.pct)) : 0;
   const level = usageLevel(w?.pct);
   return (
     <div className={compact ? 'usage usage-compact' : 'usage'}>
       <div className="usage-head">
-        <span className="usage-label">{label}</span>
+        <span className="usage-label">
+          {label}
+          {binding && (
+            <span className="usage-binding" title="This window is the limit right now">
+              ●
+            </span>
+          )}
+        </span>
         <span className={`usage-pct lvl-${level}`}>{pctText(w)}</span>
       </div>
       <div

@@ -13,7 +13,21 @@ export function Overview({ state }: { state: StateSnapshot }) {
   const [newOpen, setNewOpen] = useState(false);
   const { totals } = state;
   const liveRuns = state.runs.filter((r) => r.status !== 'exited');
-  const subs = [...state.subscriptions].sort((a, b) => a.priority - b.priority);
+  // Most immediately usable first: headroom already accounts for both windows and plan size.
+  // Exhausted ones tie at zero, so break that by which frees up soonest — a spent 5-hour window
+  // is back in hours, a spent weekly one in days.
+  const recoversAt = (s: Subscription): number => {
+    const w = s.bindingWindow === 'sevenDay' ? s.usage?.sevenDay : s.usage?.fiveHour;
+    return w?.resetsAt ? Date.parse(w.resetsAt) : Number.POSITIVE_INFINITY;
+  };
+  const subs = [...state.subscriptions].sort(
+    (a, b) =>
+      b.headroom - a.headroom ||
+      Number(b.enabled) - Number(a.enabled) ||
+      recoversAt(a) - recoversAt(b) ||
+      a.priority - b.priority ||
+      a.label.localeCompare(b.label),
+  );
 
   return (
     <div className="page">
@@ -58,8 +72,8 @@ export function Overview({ state }: { state: StateSnapshot }) {
           </Empty>
         ) : (
           <div className="sub-grid">
-            {subs.map((s) => (
-              <SubUsageCard key={s.id} sub={s} now={now} />
+            {subs.map((s, i) => (
+              <SubUsageCard key={s.id} sub={s} now={now} rank={i} />
             ))}
           </div>
         )}
@@ -160,13 +174,25 @@ function fmtUnits(n: number): string {
   return n >= 10 ? n.toFixed(0) : n.toFixed(1).replace(/\.0$/, '');
 }
 
-function SubUsageCard({ sub, now }: { sub: Subscription; now: number }) {
+function SubUsageCard({ sub, now, rank }: { sub: Subscription; now: number; rank: number }) {
   const u = sub.usage;
+  const usable = sub.enabled && sub.status === 'ready';
   return (
     <a className={sub.enabled ? 'card sub-card' : 'card sub-card disabled'} href={href.subscriptions()}>
       <div className="card-head">
-        <span className="card-title">{sub.label}</span>
+        <span className="card-title">
+          {rank === 0 && usable && sub.headroom > 0 && (
+            <span className="rank-pip" title="Most usage available right now">
+              ★
+            </span>
+          )}
+          {sub.label}
+        </span>
         <Badge tone="neutral">{planLabel(sub)}</Badge>
+      </div>
+      <div className="sub-headroom" title="Usable right now, weighted by plan size and capped by the tighter of the two windows">
+        <span className="sub-headroom-value">{usable ? fmtUnits(sub.headroom) : '—'}</span>
+        <span className="sub-headroom-label">of {fmtUnits(sub.weight)} units free</span>
       </div>
       <div className="card-meta">
         {sub.status !== 'ready' ? (
@@ -180,8 +206,8 @@ function SubUsageCard({ sub, now }: { sub: Subscription; now: number }) {
         ) : null}
         <span className="muted">{sub.liveRuns} live</span>
       </div>
-      <UsageBar label="5h" window={u?.fiveHour} now={now} />
-      <UsageBar label="7d" window={u?.sevenDay} now={now} />
+      <UsageBar label="5h" window={u?.fiveHour} now={now} binding={usable && sub.bindingWindow === 'fiveHour'} />
+      <UsageBar label="7d" window={u?.sevenDay} now={now} binding={usable && sub.bindingWindow === 'sevenDay'} />
     </a>
   );
 }

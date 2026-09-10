@@ -34,6 +34,14 @@ export interface Subscription {
   rateTier: string | null;
   /** Relative capacity (pro = 1, max 5x = 5, max 20x = 20) used for aggregate totals */
   weight: number;
+  /**
+   * How much you can actually use right now, in capacity units: `weight` scaled by whichever of
+   * the 5-hour and weekly windows is tighter. Sorting by this puts the subscription with the most
+   * immediately available usage first. 0 for anything disabled or not logged in.
+   */
+  headroom: number;
+  /** Which window is currently the binding constraint, or null while usage is unknown */
+  bindingWindow: 'fiveHour' | 'sevenDay' | null;
   enabled: boolean;
   priority: number;
   status: SubscriptionStatus;

@@ -75,6 +75,22 @@ interface Credentials {
 
 type OAuthWindow = { utilization?: number; resets_at?: string | null } | null | undefined;
 
+/** Utilisation assumed for a window that has not reported yet (no session has run on it). */
+const ASSUMED_PCT = 40;
+
+/**
+ * What is actually usable right now. Both windows gate every request, so the tighter one decides;
+ * scaling by plan weight makes a 20x Max at 80% outrank a Pro at 10%, which is what "most usage
+ * available" means in tokens rather than percent.
+ */
+export function headroomOf(usage: Usage | null, weight: number): { headroom: number; bindingWindow: 'fiveHour' | 'sevenDay' | null } {
+  const five = usage?.fiveHour?.pct ?? null;
+  const seven = usage?.sevenDay?.pct ?? null;
+  const used = Math.max(five ?? ASSUMED_PCT, seven ?? ASSUMED_PCT);
+  const bindingWindow = five === null && seven === null ? null : (five ?? ASSUMED_PCT) >= (seven ?? ASSUMED_PCT) ? 'fiveHour' : 'sevenDay';
+  return { headroom: Math.max(0, (100 - used) / 100) * weight, bindingWindow };
+}
+
 export function weightFor(plan: string | null, tier: string | null): number {
   const m = tier?.match(/(\d+)x/);
   if (m) return Number(m[1]);
@@ -141,6 +157,9 @@ export class SubscriptionManager {
     } catch {
       usage = null;
     }
+    const weight = weightFor(r.plan, r.rate_tier);
+    const usable = bool(r.enabled) && r.status === 'ready';
+    const { headroom, bindingWindow } = headroomOf(usage, weight);
     return {
       id: r.id,
       label: r.label,
@@ -150,7 +169,9 @@ export class SubscriptionManager {
       displayName: r.display_name,
       plan: r.plan,
       rateTier: r.rate_tier,
-      weight: weightFor(r.plan, r.rate_tier),
+      weight,
+      headroom: usable ? headroom : 0,
+      bindingWindow: usable ? bindingWindow : null,
       enabled: bool(r.enabled),
       priority: r.priority,
       status: r.status,
@@ -196,12 +217,13 @@ export class SubscriptionManager {
     const threshold = getSettings(this.db).swapThresholdPct;
     let best: { row: SubRow; score: number } | null = null;
     for (const r of this.rows()) {
-      if (r.id === excludeId || !bool(r.enabled) || r.status !== 'ready') continue;
-      const u = this.dto(r).usage;
-      const used = Math.max(u?.fiveHour?.pct ?? 40, u?.sevenDay?.pct ?? 40);
+      if (r.id === excludeId) continue;
+      const sub = this.dto(r);
+      if (!sub.enabled || sub.status !== 'ready') continue;
+      const used = Math.max(sub.usage?.fiveHour?.pct ?? ASSUMED_PCT, sub.usage?.sevenDay?.pct ?? ASSUMED_PCT);
       if (used >= Math.min(99, threshold)) continue;
-      const remaining = ((100 - used) / 100) * weightFor(r.plan, r.rate_tier);
-      const score = remaining / (1 + 0.5 * this.liveRunsFor(r.id)) + r.priority * 0.01;
+      // Same headroom the UI ranks by, discounted by sessions already running there.
+      const score = sub.headroom / (1 + 0.5 * this.liveRunsFor(r.id)) + r.priority * 0.01;
       if (!best || score > best.score) best = { row: r, score };
     }
     return best?.row ?? null;
