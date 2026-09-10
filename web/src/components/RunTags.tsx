@@ -31,7 +31,7 @@ export function RunTags({
       )}
       {run.skipPermissions && (
         <Badge tone="muted" title="Started with --dangerously-skip-permissions: tools run without asking for approval">
-          no prompts
+          skip tool permissions
         </Badge>
       )}
       {run.version && (

@@ -227,7 +227,11 @@ Target = the enabled, logged-in subscription with the most headroom, weighted by
 
 The runner streams PTY output to the daemon, which feeds a headless xterm per run
 (`@xterm/headless` + serialize addon). A browser attaching to `/ws/term/:runId` receives the
-serialized current screen and then live data, and can send input. It offers a key bar (Esc, Tab,
+serialized current screen and then live data, and can send input. Enter sends and Shift+Enter opens
+a new line, in the composer and in the grid alike — the grid gets `ESC CR` for the latter, the
+sequence Claude Code's own `/terminal-setup` installs, because a terminal otherwise sends a plain
+carriage return for both. Ctrl/Cmd+V is handed back to the browser rather than claimed by xterm,
+which would send `^V` to the session instead of pasting. It offers a key bar (Esc, Tab,
 ⇧Tab, arrows, Ctrl‑C, Enter) plus a text composer, which is the default way in: on a phone, typing
 into the grid goes through the browser's hidden input where autocorrect rewrites as it pleases, and
 there is nowhere to read a prompt back before sending it.

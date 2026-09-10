@@ -341,7 +341,7 @@ export function NewSessionDialog({
         <label className="check">
           <input type="checkbox" checked={skipPermissions} onChange={(e) => setSkipPermissions(e.target.checked)} />
           <span>
-            Skip permission prompts
+            Skip tool permissions
             <span className="field-hint">The session runs tools without asking you to approve each one.</span>
           </span>
         </label>

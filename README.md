@@ -42,7 +42,7 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
 - Subscriptions are ranked by what you can actually use **right now**: plan size scaled by whichever window is tighter, so the one to start on is always first.
 - One-click launch into a Windows Terminal tab, optionally in a fresh worktree or resuming an older session (including one started before Switchboard existed).
 - Point it at the folder your repos live in and pick from a list instead of typing paths; linked worktrees are shown under the repo they belong to.
-- Per session: model (1M-context models, listed from the API rather than hardcoded), auto-compact and its threshold, whether to skip permission prompts, and any extra `claude` arguments.
+- Per session: model (1M-context models, listed from the API rather than hardcoded), auto-compact and its threshold, whether to skip tool permissions, and any extra `claude` arguments.
 - **Hot swap**: `kill` + `claude --resume <same session>` under another subscription, in the same tab. It triggers:
   - manually,
   - automatically when a session hits a usage limit (then it types `continue` for you),
@@ -119,9 +119,9 @@ and can be filtered to one repository. Each row says when its session was last a
 
 Each session can override the model (1M-context models only, listed live from the API rather than
 hardcoded; a later `/model` inside the session is picked up automatically), auto-compact and its
-threshold, whether to skip permission prompts
+threshold, whether to skip tool permissions
 (`--dangerously-skip-permissions`, on by default — sessions running that way are badged
-*no prompts*), and pass extra `claude` arguments.
+*skip tool permissions*), and pass extra `claude` arguments.
 
 Switchboard refuses arguments it manages itself (`--session-id`, `--resume`, `--settings`, …) so a
 session stays resumable and coordinated, and refuses ones that have their own control

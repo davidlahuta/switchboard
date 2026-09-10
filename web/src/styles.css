@@ -2461,6 +2461,25 @@ a.list-main:hover {
   padding: 0;
   min-width: 0;
 }
+/*
+ * Let a finger select text in the grid.
+ *
+ * xterm turns selection off in CSS and does its own with mouse events, which a touch screen never
+ * sends — so on a phone there was no way to select anything at all. The rows are ordinary DOM here
+ * (no canvas renderer), so handing selection back to the browser gives the long-press, the handles
+ * and the copy callout for free. Only where there is no mouse: a pointer keeps xterm's own.
+ */
+@media (pointer: coarse) {
+  .term-host .xterm .xterm-rows,
+  .term-host .xterm .xterm-rows * {
+    user-select: text;
+    -webkit-user-select: text;
+    -webkit-touch-callout: default;
+  }
+  .term-host .xterm-screen {
+    touch-action: auto;
+  }
+}
 .term-host.fit .xterm-viewport {
   /* No scrollback in this view, so there is nothing to scroll; say so rather than leaving an inert
      scrollbar that detaches the reader from the frame the session is repainting. */

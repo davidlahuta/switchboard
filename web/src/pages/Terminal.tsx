@@ -214,6 +214,25 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data } satisfies TermClientFrame));
     });
+
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown') return true;
+      const ws = wsRef.current;
+      // Shift+Enter is a new line, not a submit. A terminal sends a plain carriage return for it
+      // unless told otherwise; this is the sequence Claude Code's own /terminal-setup installs.
+      if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'input', data: '\x1b\r' } satisfies TermClientFrame));
+        }
+        return false;
+      }
+      // Hand Ctrl/Cmd+V back to the browser. xterm would otherwise claim it and send ^V to the
+      // session, which is not a paste anywhere; letting the paste event through reaches xterm's
+      // own paste handler, brackets included.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'v') return false;
+      return true;
+    });
     if (window.matchMedia('(pointer: fine)').matches) term.focus();
 
     /**
@@ -243,6 +262,8 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       anchor = y;
       travelled += Math.abs(step);
       if (!dragging && travelled < 8) return;
+      // A drag that is moving selection handles belongs to the selection, not to scrolling.
+      if (!window.getSelection()?.isCollapsed) return;
       dragging = true;
       e.preventDefault();
       e.stopPropagation();
@@ -518,8 +539,16 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     composerRef.current?.focus();
   };
 
+  /**
+   * Enter sends where there is a keyboard to hold Shift with; on a phone the return key is the only
+   * way to get a new line, and the Send button is an inch away.
+   */
+  const enterSends = useRef(window.matchMedia('(pointer: fine)').matches);
+
   const onComposerKey = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    if (e.key !== 'Enter' || e.altKey) return;
+    if (e.shiftKey) return; // a new line, in every case
+    if (e.ctrlKey || e.metaKey || enterSends.current) {
       e.preventDefault();
       submitComposer();
     }
@@ -657,7 +686,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             onKeyDown={onComposerKey}
             onFocus={() => setTyping('composer')}
             onBlur={() => setTyping((t) => (t === 'composer' ? null : t))}
-            placeholder="Type a prompt… (Ctrl+Enter sends)"
+            placeholder={enterSends.current ? 'Type a prompt… (Enter sends, Shift+Enter for a new line)' : 'Type a prompt… (Ctrl+Enter sends)'}
             aria-label="Prompt composer"
             autoCapitalize="sentences"
             disabled={exited}

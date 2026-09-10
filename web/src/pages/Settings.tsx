@@ -221,13 +221,13 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
 
         <div className="setting">
           <div className="setting-text">
-            <div className="setting-name">Skip permission prompts by default</div>
+            <div className="setting-name">Skip tool permissions by default</div>
             <div className="setting-desc">New sessions run tools without asking you to approve each one.</div>
           </div>
           <Toggle
             checked={draft.defaultSkipPermissions}
             onChange={(v) => set('defaultSkipPermissions', v)}
-            label="Skip permission prompts by default"
+            label="Skip tool permissions by default"
           />
         </div>
 
