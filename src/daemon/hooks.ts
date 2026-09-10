@@ -25,7 +25,7 @@ function titleSync(runs: RunManager, sid: string, p: Payload): Record<string, un
 
 /** Claude Code HTTP hook endpoint: presence, conflict checks, lazy message delivery, swap signals. */
 export function createHookHandler(coord: Coordinator, runs: RunManager) {
-  return (event: string, p: Payload, runHeader: string | undefined): object => {
+  return async (event: string, p: Payload, runHeader: string | undefined): Promise<object> => {
     const sid = typeof p.session_id === 'string' ? p.session_id : null;
     const cwd = typeof p.cwd === 'string' ? p.cwd : null;
     const transcript = typeof p.transcript_path === 'string' ? p.transcript_path : null;
@@ -36,7 +36,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
     if (!coord.agent(sid)) {
       if (!cwd) return {};
       const run = runId ? runs.row(runId) : runs.bySession(sid);
-      coord.registerAgent({
+      await coord.registerAgent({
         sessionId: sid,
         cwd,
         runId: run?.id ?? null,
@@ -49,7 +49,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
     try {
       switch (event) {
         case 'SessionStart': {
-          if (cwd) coord.setCwd(sid, cwd);
+          if (cwd) await coord.setCwd(sid, cwd);
           coord.setStatus(sid, 'idle');
           runs.onSessionStart(sid, cwd);
           runs.syncModel(sid, transcript);
@@ -62,7 +62,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
           coord.setStatus(sid, 'working', typeof p.tool_name === 'string' ? p.tool_name : null);
           const file = editedPath(p.tool_name, p.tool_input);
           if (!file) return {};
-          const verdict = coord.preEdit(sid, file);
+          const verdict = await coord.preEdit(sid, file);
           if (verdict.deny) {
             return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: verdict.deny } };
           }
@@ -72,7 +72,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
           const tool = typeof p.tool_name === 'string' ? p.tool_name : null;
           coord.setStatus(sid, 'working', tool);
           const file = editedPath(p.tool_name, p.tool_input);
-          return context('PostToolUse', [file && tool ? coord.recordEdit(sid, file, tool) : null, coord.piggyback(sid)]);
+          return context('PostToolUse', [file && tool ? await coord.recordEdit(sid, file, tool) : null, coord.piggyback(sid)]);
         }
         case 'Stop': {
           if (!p.stop_hook_active) {
@@ -101,7 +101,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
           return {};
         case 'CwdChanged':
           if (cwd) {
-            coord.setCwd(sid, cwd);
+            await coord.setCwd(sid, cwd);
             runs.onCwd(sid, cwd);
           }
           return {};

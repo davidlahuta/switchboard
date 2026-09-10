@@ -204,14 +204,14 @@ export class Coordinator {
     return row;
   }
 
-  addRepo(dir: string): Repo {
+  async addRepo(dir: string): Promise<Repo> {
     forgetRepoCache(dir);
-    const info = resolveRepo(dir);
+    const info = await resolveRepo(dir);
     return this.repoDto(this.ensureRepo(info.root));
   }
 
-  repoForDir(dir: string): string {
-    return this.ensureRepo(resolveRepo(dir).root).id;
+  async repoForDir(dir: string): Promise<string> {
+    return this.ensureRepo((await resolveRepo(dir)).root).id;
   }
 
   private repoTouched(repoId: string): void {
@@ -241,8 +241,8 @@ export class Coordinator {
     return `${base}-${sessionId.replace(/[^a-z0-9]/gi, '').slice(0, 4)}`;
   }
 
-  registerAgent(input: RegisterInput): AgentRow {
-    const info = resolveRepo(input.cwd);
+  async registerAgent(input: RegisterInput): Promise<AgentRow> {
+    const info = await resolveRepo(input.cwd);
     const repo = this.ensureRepo(info.root);
     const existing = this.agent(input.sessionId);
     const ts = now();
@@ -307,10 +307,10 @@ export class Coordinator {
     if (changed) this.bus.invalidate('state', `repo:${a.repo_id}`);
   }
 
-  setCwd(id: string, cwd: string): void {
+  async setCwd(id: string, cwd: string): Promise<void> {
     const a = this.agent(id);
     if (!a) return;
-    const info = resolveRepo(cwd);
+    const info = await resolveRepo(cwd);
     const ts = now();
     const repo = this.ensureRepo(info.root);
     if (repo.id === a.repo_id) {
@@ -742,22 +742,24 @@ export class Coordinator {
     this.bus.invalidate('state', `repo:${c.repo_id}`);
   }
 
-  private relFor(a: AgentRow, absPath: string): string | null {
+  private async relFor(a: AgentRow, absPath: string): Promise<string | null> {
     const abs = path.resolve(a.cwd ?? '.', absPath);
+    // The overwhelmingly common case, and the reason the hot path usually costs no git at all:
+    // the file is inside the worktree the agent is already known to be working in.
     if (a.worktree) {
       const rel = relPath(a.worktree, abs);
       if (rel) return rel;
     }
-    const info = resolveRepo(path.dirname(abs));
+    const info = await resolveRepo(path.dirname(abs));
     if (repoIdFor(info.root) !== a.repo_id) return null;
     return relPath(info.worktree, abs);
   }
 
   /** PreToolUse on edit tools: exclusive claims by others block; soft claims warn. */
-  preEdit(agentId: string, absPath: string): { deny?: string; context?: string } {
+  async preEdit(agentId: string, absPath: string): Promise<{ deny?: string; context?: string }> {
     const a = this.agent(agentId);
     if (!a) return {};
-    const rel = this.relFor(a, absPath);
+    const rel = await this.relFor(a, absPath);
     if (!rel) return {};
     const hits = this.activeClaims(a.repo_id).filter((c) => c.agent_id !== agentId && matchesPattern(rel, c.pattern));
     const hard = hits.find((c) => bool(c.exclusive));
@@ -795,10 +797,10 @@ export class Coordinator {
   }
 
   /** PostToolUse on edit tools: record the touch, detect overlaps, warn both sides once. */
-  recordEdit(agentId: string, absPath: string, tool: string): string | null {
+  async recordEdit(agentId: string, absPath: string, tool: string): Promise<string | null> {
     const a = this.agent(agentId);
     if (!a) return null;
-    const rel = this.relFor(a, absPath);
+    const rel = await this.relFor(a, absPath);
     if (!rel) return null;
     const ts = now();
     const since = this.windowStart();

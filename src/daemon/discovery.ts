@@ -27,19 +27,19 @@ export class RepoScanner {
     this.roots = roots;
   }
 
-  list(refresh = false): DiscoveredRepo[] {
+  async list(refresh = false): Promise<DiscoveredRepo[]> {
     const roots = this.roots();
     const key = roots.join('|');
     const stale = refresh || key !== this.lastRoots || Date.now() - this.scannedAt > CACHE_MS;
     if (!stale) return this.cache;
-    this.cache = this.scan(roots);
+    this.cache = await this.scan(roots);
     this.scannedAt = Date.now();
     this.lastRoots = key;
     return this.cache;
   }
 
-  private scan(roots: string[]): DiscoveredRepo[] {
-    const found: DiscoveredRepo[] = [];
+  private async scan(roots: string[]): Promise<DiscoveredRepo[]> {
+    const dirs: string[] = [];
     const seen = new Set<string>();
     const started = Date.now();
     for (const root of roots) {
@@ -51,14 +51,17 @@ export class RepoScanner {
         log.warn('repo root is not readable', root);
         continue;
       }
-      this.walk(base, 0, found, seen);
+      this.walk(base, 0, dirs, seen);
     }
+    // Walking the tree is filesystem work and stays synchronous; asking git about each repo it found
+    // is a subprocess apiece, so those go together rather than one after another.
+    const found = await Promise.all(dirs.map((dir) => this.describe(dir)));
     found.sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
     log.debug(`scanned ${roots.length} root(s) in ${Date.now() - started}ms, found ${found.length} repos`);
     return found;
   }
 
-  private walk(dir: string, depth: number, found: DiscoveredRepo[], seen: Set<string>): void {
+  private walk(dir: string, depth: number, found: string[], seen: Set<string>): void {
     if (depth > MAX_DEPTH || found.length >= MAX_REPOS) return;
     let entries: fs.Dirent[];
     try {
@@ -71,7 +74,7 @@ export class RepoScanner {
       const key = dir.toLowerCase();
       if (!seen.has(key)) {
         seen.add(key);
-        found.push(this.describe(dir));
+        found.push(dir);
       }
       return;
     }
@@ -81,8 +84,8 @@ export class RepoScanner {
     }
   }
 
-  private describe(dir: string): DiscoveredRepo {
-    const info = resolveRepo(dir);
+  private async describe(dir: string): Promise<DiscoveredRepo> {
+    const info = await resolveRepo(dir);
     const isWorktree = path.resolve(info.worktree).toLowerCase() !== path.resolve(info.root).toLowerCase();
     return {
       path: dir,

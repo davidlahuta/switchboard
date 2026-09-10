@@ -27,6 +27,9 @@ export class AgentHub implements PushTarget {
     const reply = (msg: DaemonToShim): void => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
+    // Registering an agent asks git which repository its cwd belongs to, so the messages after the
+    // hello wait their turn rather than racing an agent that does not exist yet.
+    let queue: Promise<void> = Promise.resolve();
     ws.on('message', (raw) => {
       let msg: ShimToDaemon;
       try {
@@ -34,38 +37,51 @@ export class AgentHub implements PushTarget {
       } catch {
         return;
       }
-      if (msg.type === 'hello') {
-        sessionId = msg.sessionId;
-        const run = msg.runId ? this.runs.row(msg.runId) : this.runs.bySession(msg.sessionId);
-        const agent = this.coord.registerAgent({
-          sessionId: msg.sessionId,
-          cwd: msg.cwd,
-          pid: msg.pid,
-          runId: run?.id ?? null,
-          subscriptionId: run?.subscription_id ?? null,
-          hasChannel: msg.channel,
-          name: this.coord.agent(msg.sessionId) ? null : (run?.name ?? null),
-        });
-        const previous = this.conns.get(msg.sessionId);
-        if (previous && previous.ws !== ws) previous.ws.close();
-        this.conns.set(msg.sessionId, { ws, channel: msg.channel });
-        reply({ type: 'welcome', agentName: agent.name });
-        if (msg.channel) this.coord.flushPushQueue(msg.sessionId);
-        log.debug('shim connected', { session: msg.sessionId, channel: msg.channel });
-        return;
-      }
-      if (msg.type === 'call') {
-        if (!sessionId) {
-          reply({ type: 'result', id: msg.id, text: 'Switchboard: not registered yet', isError: true });
-          return;
-        }
-        const sid = sessionId;
-        void this.coord.runTool(sid, msg.tool, msg.args ?? {}).then((r) => reply({ type: 'result', id: msg.id, text: r.text, isError: r.isError }));
-      }
+      queue = queue.then(() => this.onMessage(ws, msg, reply, (id) => (sessionId = id), () => sessionId)).catch((err) => {
+        log.warn('shim message failed', err instanceof Error ? err.message : err);
+      });
     });
     ws.on('close', () => {
       if (sessionId && this.conns.get(sessionId)?.ws === ws) this.conns.delete(sessionId);
     });
+  }
+
+  private async onMessage(
+    ws: WebSocket,
+    msg: ShimToDaemon,
+    reply: (m: DaemonToShim) => void,
+    setSession: (id: string) => void,
+    getSession: () => string | null,
+  ): Promise<void> {
+    if (msg.type === 'hello') {
+      setSession(msg.sessionId);
+      const run = msg.runId ? this.runs.row(msg.runId) : this.runs.bySession(msg.sessionId);
+      const agent = await this.coord.registerAgent({
+        sessionId: msg.sessionId,
+        cwd: msg.cwd,
+        pid: msg.pid,
+        runId: run?.id ?? null,
+        subscriptionId: run?.subscription_id ?? null,
+        hasChannel: msg.channel,
+        name: this.coord.agent(msg.sessionId) ? null : (run?.name ?? null),
+      });
+      const previous = this.conns.get(msg.sessionId);
+      if (previous && previous.ws !== ws) previous.ws.close();
+      this.conns.set(msg.sessionId, { ws, channel: msg.channel });
+      reply({ type: 'welcome', agentName: agent.name });
+      if (msg.channel) this.coord.flushPushQueue(msg.sessionId);
+      log.debug('shim connected', { session: msg.sessionId, channel: msg.channel });
+      return;
+    }
+    if (msg.type === 'call') {
+      const sid = getSession();
+      if (!sid) {
+        reply({ type: 'result', id: msg.id, text: 'Switchboard: not registered yet', isError: true });
+        return;
+      }
+      const r = await this.coord.runTool(sid, msg.tool, msg.args ?? {});
+      reply({ type: 'result', id: msg.id, text: r.text, isError: r.isError });
+    }
   }
 
   push(agentId: string, content: string, meta: Record<string, string>): boolean {

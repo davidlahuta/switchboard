@@ -420,7 +420,7 @@ export class RunManager {
     return sub.id;
   }
 
-  private insertRun(spec: {
+  private async insertRun(spec: {
     cwd: string;
     subscriptionId: string;
     name?: string;
@@ -433,7 +433,7 @@ export class RunManager {
     autoCompactTokens?: number;
     skipPermissions?: boolean;
     continueOnResume?: boolean;
-  }): RunRow {
+  }): Promise<RunRow> {
     const cwd = path.resolve(spec.cwd);
     let isDir = false;
     try {
@@ -454,13 +454,14 @@ export class RunManager {
     const subscriptionId = this.resolveSubscription(spec.subscriptionId);
     const id = crypto.randomBytes(4).toString('hex');
     const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
+    const repoId = await this.coord.repoForDir(cwd);
     this.db.run(
       `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, continue_on_resume, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       name.slice(0, 80),
       cwd,
-      this.coord.repoForDir(cwd),
+      repoId,
       spec.resumeSessionId ?? crypto.randomUUID(),
       subscriptionId,
       spec.autoSwap === false ? 0 : 1,
@@ -479,9 +480,9 @@ export class RunManager {
     return this.row(id)!;
   }
 
-  create(req: CreateRunRequest): Run {
+  async create(req: CreateRunRequest): Promise<Run> {
     if (!findClaude()) throw httpError(500, 'claude executable not found on PATH');
-    const r = this.insertRun(req);
+    const r = await this.insertRun(req);
     this.launcher.openTerminal({ title: r.name, cwd: r.cwd, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
     log.info('run created', { id: r.id, name: r.name, subscription: r.subscription_id });
     return this.dto(r);
@@ -562,6 +563,13 @@ export class RunManager {
 
   attachRunner(ws: WebSocket): void {
     let runId: string | null = null;
+    /*
+     * Handled one after another rather than as they arrive. A hello that creates a manual run has to
+     * ask git which repository it is in, and everything the runner sends next — the spawn, the first
+     * screenful of output — depends on that having finished. Chaining keeps the order the socket
+     * delivered them in without holding the event loop while git answers.
+     */
+    let queue: Promise<void> = Promise.resolve();
     ws.on('message', (raw) => {
       let msg: RunnerToDaemon;
       try {
@@ -569,14 +577,16 @@ export class RunManager {
       } catch {
         return;
       }
-      try {
-        if (msg.type === 'hello') runId = this.onHello(ws, msg);
-        else if (runId) this.onRunnerMessage(runId, msg);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log.error('runner message failed', message);
-        ws.send(JSON.stringify({ type: 'error', message } satisfies DaemonToRunner));
-      }
+      queue = queue
+        .then(async () => {
+          if (msg.type === 'hello') runId = await this.onHello(ws, msg);
+          else if (runId) this.onRunnerMessage(runId, msg);
+        })
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          log.error('runner message failed', message);
+          ws.send(JSON.stringify({ type: 'error', message } satisfies DaemonToRunner));
+        });
     });
     ws.on('close', () => {
       if (!runId || this.conns.get(runId) !== ws) return;
@@ -586,13 +596,13 @@ export class RunManager {
     });
   }
 
-  private onHello(ws: WebSocket, msg: Extract<RunnerToDaemon, { type: 'hello' }>): string {
+  private async onHello(ws: WebSocket, msg: Extract<RunnerToDaemon, { type: 'hello' }>): Promise<string> {
     let r: RunRow | undefined;
     if (msg.runId) {
       r = this.row(msg.runId);
       if (!r) throw new Error(`Unknown run ${msg.runId}`);
     } else if (msg.manual) {
-      r = this.insertRun(msg.manual satisfies ManualRunSpec);
+      r = await this.insertRun(msg.manual satisfies ManualRunSpec);
     } else {
       throw new Error('hello without run');
     }

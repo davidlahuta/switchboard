@@ -212,10 +212,10 @@ export function createServer(s: Services): http.Server {
 
   // repos & coordination
   route('GET', '/api/repos', () => s.coord.listRepos());
-  route('POST', '/api/repos', ({ body }) => {
+  route('POST', '/api/repos', async ({ body }) => {
     const p = String(body.path ?? '');
     if (!p || !fs.existsSync(p)) fail(400, 'Directory not found');
-    return s.coord.addRepo(p);
+    return await s.coord.addRepo(p);
   });
   // Must precede /api/repos/:id, which would otherwise capture "discovered".
   route('GET', '/api/repos/discovered', ({ url }) => s.scanner.list(url.searchParams.get('refresh') === '1'));
