@@ -385,6 +385,10 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
           case 'status':
             setLiveStatus(f.status);
             setLiveSub(f.subscriptionLabel);
+            // A status arrives when the session comes up and whenever it comes back. Nothing has
+            // changed on this end, so the observer that normally speaks for us stays quiet — say the
+            // size again, or a session that respawned under this page keeps the console's.
+            requestFit();
             break;
         }
       };

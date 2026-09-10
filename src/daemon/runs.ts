@@ -214,6 +214,12 @@ export class RunManager {
   private readonly mirrors = new Map<string, TermMirror>();
   private readonly pendingRespawn = new Map<string, PendingRespawn>();
   /**
+   * The size a browser asked for, per run, so a runner that was not there to hear it can be told.
+   * Opening a session from the web is precisely that case: the terminal page asks for its size
+   * while the terminal window is still opening, and the runner it is meant for does not exist yet.
+   */
+  private readonly webSize = new Map<string, { cols: number; rows: number }>();
+  /**
    * Unread counts for the whole board, refreshed at most once a second. A state snapshot renders
    * every session at once, and one grouped query for all of them beats one query each.
    */
@@ -746,6 +752,7 @@ export class RunManager {
       const spec = this.buildSpec(r, r.subscription_id, bool(r.resume));
       this.db.run('UPDATE runs SET resume = 1 WHERE id = ?', r.id);
       this.send(r.id, { type: 'spawn', spec });
+      this.replayWebSize(r.id);
     }
     return r.id;
   }
@@ -808,6 +815,16 @@ export class RunManager {
     this.bus.invalidate('state');
   }
 
+  /**
+   * Tell a runner the size a browser is watching at. Sent after a spawn rather than waiting to be
+   * asked: the browser only speaks when its own layout changes, and a session coming up under one
+   * is not a layout change.
+   */
+  private replayWebSize(runId: string): void {
+    const s = this.webSize.get(runId);
+    if (s) this.send(runId, { type: 'resize', cols: s.cols, rows: s.rows });
+  }
+
   attachViewer(runId: string, ws: WebSocket): void {
     const r = this.row(runId);
     if (!r) {
@@ -829,18 +846,27 @@ export class RunManager {
       }
       if (frame.type === 'input' && typeof frame.data === 'string') this.send(runId, { type: 'input', data: frame.data });
       if (frame.type === 'resize' && frame.cols >= 20 && frame.rows >= 5 && frame.cols <= 500 && frame.rows <= 200) {
-        this.send(runId, { type: 'resize', cols: Math.floor(frame.cols), rows: Math.floor(frame.rows) });
+        const cols = Math.floor(frame.cols);
+        const rows = Math.floor(frame.rows);
+        this.webSize.set(runId, { cols, rows });
+        this.send(runId, { type: 'resize', cols, rows });
       }
       // The browser stopped fitting: the console the session runs in owns the size again, so both
       // views end up showing the same frame rather than one of them keeping a phone's dimensions.
-      if (frame.type === 'release-size') this.send(runId, { type: 'restore-size' });
+      if (frame.type === 'release-size') {
+        this.webSize.delete(runId);
+        this.send(runId, { type: 'restore-size' });
+      }
     });
     ws.on('close', () => {
       detach();
       this.markViewed(runId);
       // Last browser viewer gone: give the size back to the terminal window the session lives in,
       // otherwise it stays at whatever a phone asked for until someone resizes that window.
-      if (mirror.viewers === 0) this.send(runId, { type: 'restore-size' });
+      if (mirror.viewers === 0) {
+        this.webSize.delete(runId);
+        this.send(runId, { type: 'restore-size' });
+      }
     });
   }
 
@@ -948,6 +974,7 @@ export class RunManager {
     const spec = this.buildSpec(updated, target, true);
     this.mirrors.get(r.id)?.reset();
     this.send(r.id, { type: 'swap', spec, banner });
+    this.replayWebSize(r.id);
     if (continueAfter) {
       const text = interrupted ? INTERRUPTED_MESSAGE : getSettings(this.db).continueMessage.trim();
       if (text) {

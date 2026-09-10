@@ -72,6 +72,15 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
    * until the size comes back, which is the only state in which this console can show the truth.
    */
   let webSized = false;
+  /**
+   * The size a browser last asked for, kept across respawns.
+   *
+   * A swap, a restart and a resume all end one pseudo-terminal and start another, and the browser
+   * has no reason to say anything: nothing changed on its end, so its ResizeObserver stays quiet.
+   * Without remembering, the new claude comes up at this console's dimensions while a phone is
+   * looking at it, and the first thing the viewer sees is a frame drawn for the wrong screen.
+   */
+  let webSize: { cols: number; rows: number } | null = null;
   let swapping = false;
   let stopping = false;
   let ws: WebSocket | null = null;
@@ -103,6 +112,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     if (!child) return;
     const { cols, rows } = size();
     webSized = false;
+    webSize = null;
     child.resize(cols, rows);
     out.write(CLEAR);
     send({ type: 'resize', cols, rows });
@@ -186,7 +196,9 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       if (v === null) delete env[k];
       else env[k] = v;
     }
-    const { cols, rows } = size();
+    // Whoever owns the size still owns it: a session that comes back under a browser comes back at
+    // the browser's dimensions, not at this console's.
+    const { cols, rows } = webSize ?? size();
     let p: IPty;
     try {
       p = pty.spawn(s.file, s.args, { name: 'xterm-256color', cols, rows, cwd: s.cwd, env });
@@ -197,6 +209,11 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       return;
     }
     child = p;
+    if (webSize && !webSized) {
+      // Parked from the moment it starts, rather than painting one frame here first.
+      out.write(CLEAR + PARKED(webSize.cols, webSize.rows));
+      webSized = true;
+    }
     p.onData((d) => {
       if (!webSized) out.write(d.includes(']') ? d.replace(OSC_TITLE_RE, '') : d);
       send({ type: 'data', data: d });
@@ -258,9 +275,13 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
         child?.write(msg.data);
         break;
       case 'resize': {
-        if (!child) break;
         const mine = size();
         const takenOver = msg.cols !== mine.cols || msg.rows !== mine.rows;
+        // Recorded before anything else, so a size that arrives while claude is still starting is
+        // waiting for it rather than thrown away. That gap is exactly when a new session is opened
+        // from the browser, which is when this went wrong.
+        webSize = takenOver ? { cols: msg.cols, rows: msg.rows } : null;
+        if (!child) break;
         if (takenOver && !webSized) {
           // Park: stop drawing here rather than drawing a frame meant for another size.
           out.write(CLEAR + PARKED(msg.cols, msg.rows));
