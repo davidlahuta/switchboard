@@ -264,6 +264,12 @@ aspire run          # daemon with --watch + Vite HMR
 `aspire run` and the auto-start task both want port 4477, so stop one before using the other
 (`node src/cli.ts service uninstall`, or just stop the task for the session).
 
+**After pulling changes, restart the daemon.** It executes TypeScript straight from `src/`, and the
+supervisor only relaunches it when it exits — so a running daemon keeps serving the old code, and
+silently ignores request fields it does not yet know about. The UI notices this and offers a
+restart; from a terminal, `curl -X POST http://127.0.0.1:4477/api/service/restart` or just kill the
+process and let the supervisor bring it back.
+
 ## Contributing
 
 Issues and pull requests are open. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, what's most

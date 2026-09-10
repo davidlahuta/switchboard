@@ -1928,6 +1928,45 @@ a.list-main:hover {
   padding: 9px 12px;
   font-size: 13px;
 }
+/* operational notice above the page content: the daemon is serving pre-edit code */
+.app-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  padding: 8px var(--gutter);
+  background: var(--warn-soft);
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  font-size: 13px;
+  color: var(--text);
+}
+.app-banner > .icon {
+  color: var(--warn);
+}
+.app-banner-text {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.app-banner-error {
+  color: var(--warn);
+}
+.app-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.stale-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.stale-notice > div:first-child {
+  flex: 1 1 240px;
+  min-width: 0;
+}
 .callout-warn {
   background: var(--warn-soft);
   color: var(--text);

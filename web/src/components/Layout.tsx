@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { href, type Route } from '../lib/router.ts';
 import { useStore, type ConnState } from '../lib/store.tsx';
+import { StaleCodeBanner } from './StaleCode.tsx';
 import { Icon, type IconName } from './ui.tsx';
 
 interface NavItem {
@@ -90,6 +91,7 @@ export function Layout({ route, children, bare }: { route: Route; children: Reac
           </a>
           <ConnDot conn={conn} />
         </div>
+        {state && <StaleCodeBanner daemon={state.daemon} />}
         <main className="content">{children}</main>
       </div>
 

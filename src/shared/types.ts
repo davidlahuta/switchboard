@@ -302,6 +302,18 @@ export interface DaemonInfo {
   claudePath: string | null;
   wtAvailable: boolean;
   integrationInstalled: boolean;
+  /** When this daemon process started */
+  startedAt: string;
+  /**
+   * Newest mtime under src/. The daemon runs TypeScript straight from source, and the supervisor
+   * only relaunches it when it exits, so after an edit or a git pull it would otherwise keep
+   * serving old code indefinitely.
+   */
+  sourceChangedAt: string | null;
+  /** Source has changed since this process started: it needs a restart to pick the change up. */
+  staleCode: boolean;
+  /** A supervisor (the logon task) will relaunch the daemon if it exits, so restarting is safe. */
+  supervised: boolean;
   /** true when the current request is local (no pairing needed) */
   local: boolean;
 }

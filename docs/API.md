@@ -86,6 +86,7 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | GET    | `/api/service`             | `ServiceStatus`                         |
 | POST   | `/api/service/install`     | `{ delaySeconds? }` → `ServiceStatus`   |
 | POST   | `/api/service/uninstall`   | `ServiceStatus`                         |
+| POST   | `/api/service/restart`     | exits the daemon so the supervisor relaunches it (409 when unsupervised) |
 
 ## WebSockets
 

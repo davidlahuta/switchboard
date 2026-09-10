@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { DATA_DIR, PORT, VERSION, WEB_DIST } from '../config.ts';
+import { DATA_DIR, PACKAGE_ROOT, PORT, VERSION, WEB_DIST } from '../config.ts';
 import { logger } from '../log.ts';
 import type { StateSnapshot, Totals } from '../shared/types.ts';
 import type { AgentHub } from './agents.ts';
@@ -17,12 +17,47 @@ import { installIntegration, integrationStatus, uninstallIntegration } from './i
 import type { Launcher } from './launcher.ts';
 import type { ModelCatalog } from './models.ts';
 import type { RunManager } from './runs.ts';
-import { installService, serviceStatus, startService, uninstallService } from './service.ts';
+import { installService, isSupervised, serviceStatus, startService, uninstallService } from './service.ts';
 import { getSettings, updateSettings } from './settings.ts';
 import type { SubscriptionManager } from './subscriptions.ts';
 import type { Updater } from './updater.ts';
 
 const log = logger('http');
+
+const STARTED_AT = new Date().toISOString();
+let srcMtime: { at: number; value: number } | null = null;
+
+/**
+ * Newest mtime under src/. The daemon executes TypeScript directly and its supervisor only
+ * relaunches it on exit, so an edit or a git pull leaves it serving old code until it restarts.
+ * Reporting this lets the UI say so, instead of the change looking like a bug.
+ */
+function newestSourceMtime(): number {
+  if (srcMtime && Date.now() - srcMtime.at < 10_000) return srcMtime.value;
+  let newest = 0;
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.name.endsWith('.ts')) {
+        try {
+          newest = Math.max(newest, fs.statSync(full).mtimeMs);
+        } catch {
+          // vanished mid-scan
+        }
+      }
+    }
+  };
+  walk(path.join(PACKAGE_ROOT, 'src'));
+  srcMtime = { at: Date.now(), value: newest };
+  return newest;
+}
 
 export interface Services {
   db: Db;
@@ -108,6 +143,7 @@ export function createServer(s: Services): http.Server {
       totals.sevenDayRemaining += (sub.weight * (100 - (sub.usage?.sevenDay?.pct ?? 0))) / 100;
     }
     const integ = integrationStatus();
+    const sourceChanged = newestSourceMtime();
     return {
       daemon: {
         version: VERSION,
@@ -116,6 +152,10 @@ export function createServer(s: Services): http.Server {
         claudePath: findClaude(),
         wtAvailable: !!s.launcher.wtPath,
         integrationInstalled: integ.mcpInstalled && integ.hooksInstalled,
+        startedAt: STARTED_AT,
+        sourceChangedAt: sourceChanged ? new Date(sourceChanged).toISOString() : null,
+        staleCode: sourceChanged > Date.parse(STARTED_AT),
+        supervised: isSupervised(),
         local: s.auth.isLocal(req),
       },
       subscriptions,
@@ -250,6 +290,18 @@ export function createServer(s: Services): http.Server {
     return s;
   }, 'local');
   route('POST', '/api/service/uninstall', () => uninstallService(), 'local');
+  route(
+    'POST',
+    '/api/service/restart',
+    ({ res }) => {
+      if (!isSupervised()) fail(409, 'No supervisor is installed, so the daemon would not come back. Install automatic start first.');
+      // Answer before exiting; the supervisor relaunches within ~10 seconds.
+      json(res, 200, { ok: true, restarting: true });
+      setTimeout(() => process.exit(0), 250);
+      return undefined;
+    },
+    'local',
+  );
 
   // claude version
   route('GET', '/api/update', () => s.updater.status());

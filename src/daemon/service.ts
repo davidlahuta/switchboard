@@ -50,6 +50,11 @@ function runnerScript(): string {
   ].join('\r\n');
 }
 
+/** True when a supervisor script is installed, so the daemon comes back if it exits. */
+export function isSupervised(): boolean {
+  return fs.existsSync(LAUNCHER);
+}
+
 export async function serviceStatus(): Promise<ServiceStatus> {
   const status: ServiceStatus = {
     supported: IS_WINDOWS,

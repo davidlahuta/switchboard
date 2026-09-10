@@ -123,6 +123,15 @@ from exploding the scan; `node_modules`, build output and dotted directories are
 Each hit is resolved through the same `resolveRepo` used for coordination, so a linked worktree
 reports the `repoId` of its main worktree and the UI can group them together.
 
+## Running from source
+
+The daemon executes TypeScript directly (Node's type stripping), so there is no build step — and
+no rebuild to forget. The cost is that a running daemon holds the code it started with: the
+supervisor only relaunches it on exit, so after an edit or a `git pull` it serves the old code and
+silently drops request fields it does not know. `/api/state` therefore reports `startedAt`,
+`sourceChangedAt` (newest mtime under `src/`) and `staleCode`, and the UI offers a restart when
+they disagree.
+
 ## Identity
 
 A session is its **GUID** (Claude Code's session id). Everything durable keys off it: runs,

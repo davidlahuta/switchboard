@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import qrcode from 'qrcode-generator';
 import type {
+  DaemonInfo,
   Device,
   DiscoveredRepo,
   IntegrationStatus,
@@ -12,6 +13,7 @@ import type {
   UpdateStatus,
 } from '@shared/types.ts';
 import { PageHead } from '../components/PageHead.tsx';
+import { StaleCodeNotice } from '../components/StaleCode.tsx';
 import { Badge, ConfirmDialog, Empty, Icon, IconButton, Section, Spinner, Toggle } from '../components/ui.tsx';
 import { api, request } from '../lib/api.ts';
 import { contextLabel, plural, tokensShort } from '../lib/format.ts';
@@ -36,7 +38,7 @@ export function SettingsPage({ state }: { state: StateSnapshot }) {
       <IntegrationSection />
       {state.daemon.local ? (
         <>
-          <AutoStartSection />
+          <AutoStartSection daemon={state.daemon} />
           <RemoteAccessSection port={state.daemon.port} />
         </>
       ) : (
@@ -677,7 +679,7 @@ async function copyText(text: string, what: string): Promise<void> {
  * The daemon can register a Windows Task Scheduler logon task that keeps it alive. Desk only: the
  * task belongs to the signed-in user, and the endpoints 403 for a paired remote device.
  */
-function AutoStartSection() {
+function AutoStartSection({ daemon }: { daemon: DaemonInfo }) {
   const now = useNow(30_000);
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -718,6 +720,11 @@ function AutoStartSection() {
         desktop. After an unattended reboot it comes back as soon as the desk is signed in, and it is restarted within about ten seconds
         if it exits.
       </p>
+
+      <p className="field-hint">
+        This process started {timeAgo(daemon.startedAt, now)} on port {daemon.port}.
+      </p>
+      <StaleCodeNotice daemon={daemon} />
 
       {loadError ? (
         <div className="callout callout-crit">
