@@ -18,7 +18,7 @@ import type { Launcher } from './launcher.ts';
 import { TermMirror } from './mirror.ts';
 import type { ModelCatalog } from './models.ts';
 import { getSettings } from './settings.ts';
-import { SWAP_MARGIN, type SubscriptionManager } from './subscriptions.ts';
+import { SPENT_PCT, SWAP_MARGIN, type SubscriptionManager } from './subscriptions.ts';
 
 const log = logger('runs');
 
@@ -80,6 +80,8 @@ const CONFIRM_FOOTER = /Enter\s*to\s*confirm/i;
 const CONTINUE_RETRY_MS = 4000;
 const CONTINUE_RETRIES = 15;
 const CONTINUE_FALLBACK_MS = 25_000;
+/** How long before a session that is still limited is offered another way out. */
+const RESCUE_DEBOUNCE_MS = 60_000;
 /**
  * What a session is told when the swap could not wait for the end of its turn. "continue" on its
  * own invites it to carry on from a plan whose later half never ran: the tools it called last may
@@ -155,6 +157,22 @@ export function attentionFor(input: {
     unread: input.unread,
     unseen: !busy && (!input.lastViewedAt || input.lastActivity > input.lastViewedAt),
   };
+}
+
+/**
+ * What to do with a session that stopped on a usage limit, now that usage has been read again.
+ *
+ * The proactive threshold answers "is somewhere else enough better to be worth a swap", and for a
+ * session that is running that is the right question. For one that has stopped it is the wrong one
+ * twice over: its own subscription coming back is not a swap at all, it is a session that can be
+ * told to carry on; and anywhere with capacity beats where it is, because where it is has none.
+ * Holding a stopped session to a threshold meant for a running one is how it sat out somebody
+ * else's reset.
+ */
+export function rescueDecision(input: { ownUsedPct: number; bestElsewherePct: number | null; threshold: number }): 'continue' | 'move' | 'wait' {
+  if (input.ownUsedPct < input.threshold) return 'continue';
+  if (input.bestElsewherePct !== null && input.bestElsewherePct < SPENT_PCT) return 'move';
+  return 'wait';
 }
 
 export function safeToRespawn(status: AgentStatus | undefined): boolean {
@@ -247,6 +265,8 @@ export class RunManager {
   /** Set by the daemon once the updater knows which claude version is installed. */
   versionProvider: () => string | null = () => null;
   private readonly pendingContinue = new Map<string, { text: string; timer: NodeJS.Timeout }>();
+  /** When each session was last picked up off a limit, so a poll every few seconds does it once. */
+  private readonly lastRescue = new Map<string, number>();
   private readonly lastLimit = new Map<string, number>();
 
   constructor(db: Db, bus: Bus, subs: SubscriptionManager, coord: Coordinator, launcher: Launcher, models: ModelCatalog) {
@@ -577,9 +597,9 @@ export class RunManager {
 
   // --------------------------------------------------------------- create
 
-  private resolveSubscription(ref: string, exclude?: string | null, runId?: string): string {
+  private resolveSubscription(ref: string, exclude?: string | null, runId?: string, atLimit = false): string {
     if (ref === 'auto') {
-      const best = this.subs.pickBest(exclude, runId);
+      const best = this.subs.pickBest(exclude, runId, atLimit);
       if (!best) throw httpError(409, 'No enabled, logged-in subscription with headroom is available.');
       return best.id;
     }
@@ -945,9 +965,9 @@ export class RunManager {
 
   // ----------------------------------------------------------------- swap
 
-  swap(runId: string, targetRef: string, reason: string, opts: { force?: boolean; continueAfter?: boolean; deadline?: number | null } = {}): Run {
+  swap(runId: string, targetRef: string, reason: string, opts: { force?: boolean; continueAfter?: boolean; deadline?: number | null; atLimit?: boolean } = {}): Run {
     const r = this.liveRun(runId);
-    const target = this.resolveSubscription(targetRef, r.subscription_id, r.id);
+    const target = this.resolveSubscription(targetRef, r.subscription_id, r.id, opts.atLimit ?? false);
     if (target === r.subscription_id) throw httpError(400, 'Session already runs on that subscription');
     return this.respawn(
       r,
@@ -1043,25 +1063,51 @@ export class RunManager {
       banner = `\x1b[1;36m[switchboard]\x1b[0m Restarting on \x1b[1m${reason}\x1b[0m. Resuming session…\r\n`;
     }
     this.setStatus(r.id, 'swapping');
+    /*
+     * Half of Switchboard lives in the process hosting the terminal, and that process keeps running
+     * the code it started with. Respawning claude inside it brings the session back on a new build
+     * of claude and an old build of everything around it — which is how a session ends up badged
+     * "old host" for the rest of its life, and why a fix to the runner never reached the sessions
+     * that most needed it. Coming back is the one moment when replacing the terminal costs nothing
+     * that respawning inside it does not already cost, so a stale host is replaced here, whatever
+     * brought the session back: a swap, a restart, an update.
+     */
+    const staleHost = this.runnerStale(r.id);
+    if (continueAfter) this.armRespawnContinue(r, interrupted);
+    if (staleHost) {
+      try {
+        log.info('replacing an out-of-date terminal rather than respawning inside it', { run: r.id, kind, reason });
+        this.relaunch(r.id, true);
+        if (r.repo_id) this.coord.event(r.repo_id, r.session_id, kind, `${r.name}: ${kind === 'swap' ? `moved to ${this.subs.row(target)?.label ?? target}` : 'restarted'} in a new terminal (${reason})`);
+        this.bus.toast('info', `${r.name}: ${kind === 'swap' ? 'moved' : 'restarted'} in a new terminal — its old one predated the current build (${reason})`);
+        return;
+      } catch (err) {
+        // Its folder is gone, or there is nothing to relaunch: respawning in place still works.
+        log.warn('could not replace the terminal; respawning in it instead', { run: r.id, error: err instanceof Error ? err.message : err });
+      }
+    }
     const updated = this.row(r.id)!;
     const spec = this.buildSpec(updated, target, true);
     this.mirrors.get(r.id)?.reset();
     this.send(r.id, { type: 'swap', spec, banner });
     this.replayWebSize(r.id);
-    if (continueAfter) {
-      const text = interrupted ? INTERRUPTED_MESSAGE : getSettings(this.db).continueMessage.trim();
-      if (text) {
-        const old = this.pendingContinue.get(r.id);
-        if (old) clearTimeout(old.timer);
-        // Armed here, but only sent once the SessionStart hook confirms a live prompt. Typing
-        // blindly could answer a dialog (folder trust, permissions) instead.
-        this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.giveUpContinue(r.id), CONTINUE_FALLBACK_MS) });
-      }
-    }
     const what = kind === 'swap' ? `switched to ${spec.subscriptionLabel}` : 'restarted';
     if (r.repo_id) this.coord.event(r.repo_id, r.session_id, kind, `${r.name}: ${what} (${reason})${interrupted ? ', mid-turn' : ''}`);
     this.bus.toast(interrupted ? 'warn' : 'info', `${r.name}: ${what} (${reason})${interrupted ? ' — mid-turn, its work in flight was lost' : ''}`);
     log.info(kind, { run: r.id, session: r.session_id, from, to: target, reason });
+  }
+
+  /**
+   * Queue what a session is greeted with when a respawn brings it back. A swap that cut a turn
+   * short says so; everything else gets the operator's continue message. Armed here and released by
+   * the SessionStart hook, because typing blindly could answer a startup dialog instead of a prompt.
+   */
+  private armRespawnContinue(r: RunRow, interrupted: boolean): void {
+    const text = interrupted ? INTERRUPTED_MESSAGE : getSettings(this.db).continueMessage.trim();
+    if (!text) return;
+    const old = this.pendingContinue.get(r.id);
+    if (old) clearTimeout(old.timer);
+    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.giveUpContinue(r.id), CONTINUE_FALLBACK_MS) });
   }
 
   /**
@@ -1326,7 +1372,9 @@ export class RunManager {
        * subscription, but its build, test run or half-written file is given time to land.
        */
       try {
-        this.swap(r.id, 'auto', `usage limit on ${label}`, { ...limitSwapPlan(source), continueAfter: true });
+        // Already stopped, so the threshold that keeps a running session from moving for a small
+        // gain does not apply: anywhere with capacity left beats a subscription with none.
+        this.swap(r.id, 'auto', `usage limit on ${label}`, { ...limitSwapPlan(source), continueAfter: true, atLimit: true });
       } catch (err) {
         this.bus.toast('error', `${r.name} hit the limit on ${label} and cannot switch: ${err instanceof Error ? err.message : err}`);
       }
@@ -1336,6 +1384,63 @@ export class RunManager {
   private onUsage(sub: Subscription): void {
     const runs = this.db.all<RunRow>("SELECT * FROM runs WHERE subscription_id = ? AND status = 'running'", sub.id);
     if (runs.length) this.maybeProactive(sub, runs);
+    // Fresh usage is the only news a session waiting out a limit is waiting for.
+    this.rescueLimited();
+  }
+
+  /**
+   * Sessions that stopped on a usage limit, revisited every time usage is read again.
+   *
+   * Nothing else was watching them. A session blocked at eight o'clock waited for its own window to
+   * turn over even when another subscription came back with hours to spare at five past, because
+   * the only thing that moved a session was crossing the proactive threshold — which a stopped
+   * session, by then, was on the wrong side of everywhere.
+   *
+   * A session whose own subscription has recovered is not moved, only told to carry on: moving it
+   * would cost a resume for nothing.
+   */
+  private rescueLimited(): void {
+    const settings = getSettings(this.db);
+    for (const r of this.db.all<RunRow>("SELECT * FROM runs WHERE status = 'running'")) {
+      if (this.coord.agent(r.session_id)?.status !== 'limited') continue;
+      if (this.pendingRespawn.has(r.id)) continue;
+      if (Date.now() - (this.lastRescue.get(r.id) ?? 0) < RESCUE_DEBOUNCE_MS) continue;
+      const own = this.subs.get(r.subscription_id);
+      // Stale numbers say nothing about now, and acting on them would only type into a session
+      // that is still just as stuck.
+      if (!own?.usage || own.usage.stale) continue;
+      const canMove = settings.autoSwap && bool(r.auto_swap);
+      const best = canMove ? this.subs.rank(r.subscription_id, r.id, true) : null;
+      const decision = rescueDecision({
+        ownUsedPct: this.subs.usedPct(r.subscription_id),
+        bestElsewherePct: best ? this.subs.usedPct(best.row.id) : null,
+        threshold: settings.swapThresholdPct,
+      });
+      if (decision === 'wait') continue;
+      this.lastRescue.set(r.id, Date.now());
+      if (decision === 'move' && best) {
+        try {
+          this.swap(r.id, best.row.id, `${own.label} is spent; ${best.row.label} has room`, { continueAfter: true, atLimit: true });
+        } catch (err) {
+          log.warn('could not move a session that was waiting out a limit', { run: r.id, error: err instanceof Error ? err.message : err });
+        }
+      } else {
+        this.resumeAfterLimit(r, `${own.label} has room again`);
+      }
+    }
+  }
+
+  /**
+   * Tell a session whose own subscription has come back to carry on. It is sitting at a prompt with
+   * a turn that ended on a limit rather than on an answer, and nothing else will ever type into it.
+   */
+  private resumeAfterLimit(r: RunRow, why: string): void {
+    if (!this.dto(r).continueOnResume) return;
+    const text = getSettings(this.db).continueMessage.trim();
+    if (!text || this.pendingContinue.has(r.id)) return;
+    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), CONTINUE_DELAY_MS) });
+    log.info('a session waiting out a limit can carry on', { run: r.id, why });
+    this.bus.toast('info', `${r.name}: ${why} — telling it to carry on.`);
   }
 
   private maybeProactive(sub: Subscription, runs: RunRow[]): void {

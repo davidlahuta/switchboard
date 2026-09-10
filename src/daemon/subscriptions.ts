@@ -77,6 +77,8 @@ type OAuthWindow = { utilization?: number; resets_at?: string | null } | null | 
 
 /** Utilisation assumed for a window that has not reported yet (no session has run on it). */
 const ASSUMED_PCT = 40;
+/** A subscription at or past this has nothing left to give, whatever the proactive threshold says. */
+export const SPENT_PCT = 99;
 /** How close a spent window has to be to turning over before that is worth counting on. */
 const RESET_SOON_MS = 15 * 60_000;
 /**
@@ -280,8 +282,10 @@ export class SubscriptionManager {
    * `runId` lets the session's own history count: a subscription it has just been moved off is not
    * somewhere to send it straight back to.
    */
-  rank(excludeId?: string | null, runId?: string): { row: SubRow; score: number } | null {
-    const threshold = getSettings(this.db).swapThresholdPct;
+  rank(excludeId?: string | null, runId?: string, atLimit = false): { row: SubRow; score: number } | null {
+    // A session that is already stopped is not weighing a move against staying — it has nothing to
+    // stay on. So the proactive threshold steps aside and only a spent subscription is refused.
+    const threshold = atLimit ? SPENT_PCT : getSettings(this.db).swapThresholdPct;
     const left = runId ? this.recentlyLeft(runId) : new Set<string>();
     let best: { row: SubRow; score: number } | null = null;
     for (const r of this.rows()) {
@@ -289,7 +293,7 @@ export class SubscriptionManager {
       const sub = this.dto(r);
       if (!sub.enabled || sub.status !== 'ready') continue;
       const used = Math.max(sub.usage?.fiveHour?.pct ?? ASSUMED_PCT, sub.usage?.sevenDay?.pct ?? ASSUMED_PCT);
-      if (used >= Math.min(99, threshold)) continue;
+      if (used >= Math.min(SPENT_PCT, threshold)) continue;
       const score = subscriptionScore({
         headroom: sub.headroom,
         fullHeadroom: weightFor(r.plan, r.rate_tier),
@@ -303,8 +307,16 @@ export class SubscriptionManager {
     return best;
   }
 
-  pickBest(excludeId?: string | null, runId?: string): SubRow | null {
-    return this.rank(excludeId, runId)?.row ?? null;
+  pickBest(excludeId?: string | null, runId?: string, atLimit = false): SubRow | null {
+    return this.rank(excludeId, runId, atLimit)?.row ?? null;
+  }
+
+  /** How much of the binding window a subscription has spent, or the assumption when nothing is known. */
+  usedPct(id: string): number {
+    const r = this.row(id);
+    const usage = r ? this.dto(r).usage : null;
+    if (!usage) return ASSUMED_PCT;
+    return Math.max(usage.fiveHour?.pct ?? ASSUMED_PCT, usage.sevenDay?.pct ?? ASSUMED_PCT);
   }
 
   /** What the subscription a session is on now is worth, to compare a proposed move against. */

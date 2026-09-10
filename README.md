@@ -114,7 +114,11 @@ From there you can:
 - Open it in the browser and keep working.
 - Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default), or before it gets there
   (*Proactive swap*, on by default at 85%). Waiting for the limit means every swap lands mid-turn; whatever
-  sits above the threshold has to carry one whole turn, so lower it if your turns run long.
+  sits above the threshold has to carry one whole turn, so lower it if your turns run long. A session that
+  does run out is not left there: the threshold is what stops a *working* session moving for a small gain,
+  and one that has stopped will take anything with room left. It is checked again every time usage is read,
+  so when a window turns over it either moves to whatever came back or — if that was its own — simply gets
+  told to carry on where it is.
 - **Rename** it from the pencil next to its name, or with `/rename` inside the session — there is one
   name, and whichever side you change it on the other follows, tab title included. The same goes for
   `/model`. The tab carries the same mark the session lists draw, so a strip of terminals and the web
@@ -128,7 +132,10 @@ From there you can:
   terminal until you ask it to fit again.
 - **Relaunch** it in a new terminal. A restart in place reuses the window Switchboard opened, which
   hosts part of Switchboard itself, so it keeps running the code it started with; sessions in that
-  state are badged *old host*. A relaunch resumes the same session GUID, so nothing is lost — and if
+  state are badged *old host*. You rarely have to ask for it: a session badged that way gets a new
+  terminal automatically the next time anything brings it back — a swap, a restart, an update —
+  since that is the one moment when a fresh terminal costs nothing the respawn does not already
+  cost. A relaunch resumes the same session GUID, so nothing is lost — and if
   Claude Code cannot pick that conversation up, the session it starts instead is stopped rather than
   allowed to take its place, leaving the run pointed at the conversation that is still on disk.
 

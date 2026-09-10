@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { attentionFor, limitSwapPlan, rebindDecision, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
+import { attentionFor, limitSwapPlan, rebindDecision, rejectReservedArgs, rescueDecision, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
 import { attentionMark, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
@@ -87,6 +87,30 @@ describe('moving a session off a spent subscription', () => {
     assert.equal(plan.force, false);
     assert.ok(plan.deadline! > now, 'queued behind the turn');
     assert.ok(plan.deadline! - now <= 5 * 60_000, 'but not indefinitely: the subscription is spent');
+  });
+});
+
+describe('picking a session up off a usage limit', () => {
+  const threshold = 85;
+
+  it('tells it to carry on once its own subscription has room', () => {
+    // Nothing to gain from a move: it is already sitting on the conversation it wants.
+    assert.equal(rescueDecision({ ownUsedPct: 12, bestElsewherePct: 3, threshold }), 'continue');
+  });
+
+  it('moves it to a subscription that still has capacity, threshold or no threshold', () => {
+    // 90% is past the bar that stops a *running* session moving, and it is still far better than
+    // the nothing it has where it is.
+    assert.equal(rescueDecision({ ownUsedPct: 100, bestElsewherePct: 90, threshold }), 'move');
+  });
+
+  it('waits when everywhere else is spent too', () => {
+    assert.equal(rescueDecision({ ownUsedPct: 100, bestElsewherePct: 99, threshold }), 'wait');
+    assert.equal(rescueDecision({ ownUsedPct: 100, bestElsewherePct: null, threshold }), 'wait');
+  });
+
+  it('prefers staying put to moving when both would work', () => {
+    assert.equal(rescueDecision({ ownUsedPct: 40, bestElsewherePct: 0, threshold }), 'continue');
   });
 });
 
