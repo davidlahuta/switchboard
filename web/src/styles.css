@@ -667,7 +667,9 @@ select.input {
 .field-row {
   display: flex;
   gap: 12px;
-  align-items: flex-end;
+  /* Top-aligned, not bottom: a hint appearing under one field (e.g. worktree while resuming)
+     would otherwise push its neighbour's input out of line. */
+  align-items: flex-start;
   flex-wrap: wrap;
 }
 .field-row > .field {
@@ -1360,8 +1362,11 @@ a.list-main:hover {
 }
 .repo-panel[data-panel='messages'] {
   grid-area: messages;
-  position: sticky;
-  top: 12px;
+  /*
+   * Deliberately not sticky. It shares a column with the notes panel, and as the only positioned
+   * element it painted over its neighbour while pinned. The thread scrolls inside itself instead,
+   * which keeps recent messages reachable without taking the panel out of flow.
+   */
 }
 .repo-panel[data-panel='files'] {
   grid-area: files;
@@ -2340,11 +2345,30 @@ a.list-main:hover {
 .term-scroller {
   flex: 1;
   min-height: 0;
+  /* Fitted (the default) the host fills this box and nothing scrolls here — xterm owns
+     scrollback. Unfitted the terminal keeps the PTY's size, so this is how you reach the rest
+     of it; that is the only case where a scrollbar belongs here. */
   overflow: auto;
   position: relative;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   background: #0b0e13;
+}
+.term-scroller {
+  scrollbar-width: thin;
+  scrollbar-color: #39424f transparent;
+}
+.term-scroller::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.term-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+.term-scroller::-webkit-scrollbar-thumb {
+  background: #39424f;
+  border: 3px solid #0b0e13;
+  border-radius: 6px;
 }
 .term-host {
   display: inline-block;
@@ -2365,8 +2389,28 @@ a.list-main:hover {
 .term-host .xterm {
   height: 100%;
 }
+/*
+ * xterm owns vertical scrolling (scrollback). Keep its scrollbar thin and dark so it does not
+ * read as a second browser scrollbar next to the page's own.
+ */
 .term-host .xterm-viewport {
   background-color: #0b0e13 !important;
+  scrollbar-width: thin;
+  scrollbar-color: #39424f transparent;
+}
+.term-host .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+.term-host .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+.term-host .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #39424f;
+  border: 3px solid #0b0e13;
+  border-radius: 6px;
+}
+.term-host .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #4b5666;
 }
 .term-composer {
   flex: none;
@@ -2470,9 +2514,6 @@ a.list-main:hover {
   .repo-grid {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas: 'agents' 'messages' 'files' 'notes';
-  }
-  .repo-panel[data-panel='messages'] {
-    position: static;
   }
 }
 

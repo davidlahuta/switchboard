@@ -25,6 +25,8 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
   const inp = process.stdin;
   let runId = opts.runId ?? null;
   let child: IPty | null = null;
+  /** The PTY is currently sized by a web viewer rather than by this console. */
+  let webSized = false;
   let swapping = false;
   let stopping = false;
   let ws: WebSocket | null = null;
@@ -52,6 +54,12 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     const { cols, rows } = size();
     if (!child) return;
     child.resize(cols, rows);
+    // Coming back from a web-driven size, the console is full of a frame drawn for those other
+    // dimensions; clear it so the repaint starts from a clean screen.
+    if (webSized) {
+      out.write(CLEAR);
+      webSized = false;
+    }
     send({ type: 'resize', cols, rows });
   });
 
@@ -135,7 +143,13 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
         child?.write(msg.data);
         break;
       case 'resize':
-        child?.resize(msg.cols, msg.rows);
+        if (!child) break;
+        // The web view is taking the size over. The local console keeps showing the frame drawn
+        // for the old size, and the TUI now repaints a smaller area inside it, which leaves the
+        // old characters around and under the new frame. Wipe the console before it repaints.
+        child.resize(msg.cols, msg.rows);
+        out.write(CLEAR);
+        webSized = msg.cols !== size().cols || msg.rows !== size().rows;
         send({ type: 'resize', cols: msg.cols, rows: msg.rows });
         break;
       case 'type':
@@ -144,6 +158,16 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
         await sleep(200);
         child?.write('\r');
         break;
+      case 'restore-size': {
+        if (!child || !webSized) break;
+        // Nobody is watching from a browser any more, so this console owns the size again.
+        const { cols, rows } = size();
+        child.resize(cols, rows);
+        out.write(CLEAR);
+        webSized = false;
+        send({ type: 'resize', cols, rows });
+        break;
+      }
       case 'redraw': {
         // Nudge the TUI into a full repaint so the daemon's mirror catches up.
         const { cols, rows } = size();

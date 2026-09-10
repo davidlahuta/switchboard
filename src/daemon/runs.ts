@@ -452,7 +452,12 @@ export class RunManager {
         this.send(runId, { type: 'resize', cols: Math.floor(frame.cols), rows: Math.floor(frame.rows) });
       }
     });
-    ws.on('close', detach);
+    ws.on('close', () => {
+      detach();
+      // Last browser viewer gone: give the size back to the terminal window the session lives in,
+      // otherwise it stays at whatever a phone asked for until someone resizes that window.
+      if (mirror.viewers === 0) this.send(runId, { type: 'restore-size' });
+    });
   }
 
   // ----------------------------------------------------------------- swap

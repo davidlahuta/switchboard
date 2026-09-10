@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { sortRepos } from '../lib/repos.ts';
 import { href, type Route } from '../lib/router.ts';
 import { useStore, type ConnState } from '../lib/store.tsx';
 import { StaleCodeBanner } from './StaleCode.tsx';
@@ -60,7 +61,7 @@ export function Layout({ route, children, bare }: { route: Route; children: Reac
         {state && state.repos.length > 0 && (
           <nav className="side-repos" aria-label="Repositories">
             <div className="side-heading">Repos</div>
-            {state.repos.map((r) => (
+            {sortRepos(state.repos).map((r) => (
               <a
                 key={r.id}
                 href={href.repo(r.id)}

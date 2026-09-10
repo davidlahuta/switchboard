@@ -71,3 +71,22 @@ export function matchRepo(repo: DiscoveredRepo, query: string): boolean {
   if (!q) return true;
   return repo.name.toLowerCase().includes(q) || repo.path.toLowerCase().replace(/\\/g, '/').includes(q.replace(/\\/g, '/'));
 }
+
+/**
+ * Navigation order: repos you are most likely to want are first. Live agents beat everything,
+ * then anything wanting attention, then recency, and finally the name so a quiet list is stable
+ * and alphabetical instead of shuffling as timestamps tick.
+ */
+export function sortRepos<T extends { name: string; agentsOnline: number; openConflicts: number; unreadForHuman: number; lastActivity: string | null }>(
+  repos: readonly T[],
+): T[] {
+  const attention = (r: T): number => (r.openConflicts > 0 || r.unreadForHuman > 0 ? 1 : 0);
+  return [...repos].sort(
+    (a, b) =>
+      Number(b.agentsOnline > 0) - Number(a.agentsOnline > 0) ||
+      b.agentsOnline - a.agentsOnline ||
+      attention(b) - attention(a) ||
+      (b.lastActivity ?? '').localeCompare(a.lastActivity ?? '') ||
+      a.name.localeCompare(b.name),
+  );
+}

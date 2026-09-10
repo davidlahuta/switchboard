@@ -40,6 +40,8 @@ export type DaemonToRunner =
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'type'; text: string }
   | { type: 'redraw' }
+  /** Web viewers are gone: hand the size back to the console the runner lives in. */
+  | { type: 'restore-size' }
   | { type: 'stop' }
   | { type: 'error'; message: string };
 

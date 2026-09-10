@@ -185,6 +185,13 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE runs ADD COLUMN skip_permissions INTEGER;
   `,
+  `
+  -- Busy repos: the unread-per-agent lookup probes deliveries by agent, and the file-activity
+  -- panel scans a repo's touches by time. Neither was served by an existing index.
+  CREATE INDEX deliveries_agent ON deliveries (agent_id, message_id);
+  CREATE INDEX file_touches_repo_ts ON file_touches (repo_id, ts);
+  CREATE INDEX messages_repo_created ON messages (repo_id, created_at);
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

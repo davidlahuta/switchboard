@@ -15,6 +15,7 @@ import { emitToast } from '../lib/toast.ts';
 const FONT = '"Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace';
 const FONT_KEY = 'sb.term.fontSize';
 const COMPOSER_KEY = 'sb.term.composer';
+const FIT_KEY = 'sb.term.fit';
 const MIN_FONT = 6;
 const MAX_FONT = 28;
 
@@ -105,7 +106,9 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   const [liveSub, setLiveSub] = useState<string | null>(null);
   const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
   const [fontSize, setFontSize] = useState(initialFontSize);
-  const [fit, setFit] = useState(false);
+  // Fitted by default: the terminal then fills the page and only xterm's own scrollback scrolls.
+  // Unfitted it renders at the PTY's size, which needs an outer scroller to reach the rest.
+  const [fit, setFit] = useState(() => readStorage(FIT_KEY) !== '0');
   const [composerOpen, setComposerOpen] = useState(() => readStorage(COMPOSER_KEY) !== '0');
   const [draft, setDraft] = useState(() => {
     try {
@@ -361,6 +364,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   }, [draft, runId]);
 
   useEffect(() => writeStorage(COMPOSER_KEY, composerOpen ? '1' : '0'), [composerOpen]);
+  useEffect(() => writeStorage(FIT_KEY, fit ? '1' : '0'), [fit]);
 
   // ---- actions ----
   const pressKey = (k: KeyDef) => {

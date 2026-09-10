@@ -142,6 +142,23 @@ export function ago(iso: string | null): string {
   return `${Math.round(s / 86400)}d ago`;
 }
 
+export interface DetailLimits {
+  messages: number;
+  events: number;
+  files: number;
+}
+
+/** Payload caps for one repo view. Kept modest: this is refetched on every change. */
+export const DEFAULT_LIMITS: DetailLimits = { messages: 150, events: 150, files: 250 };
+/** How many recent touch rows the file panel aggregates over. Bounds the cost on busy repos. */
+const TOUCH_SCAN = 4000;
+/** Unread is counted over this window only, so the scan does not grow with history. */
+const UNREAD_WINDOW_MS = 24 * 3600_000;
+/** Retention for the high-volume tables, applied by the periodic sweep. */
+const EVENT_RETENTION_DAYS = 14;
+const TOUCH_RETENTION_DAYS = 14;
+const MAX_EVENTS_PER_REPO = 5000;
+
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 export class Coordinator {
@@ -328,6 +345,30 @@ export class Coordinator {
     this.bus.invalidate('state', `repo:${a.repo_id}`);
   }
 
+  /**
+   * Trim the high-volume tables. Without this a long-lived busy repo grows without bound, which
+   * eventually shows up as a slow repo view rather than as an obvious failure.
+   */
+  prune(): void {
+    const eventCutoff = new Date(Date.now() - EVENT_RETENTION_DAYS * 86400_000).toISOString();
+    const touchCutoff = new Date(Date.now() - TOUCH_RETENTION_DAYS * 86400_000).toISOString();
+    const removed =
+      this.db.run('DELETE FROM events WHERE ts < ?', eventCutoff).changes +
+      this.db.run('DELETE FROM file_touches WHERE ts < ?', touchCutoff).changes;
+    let capped = 0;
+    for (const r of this.db.all<{ id: string }>('SELECT id FROM repos')) {
+      capped += this.db.run(
+        `DELETE FROM events WHERE repo_id = ? AND id NOT IN
+           (SELECT id FROM events WHERE repo_id = ? ORDER BY id DESC LIMIT ?)`,
+        r.id,
+        r.id,
+        MAX_EVENTS_PER_REPO,
+      ).changes;
+    }
+    // Deliveries outlive their message only if a message is ever deleted; messages are kept.
+    if (removed + capped > 0) log.info('pruned history', { aged: removed, overCap: capped });
+  }
+
   /** Periodic liveness sweep: dead pids and long-silent hook-only agents go offline. */
   sweep(): void {
     const live = this.db.all<AgentRow>("SELECT * FROM agents WHERE status <> 'offline'");
@@ -376,6 +417,21 @@ export class Coordinator {
 
   private liveAgents(repoId: string): AgentRow[] {
     return this.db.all<AgentRow>("SELECT * FROM agents WHERE repo_id = ? AND status <> 'offline' ORDER BY started_at", repoId);
+  }
+
+  /**
+   * Every agent name in a repo, resolved once. `nameOf` costs a query per call, which turns a
+   * few hundred messages, events and file rows into a thousand queries per request.
+   */
+  private namesIn(repoId: string): (id: string | null) => string {
+    const names = new Map<string, string>();
+    for (const a of this.db.all<{ id: string; name: string }>('SELECT id, name FROM agents WHERE repo_id = ?', repoId)) names.set(a.id, a.name);
+    return (id) => {
+      if (!id) return 'all';
+      if (id === HUMAN) return 'human';
+      if (id === SYSTEM) return 'switchboard';
+      return names.get(id) ?? id.slice(0, 8);
+    };
   }
 
   private nameOf(id: string | null): string {
@@ -1036,7 +1092,30 @@ export class Coordinator {
 
   // ------------------------------------------------------------------ DTOs
 
-  agentDto(r: AgentRow): Agent {
+  /**
+   * Unread counts for a whole repo in one statement. Doing it per agent meant a correlated
+   * NOT EXISTS over every message once per agent, which is the dominant cost on a busy repo.
+   */
+  private unreadByAgent(repoId: string): Map<string, number> {
+    const rows = this.db.all<{ id: string; n: number }>(
+      `SELECT a.id AS id, COUNT(m.id) AS n
+         FROM agents a
+         LEFT JOIN messages m
+           ON m.repo_id = a.repo_id
+          AND m.from_id <> a.id
+          AND (m.to_id = a.id OR m.to_id IS NULL)
+          AND m.created_at >= a.started_at
+          AND m.created_at >= ?
+          AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = a.id)
+        WHERE a.repo_id = ? AND a.status <> 'offline'
+        GROUP BY a.id`,
+      new Date(Date.now() - UNREAD_WINDOW_MS).toISOString(),
+      repoId,
+    );
+    return new Map(rows.map((r) => [r.id, r.n]));
+  }
+
+  agentDto(r: AgentRow, unread?: number): Agent {
     return {
       id: r.id,
       repoId: r.repo_id,
@@ -1050,37 +1129,37 @@ export class Coordinator {
       runId: r.run_id,
       hasChannel: bool(r.has_channel),
       lastTool: r.last_tool,
-      unread: r.status === 'offline' ? 0 : this.pending(r).length,
+      unread: r.status === 'offline' ? 0 : (unread ?? this.pending(r).length),
       startedAt: r.started_at,
       lastSeen: r.last_seen,
       endedAt: r.ended_at,
     };
   }
 
-  private messageDto(m: MessageRow): Message {
-    const delivered = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM deliveries WHERE message_id = ?', m.id)?.n ?? 0;
+  private messageDto(m: MessageRow, name = (id: string | null) => this.nameOf(id), delivered?: number): Message {
+    const count = delivered ?? this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM deliveries WHERE message_id = ?', m.id)?.n ?? 0;
     return {
       id: m.id,
       repoId: m.repo_id,
       from: m.from_id,
-      fromName: this.nameOf(m.from_id),
+      fromName: name(m.from_id),
       to: m.to_id,
-      toName: m.to_id ? this.nameOf(m.to_id) : null,
+      toName: m.to_id ? name(m.to_id) : null,
       kind: m.kind,
       body: m.body,
       urgent: bool(m.urgent),
       replyTo: m.reply_to,
       createdAt: m.created_at,
-      deliveredCount: delivered,
+      deliveredCount: count,
     };
   }
 
-  private noteDto(n: NoteRow): Note {
+  private noteDto(n: NoteRow, name = (id: string | null) => this.nameOf(id)): Note {
     return {
       id: n.id,
       repoId: n.repo_id,
       agentId: n.agent_id,
-      agentName: n.agent_id ? this.nameOf(n.agent_id) : 'operator',
+      agentName: n.agent_id ? name(n.agent_id) : 'operator',
       kind: n.kind,
       body: n.body,
       pinned: bool(n.pinned),
@@ -1119,9 +1198,11 @@ export class Coordinator {
     return this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM agents WHERE status <> 'offline'")?.n ?? 0;
   }
 
-  repoDetail(repoId: string): RepoDetail | null {
+  repoDetail(repoId: string, limits: DetailLimits = DEFAULT_LIMITS): RepoDetail | null {
     const repo = this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', repoId);
     if (!repo) return null;
+    const name = this.namesIn(repoId);
+    const unread = this.unreadByAgent(repoId);
     const agents = [
       ...this.db.all<AgentRow>("SELECT * FROM agents WHERE repo_id = ? AND status <> 'offline' ORDER BY started_at", repoId),
       ...this.db.all<AgentRow>("SELECT * FROM agents WHERE repo_id = ? AND status = 'offline' ORDER BY last_seen DESC LIMIT 30", repoId),
@@ -1150,34 +1231,59 @@ export class Coordinator {
         kind: c.kind,
         status: c.status,
         agentA: c.agent_a,
-        agentAName: this.nameOf(c.agent_a),
+        agentAName: name(c.agent_a),
         agentB: c.agent_b,
-        agentBName: this.nameOf(c.agent_b),
+        agentBName: name(c.agent_b),
         detail: c.detail,
         createdAt: c.created_at,
         resolvedAt: c.resolved_at,
       }));
     const notes = this.db
       .all<NoteRow>('SELECT * FROM notes WHERE repo_id = ? AND archived_at IS NULL ORDER BY pinned DESC, id DESC LIMIT 200', repoId)
-      .map((n) => this.noteDto(n));
-    const messages = this.db
-      .all<MessageRow>('SELECT * FROM messages WHERE repo_id = ? ORDER BY id DESC LIMIT 300', repoId)
-      .reverse()
-      .map((m) => this.messageDto(m));
+      .map((n) => this.noteDto(n, name));
+    const messageRows = this.db.all<MessageRow>('SELECT * FROM messages WHERE repo_id = ? ORDER BY id DESC LIMIT ?', repoId, limits.messages).reverse();
+    const deliveredCounts = new Map<number, number>();
+    if (messageRows.length) {
+      const ids = messageRows.map((m) => m.id);
+      const placeholders = ids.map(() => '?').join(',');
+      for (const row of this.db.all<{ message_id: number; n: number }>(
+        `SELECT message_id, COUNT(*) AS n FROM deliveries WHERE message_id IN (${placeholders}) GROUP BY message_id`,
+        ...ids,
+      )) {
+        deliveredCounts.set(row.message_id, row.n);
+      }
+    }
+    const messages = messageRows.map((m) => this.messageDto(m, name, deliveredCounts.get(m.id) ?? 0));
     const events: FeedEvent[] = this.db
       .all<{ id: number; repo_id: string; agent_id: string | null; type: string; summary: string; ts: string }>(
-        'SELECT * FROM events WHERE repo_id = ? ORDER BY id DESC LIMIT 300',
+        'SELECT * FROM events WHERE repo_id = ? ORDER BY id DESC LIMIT ?',
         repoId,
+        limits.events,
       )
-      .map((e) => ({ id: e.id, repoId: e.repo_id, agentId: e.agent_id, agentName: e.agent_id ? this.nameOf(e.agent_id) : null, type: e.type, summary: e.summary, ts: e.ts }));
+      .map((e) => ({ id: e.id, repoId: e.repo_id, agentId: e.agent_id, agentName: e.agent_id ? name(e.agent_id) : null, type: e.type, summary: e.summary, ts: e.ts }));
     const files: FileTouch[] = this.db
       .all<{ path: string; agent_id: string; worktree: string | null; n: number; last: string }>(
-        `SELECT path, agent_id, worktree, COUNT(*) AS n, MAX(ts) AS last FROM file_touches
-         WHERE repo_id = ? AND ts >= ? GROUP BY path, agent_id ORDER BY last DESC LIMIT 400`,
+        // Aggregate the most recent slice of touches, not every touch in the window: a dozen busy
+        // agents produce tens of thousands a day, and the panel only shows the newest rows anyway.
+        // Counts are therefore "within the last TOUCH_SCAN rows", which is what the UI states.
+        `SELECT path, agent_id, worktree, COUNT(*) AS n, MAX(ts) AS last
+           FROM (SELECT * FROM file_touches WHERE repo_id = ? AND ts >= ? ORDER BY id DESC LIMIT ?)
+          GROUP BY path, agent_id ORDER BY last DESC LIMIT ?`,
         repoId,
         new Date(Date.now() - 24 * 3600_000).toISOString(),
+        TOUCH_SCAN,
+        limits.files,
       )
-      .map((f) => ({ path: f.path, agentId: f.agent_id, agentName: this.nameOf(f.agent_id), worktree: f.worktree, count: f.n, lastTs: f.last }));
-    return { repo: this.repoDto(repo), agents: agents.map((x) => this.agentDto(x)), claims, conflicts, notes, messages, events, files };
+      .map((f) => ({ path: f.path, agentId: f.agent_id, agentName: name(f.agent_id), worktree: f.worktree, count: f.n, lastTs: f.last }));
+    return {
+      repo: this.repoDto(repo),
+      agents: agents.map((x) => this.agentDto(x, unread.get(x.id) ?? 0)),
+      claims,
+      conflicts,
+      notes,
+      messages,
+      events,
+      files,
+    };
   }
 }
