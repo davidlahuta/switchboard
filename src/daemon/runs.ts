@@ -173,8 +173,13 @@ export function attentionFor(input: {
   lastActivity: string;
   lastViewedAt: string | null;
   unread: number;
+  /** what it still has running: subagents mean the quiet is not the end of anything */
+  work: SessionWork[];
 }): Attention {
-  const busy = input.agentStatus === 'working' || input.agentStatus === 'starting';
+  const busy =
+    input.agentStatus === 'working' ||
+    input.agentStatus === 'starting' ||
+    input.work.some((w) => w.kind === 'subagent');
   return {
     waiting: input.agentStatus === 'waiting',
     unread: input.unread,
@@ -374,6 +379,7 @@ export class RunManager {
         }
       : null;
     const waiting = this.pendingRespawn.get(r.id) ?? null;
+    const work = this.liveWorkFor(r.session_id);
     const status: RunStatus = waiting && r.status === 'running' ? 'swapping' : r.status;
     const agent = this.coord.agent(r.session_id);
     const lastActivity = agent?.last_seen ?? r.ended_at ?? r.created_at;
@@ -399,7 +405,7 @@ export class RunManager {
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
       skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
       continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
-      work: this.liveWorkFor(r.session_id),
+      work,
       waiting: waiting
         ? {
             kind: waiting.kind,
@@ -419,6 +425,7 @@ export class RunManager {
         lastActivity,
         lastViewedAt: r.last_viewed_at,
         unread: this.unreadForOperator(r.session_id),
+        work,
       }),
       endedAt: r.ended_at,
       exitCode: r.exit_code,
@@ -1452,13 +1459,28 @@ export class RunManager {
    */
   onWorkSettled(sessionId: string): void {
     const r = this.bySession(sessionId);
-    if (!r || !this.pendingRespawn.has(r.id)) return;
+    if (!r) return;
+    // The tab says what the session is doing, and it has just stopped doing it.
+    this.onWorkChanged(sessionId);
+    if (!this.pendingRespawn.has(r.id)) return;
     setTimeout(() => {
       const fresh = this.bySession(sessionId);
       if (!fresh || fresh.status === 'exited' || !this.pendingRespawn.has(fresh.id) || this.busy(fresh)) return;
       log.info('taking a queued respawn now that the session has nothing running', { run: fresh.id });
       this.onIdle(sessionId);
     }, WORK_SETTLED_MS);
+  }
+
+  /**
+   * Work started or ended. The mark on the tab is drawn from it, and the poll that would otherwise
+   * catch up is four seconds away — long enough to see a tab lie about a session that has just
+   * handed its work to a subagent.
+   */
+  onWorkChanged(sessionId: string): void {
+    const r = this.bySession(sessionId);
+    if (!r) return;
+    this.workCache = null;
+    this.pushTitle(r);
   }
 
   onIdle(sessionId: string): void {

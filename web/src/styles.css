@@ -748,6 +748,16 @@ select.input {
 .attention-limited {
   color: var(--warn);
 }
+/* Working through subagents: the same muted weight as working, because that is what it is — the
+   shape is what says the work is being done somewhere other than the main thread. */
+.attention-delegating {
+  color: var(--muted);
+}
+/* Idle, but holding something open. The quietest mark there is: it asks nothing and spends nothing,
+   it only means "not as finished as it looks". */
+.attention-background {
+  color: var(--border-strong);
+}
 @media (prefers-reduced-motion: no-preference) {
   .attention-blocked {
     animation: attention-pulse 2s ease-in-out infinite;

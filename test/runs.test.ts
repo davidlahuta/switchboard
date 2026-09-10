@@ -50,7 +50,13 @@ describe('when a session may be swapped', () => {
 
 describe('which sessions are asking to be looked at', () => {
   const t = (iso: string): string => new Date(iso).toISOString();
-  const base = { agentStatus: 'idle' as const, lastActivity: t('2026-01-01T10:00:00Z'), lastViewedAt: t('2026-01-01T10:00:00Z'), unread: 0 };
+  const base = {
+    agentStatus: 'idle' as const,
+    lastActivity: t('2026-01-01T10:00:00Z'),
+    lastViewedAt: t('2026-01-01T10:00:00Z'),
+    unread: 0,
+    work: [] as SessionWork[],
+  };
 
   it('says nothing about a session that has done nothing since it was read', () => {
     const a = attentionFor(base);
@@ -78,6 +84,20 @@ describe('which sessions are asking to be looked at', () => {
 
   it('counts what a session addressed to the operator, whatever else it is doing', () => {
     assert.equal(attentionFor({ ...base, agentStatus: 'working', unread: 2 }).unread, 2);
+  });
+
+  it('does not call a session finished while its subagents are still going', () => {
+    // Its own turn ended, so the status says idle and the activity is newer than the last look —
+    // which used to read as "it has done something for you". It has not; it is mid-subagent.
+    const subagent: SessionWork = { id: 'a1', kind: 'subagent', label: null, since: '', lastSeen: '' };
+    const a = attentionFor({ ...base, lastActivity: t('2026-01-01T10:05:00Z'), work: [subagent] });
+    assert.equal(a.unseen, false);
+  });
+
+  it('does call it finished when all it has left running is a shell', () => {
+    const shell: SessionWork = { id: 'b1', kind: 'shell', label: 'npm run dev', since: '', lastSeen: '' };
+    const a = attentionFor({ ...base, lastActivity: t('2026-01-01T10:05:00Z'), work: [shell] });
+    assert.equal(a.unseen, true, 'a dev server is not the session working');
   });
 });
 
@@ -420,10 +440,11 @@ describe('per-session claude arguments', () => {
 });
 
 describe('what a terminal tab says it wants', () => {
-  const base: Pick<Run, 'status' | 'agentStatus' | 'attention'> = {
+  const base: Pick<Run, 'status' | 'agentStatus' | 'attention' | 'work'> = {
     status: 'running',
     agentStatus: 'idle',
     attention: { waiting: false, unread: 0, unseen: false },
+    work: [],
   };
   const mark = (over: Partial<typeof base>): string => sessionMark({ ...base, ...over } as Run)?.glyph ?? '';
 
@@ -454,7 +475,7 @@ describe('what a terminal tab says it wants', () => {
 
 describe('one mark, wherever a session is shown', () => {
   const run = (over: Partial<Run>): Run =>
-    ({ status: 'running', agentStatus: 'idle', name: 'apex', attention: { waiting: false, unread: 0, unseen: false }, ...over }) as Run;
+    ({ status: 'running', agentStatus: 'idle', name: 'apex', work: [], attention: { waiting: false, unread: 0, unseen: false }, ...over }) as Run;
 
   it('says the same thing in a tab as in the web list', () => {
     const waiting = run({ agentStatus: 'waiting', attention: { waiting: true, unread: 0, unseen: false } });
@@ -476,6 +497,25 @@ describe('one mark, wherever a session is shown', () => {
     assert.equal(tabTitle(run({}), 'apex'), 'apex');
   });
 
+  it('shows a session working through subagents as working, not as finished', () => {
+    const sub: SessionWork = { id: 'a1', kind: 'subagent', label: 'general-purpose', since: '', lastSeen: '' };
+    const r = run({ agentStatus: 'idle', work: [sub] });
+    assert.equal(sessionMark(r)?.tone, 'delegating');
+    assert.equal(attentionMark(r), null, 'it is working; it is not asking for anybody');
+    assert.equal(tabTitle(r, 'apex'), `${sessionMark(r)!.glyph} apex`, 'the tab says the same thing');
+  });
+
+  it('marks a session that is idle but still holding a background task open', () => {
+    const shell: SessionWork = { id: 'b1', kind: 'shell', label: 'npm run dev', since: '', lastSeen: '' };
+    assert.equal(sessionMark(run({ agentStatus: 'idle', work: [shell] }))?.tone, 'background');
+  });
+
+  it('lets what the operator is asked for win over what is running', () => {
+    const sub: SessionWork = { id: 'a1', kind: 'subagent', label: null, since: '', lastSeen: '' };
+    const r = run({ agentStatus: 'waiting', attention: { waiting: true, unread: 0, unseen: false }, work: [sub] });
+    assert.equal(sessionMark(r)?.tone, 'blocked');
+  });
+
   it('gives every state the tab shows a tone the web can colour', () => {
     const states: Array<Partial<Run>> = [
       { agentStatus: 'waiting', attention: { waiting: true, unread: 0, unseen: false } },
@@ -483,6 +523,8 @@ describe('one mark, wherever a session is shown', () => {
       { attention: { waiting: false, unread: 0, unseen: true } },
       { agentStatus: 'working' },
       { agentStatus: 'limited' },
+      { agentStatus: 'idle', work: [{ id: 'a1', kind: 'subagent', label: null, since: '', lastSeen: '' }] },
+      { agentStatus: 'idle', work: [{ id: 'b1', kind: 'shell', label: null, since: '', lastSeen: '' }] },
     ];
     const tones = states.map((s) => sessionMark(run(s))!.tone);
     assert.equal(new Set(tones).size, states.length, 'each state is its own tone, or two would look alike');
