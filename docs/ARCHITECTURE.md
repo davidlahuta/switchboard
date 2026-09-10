@@ -125,7 +125,8 @@ subscriptions with no live session poll far less often.
 **Headroom** is the ranking metric: `weight × (100 − max(5h%, 7d%)) / 100`. Both windows gate
 every request, so the tighter one decides; the plan weight converts a percentage into something
 comparable across plans. The daemon computes it so the overview's ordering and the automatic swap
-target cannot drift apart.
+target cannot drift apart. `subscriptionScore` then shares that headroom with the sessions already
+on the subscription and adjusts for an imminent reset and for where the session has just been.
 
 ## Models and updates
 
@@ -248,9 +249,26 @@ message is only sent once that hook confirms a live prompt: typing blindly could
 (folder trust, a permission prompt) instead. Folder trust is copied into the target profile first,
 for the same reason.
 
-Triggers: manual (UI), `StopFailure` hook with `rate_limit` (auto-swap + continue), a limit
-message detected in the PTY output (fallback), or proactive (usage above threshold while idle).
-Target = the enabled, logged-in subscription with the most headroom, weighted by live sessions.
+Triggers: manual (UI), `StopFailure` hook with `rate_limit`, a limit message detected in the PTY
+output (fallback), or proactive (usage above threshold while idle).
+
+**When it happens** matters more than it looks, because a swap kills whatever the turn had in
+flight, subagents included. Only a session positively known to be at a prompt is taken — not one
+that merely fails to look busy, since a turn can run for an hour without a hook and a session at a
+permission prompt, one still starting and one the liveness sweep gave up on all read the same from
+here. `StopFailure` is the exception: that limit has already ended the turn, so there is nothing
+left to protect. The same limit seen only in the terminal's output says nothing about the turn, so
+it is queued behind it with a few minutes' grace. A session that is cut short anyway is told so on
+the way back in, because "continue" alone invites it to trust the tail of a transcript whose last
+tool calls may have been killed halfway.
+
+**Where it lands** is the subscription with the most headroom once the sessions already on it are
+counted — they burn it down together, and how long a session lasts before it has to move again is
+what decides how often it moves. A window minutes from resetting counts for what it is about to be
+worth. A subscription this session has just left is discounted, so two of them drifting either side
+of each other cannot pass a session back and forth. And a session already running is only moved for
+a clear improvement: a swap costs a turn, which is a bad trade for a few points of headroom, twice
+over once the numbers cross back.
 
 ## Web terminal
 

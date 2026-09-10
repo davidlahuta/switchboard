@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type { Run } from '@shared/types.ts';
 import { api } from '../lib/api.ts';
+import { AttentionDot } from './AttentionDot.tsx';
 import { Icon } from './ui.tsx';
 
 /**
@@ -8,7 +9,7 @@ import { Icon } from './ui.tsx';
  * here and the session picks it up on its next prompt, and a /rename inside the session comes back
  * the same way. Renaming from either side is therefore the same operation.
  */
-export function SessionName({ run, as: Tag = 'span', href }: { run: Run; as?: 'span' | 'div'; href?: string }) {
+export function SessionName({ run, as: Tag = 'span', href, dot }: { run: Run; as?: 'span' | 'div'; href?: string; dot?: boolean }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(run.name);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -57,6 +58,7 @@ export function SessionName({ run, as: Tag = 'span', href }: { run: Run; as?: 's
 
   return (
     <Tag className="rename-wrap">
+      {dot && <AttentionDot run={run} />}
       {href ? (
         <a href={href} className="run-name">
           {run.name}

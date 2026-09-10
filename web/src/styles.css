@@ -721,6 +721,7 @@ select.input {
 .attention {
   display: inline-block;
   flex: none;
+  align-self: center;
   width: 9px;
   height: 9px;
   margin-right: 7px;

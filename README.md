@@ -43,12 +43,18 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
 - One-click launch into a Windows Terminal tab, optionally in a fresh worktree or resuming an older session (including one started before Switchboard existed).
 - Point it at the folder your repos live in and pick from a list instead of typing paths; linked worktrees are shown under the repo they belong to.
 - Per session: model (1M-context models, listed from the API rather than hardcoded), auto-compact and its threshold, whether to skip tool permissions, and any extra `claude` arguments.
-- **Hot swap**: `kill` + `claude --resume <same session>` under another subscription, in the same tab. It triggers:
-  - manually,
-  - automatically when a session hits a usage limit (then it types `continue` for you),
-  - or proactively when a subscription crosses a threshold while the session is idle.
-- **Restart on update**: `claude update` runs on a schedule; when the version changes, sessions restart onto the new build once their agent is idle.
+- **Hot swap**: `kill` + `claude --resume <same session>` under another subscription, in the same tab. It triggers
+  manually, when a session runs into a usage limit, or on its own once a subscription crosses the threshold
+  while the session is idle.
+- A swap kills the session and resumes it, so it happens **between turns**. A turn can run for an hour with
+  subagents under it, and only a session positively known to be at a prompt is taken; everything else waits.
+  A limit that has already ended the turn is the exception, and a session cut short is told so rather than
+  just being told to continue.
+- **Restart on update**: `claude update` runs on a schedule; when the version changes, sessions restart onto the new build once their agent is idle — however long that takes.
 - A session coming back on a conversation it already had is told to carry on, with a message you write (Settings → *Continue message*).
+- The sessions list marks what wants looking at: a session stopped on a prompt only you can answer, one that
+  has messaged you, or one that finished something you have not read. A session merely working gets no mark,
+  because a mark on everything is a mark on nothing.
 - Sessions carry **one name and one model** between Switchboard and Claude Code: rename in the web UI or with `/rename` in the session, change the model with `/model`, and both sides agree either way.
 - Web terminal: full Claude Code TUI in the browser (xterm.js), built for a phone — fitted to the screen, pinned above the keyboard, with a key bar and a prompt composer, and one button to hand the terminal back to the desk.
 - Device pairing for remote access (QR code). Local access needs no login. Add it to your phone's home screen and it runs without browser chrome.
@@ -102,8 +108,13 @@ of Switchboard's own if you prefer (Settings → *Open sessions in the terminal 
 From there you can:
 
 - **Swap** it to another subscription at any time. If the agent is mid-turn, the swap waits for the turn to finish.
+  Where it lands is the subscription with the most room once the sessions already there are counted, so work
+  spreads out rather than piling up, and a session is not moved for a margin too small to be worth the turn
+  it costs — or moved back where it has just come from.
 - Open it in the browser and keep working.
-- Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default).
+- Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default), or before it gets there
+  (*Proactive swap*, on by default at 85%). Waiting for the limit means every swap lands mid-turn; whatever
+  sits above the threshold has to carry one whole turn, so lower it if your turns run long.
 - **Rename** it from the pencil next to its name, or with `/rename` inside the session — there is one
   name, and whichever side you change it on the other follows, tab title included. The same goes for
   `/model`.

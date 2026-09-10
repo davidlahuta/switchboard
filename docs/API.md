@@ -63,7 +63,7 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 |--------|--------------------------|--------------------|---------|
 | GET    | `/api/runs`              |                    | `Run[]` |
 | POST   | `/api/runs`              | `CreateRunRequest` – opens a Windows Terminal tab. Besides `cwd`/`subscriptionId` it takes `name`, `worktree`, `resumeSessionId` (a GUID), `autoSwap`, `model`, `autoCompact`, `autoCompactTokens` and `args` (extra `claude` arguments; ones Switchboard manages are refused with 400) | `Run` |
-| PATCH  | `/api/runs/:id`          | `UpdateRunRequest` – `{ name }` renames the session; Claude Code is renamed with it on its next hook | `Run` |
+| PATCH  | `/api/runs/:id`          | `UpdateRunRequest` – `{ name }` renames the session (Claude Code is renamed with it on its next hook); `{ continueOnResume }` sets whether it is told to carry on when it next comes back | `Run` |
 | POST   | `/api/runs/:id/swap`     | `SwapRequest`      | `Run`   |
 | POST   | `/api/runs/:id/restart`  | `{ force? }` – same subscription, resumes the same session GUID, same terminal | `Run` |
 | POST   | `/api/runs/:id/relaunch` | `RelaunchRequest` – opens a terminal on the same session GUID, closing the old one first if there is one. Works on a run in any state: it is both "pick up a change to Switchboard's own runner" and "resume this session after it exited or the machine went down" | `Run` |
@@ -71,6 +71,13 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | POST   | `/api/runs/:id/stop`     |                    | `{ ok }`|
 | DELETE | `/api/runs/:id`          | forget an exited run | `{ ok }` |
 | GET    | `/api/sessions/recent?cwd=` | recent Claude sessions for a directory (for "resume") | `{ id, title, mtime }[]` |
+
+A `Run` carries two fields worth reading together. `waiting` is a swap or restart queued behind a
+turn that has not finished, with when it was queued and whether anything eventually overrides the
+wait. `attention` is why the session wants looking at — `waiting` (stopped on a prompt only a
+person can clear), `unread` (messages it addressed to the operator), `unseen` (it finished
+something and its terminal has not been open since). Opening the terminal over `/ws/term/:runId`
+clears the last two; a session merely mid-turn sets none of them.
 
 ## Claude Code version and models
 

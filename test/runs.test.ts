@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { attentionFor, limitSwapPlan, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
-import { headroomOf, weightFor } from '../src/daemon/subscriptions.ts';
+import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
 import type { Usage } from '../src/shared/types.ts';
 
 const usage = (five: number | null, seven: number | null): Usage => ({
@@ -85,6 +85,44 @@ describe('moving a session off a spent subscription', () => {
     assert.equal(plan.force, false);
     assert.ok(plan.deadline! > now, 'queued behind the turn');
     assert.ok(plan.deadline! - now <= 5 * 60_000, 'but not indefinitely: the subscription is spent');
+  });
+});
+
+describe('choosing where to put a session', () => {
+  const base = { headroom: 0.5, fullHeadroom: 1, liveRuns: 0, priority: 0, resetsInMs: null, recentlyLeft: false };
+
+  it('shares a subscription out among the sessions already on it', () => {
+    // Two sessions burn it down about twice as fast, so it is worth about half as much to a third.
+    const empty = subscriptionScore(base);
+    const busy = subscriptionScore({ ...base, liveRuns: 2 });
+    assert.ok(busy < empty);
+    assert.ok(busy > 0);
+  });
+
+  it('spreads rather than piling onto the roomiest', () => {
+    // A big plan with three sessions on it loses to an untouched smaller one.
+    const crowded = subscriptionScore({ ...base, headroom: 1.0, liveRuns: 3 });
+    const free = subscriptionScore({ ...base, headroom: 0.5, liveRuns: 0 });
+    assert.ok(free > crowded);
+  });
+
+  it('counts a window that is about to turn over', () => {
+    const spent = { ...base, headroom: 0.02, fullHeadroom: 1 };
+    assert.ok(subscriptionScore({ ...spent, resetsInMs: 60_000 }) > subscriptionScore(spent), 'a minute away is nearly as good as reset');
+    assert.equal(subscriptionScore({ ...spent, resetsInMs: 60 * 60_000 }), subscriptionScore(spent), 'an hour away counts for nothing');
+  });
+
+  it('avoids sending a session back where it just came from', () => {
+    assert.ok(subscriptionScore({ ...base, recentlyLeft: true }) < subscriptionScore(base));
+  });
+
+  it('asks for a real improvement before moving a session at all', () => {
+    // Marginally better is not worth a turn and a resume, and it only has to be moved back later.
+    const staying = subscriptionScore(base);
+    const marginal = subscriptionScore({ ...base, headroom: 0.55 });
+    assert.ok(marginal < staying * SWAP_MARGIN, 'a tenth better does not justify a swap');
+    const worthIt = subscriptionScore({ ...base, headroom: 0.9 });
+    assert.ok(worthIt >= staying * SWAP_MARGIN, 'nearly twice the room does');
   });
 });
 

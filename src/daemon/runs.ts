@@ -17,7 +17,7 @@ import type { Launcher } from './launcher.ts';
 import { TermMirror } from './mirror.ts';
 import type { ModelCatalog } from './models.ts';
 import { getSettings } from './settings.ts';
-import type { SubscriptionManager } from './subscriptions.ts';
+import { SWAP_MARGIN, type SubscriptionManager } from './subscriptions.ts';
 
 const log = logger('runs');
 
@@ -530,9 +530,9 @@ export class RunManager {
 
   // --------------------------------------------------------------- create
 
-  private resolveSubscription(ref: string, exclude?: string | null): string {
+  private resolveSubscription(ref: string, exclude?: string | null, runId?: string): string {
     if (ref === 'auto') {
-      const best = this.subs.pickBest(exclude);
+      const best = this.subs.pickBest(exclude, runId);
       if (!best) throw httpError(409, 'No enabled, logged-in subscription with headroom is available.');
       return best.id;
     }
@@ -848,7 +848,7 @@ export class RunManager {
 
   swap(runId: string, targetRef: string, reason: string, opts: { force?: boolean; continueAfter?: boolean; deadline?: number | null } = {}): Run {
     const r = this.liveRun(runId);
-    const target = this.resolveSubscription(targetRef, r.subscription_id);
+    const target = this.resolveSubscription(targetRef, r.subscription_id, r.id);
     if (target === r.subscription_id) throw httpError(400, 'Session already runs on that subscription');
     return this.respawn(
       r,
@@ -1205,8 +1205,19 @@ export class RunManager {
     for (const r of runs) {
       if (!bool(r.auto_swap) || this.pendingRespawn.has(r.id)) continue;
       if (this.coord.agent(r.session_id)?.status !== 'idle') continue;
+      /*
+       * Crossing the threshold is a reason to look, not a reason to move. A swap costs the session
+       * its place in the conversation and a resume, so somewhere merely a little better is not worth
+       * one — and moving for a small margin means moving back when the two drift the other way. The
+       * candidate has to be clearly better than staying, counting where this session has already
+       * been so a pair of subscriptions cannot pass it between them.
+       */
+      const best = this.subs.rank(r.subscription_id, r.id);
+      if (!best) continue;
+      const staying = this.subs.scoreOf(r.subscription_id);
+      if (best.score < staying * SWAP_MARGIN) continue;
       try {
-        this.swap(r.id, 'auto', `${sub.label} at ${Math.round(used)}%`);
+        this.swap(r.id, best.row.id, `${sub.label} at ${Math.round(used)}%`);
       } catch {
         // nothing better available; stay put
       }

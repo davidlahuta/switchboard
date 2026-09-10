@@ -77,6 +77,16 @@ type OAuthWindow = { utilization?: number; resets_at?: string | null } | null | 
 
 /** Utilisation assumed for a window that has not reported yet (no session has run on it). */
 const ASSUMED_PCT = 40;
+/** How close a spent window has to be to turning over before that is worth counting on. */
+const RESET_SOON_MS = 15 * 60_000;
+/** How long a session stays away from a subscription it has just left, so it cannot bounce back. */
+const RECENTLY_LEFT_MS = 30 * 60_000;
+/**
+ * How much better a subscription has to be before a session already running happily is moved to it.
+ * A swap costs the session its turn and a resume, so trading that for a few points of headroom is a
+ * bad deal twice: once making it, and again when the numbers cross back.
+ */
+export const SWAP_MARGIN = 1.25;
 
 /**
  * What is actually usable right now. Both windows gate every request, so the tighter one decides;
@@ -89,6 +99,40 @@ export function headroomOf(usage: Usage | null, weight: number): { headroom: num
   const used = Math.max(five ?? ASSUMED_PCT, seven ?? ASSUMED_PCT);
   const bindingWindow = five === null && seven === null ? null : (five ?? ASSUMED_PCT) >= (seven ?? ASSUMED_PCT) ? 'fiveHour' : 'sevenDay';
   return { headroom: Math.max(0, (100 - used) / 100) * weight, bindingWindow };
+}
+
+/**
+ * How good a subscription is to put a session on, as a number only worth comparing with itself.
+ *
+ * The shape that matters is headroom shared with whoever is already there. Sessions burn at broadly
+ * the same rate, so a subscription with two on it runs out in roughly a third of the time one with
+ * none does, and how long a session gets before it has to move again is what decides how many times
+ * it moves over its life. Everything else adjusts that:
+ *
+ * - A window minutes from turning over is about to hand its capacity back, and passing it over for
+ *   somewhere with less to give over the next hour buys one swap now and another one soon.
+ * - A subscription this session has just left is avoided, because two subscriptions drifting either
+ *   side of each other will otherwise pass a session back and forth all day.
+ */
+export function subscriptionScore(input: {
+  headroom: number;
+  /** what its headroom becomes once the binding window resets */
+  fullHeadroom: number;
+  liveRuns: number;
+  priority: number;
+  resetsInMs: number | null;
+  recentlyLeft: boolean;
+}): number {
+  const share = (h: number): number => h / (1 + 0.5 * input.liveRuns);
+  let score = share(input.headroom);
+  if (input.resetsInMs !== null && input.resetsInMs <= RESET_SOON_MS) {
+    // Worth what it will be worth, less the wait: everything at the moment of the reset, nothing a
+    // quarter of an hour out.
+    const wait = Math.max(0, input.resetsInMs) / RESET_SOON_MS;
+    score = Math.max(score, share(input.fullHeadroom) * (1 - wait));
+  }
+  if (input.recentlyLeft) score *= 0.5;
+  return score + input.priority * 0.01;
 }
 
 export function weightFor(plan: string | null, tier: string | null): number {
@@ -214,11 +258,15 @@ export class SubscriptionManager {
   }
 
   /**
-   * Best subscription to move work to: most absolute headroom (plan weight × remaining %),
-   * discounted by how many sessions already run on it.
+   * Best subscription to move work to, and what it scores, so a caller weighing a move it does not
+   * have to make can see whether the move is worth it.
+   *
+   * `runId` lets the session's own history count: a subscription it has just been moved off is not
+   * somewhere to send it straight back to.
    */
-  pickBest(excludeId?: string | null): SubRow | null {
+  rank(excludeId?: string | null, runId?: string): { row: SubRow; score: number } | null {
     const threshold = getSettings(this.db).swapThresholdPct;
+    const left = runId ? this.recentlyLeft(runId) : new Set<string>();
     let best: { row: SubRow; score: number } | null = null;
     for (const r of this.rows()) {
       if (r.id === excludeId) continue;
@@ -226,11 +274,52 @@ export class SubscriptionManager {
       if (!sub.enabled || sub.status !== 'ready') continue;
       const used = Math.max(sub.usage?.fiveHour?.pct ?? ASSUMED_PCT, sub.usage?.sevenDay?.pct ?? ASSUMED_PCT);
       if (used >= Math.min(99, threshold)) continue;
-      // Same headroom the UI ranks by, discounted by sessions already running there.
-      const score = sub.headroom / (1 + 0.5 * this.liveRunsFor(r.id)) + r.priority * 0.01;
+      const score = subscriptionScore({
+        headroom: sub.headroom,
+        fullHeadroom: weightFor(r.plan, r.rate_tier),
+        liveRuns: this.liveRunsFor(r.id),
+        priority: r.priority,
+        resetsInMs: this.resetsInMs(sub),
+        recentlyLeft: left.has(r.id),
+      });
       if (!best || score > best.score) best = { row: r, score };
     }
-    return best?.row ?? null;
+    return best;
+  }
+
+  pickBest(excludeId?: string | null, runId?: string): SubRow | null {
+    return this.rank(excludeId, runId)?.row ?? null;
+  }
+
+  /** What the subscription a session is on now is worth, to compare a proposed move against. */
+  scoreOf(id: string): number {
+    const r = this.row(id);
+    if (!r) return 0;
+    const sub = this.dto(r);
+    return subscriptionScore({
+      headroom: sub.headroom,
+      fullHeadroom: weightFor(r.plan, r.rate_tier),
+      liveRuns: Math.max(0, this.liveRunsFor(id) - 1), // not counting the session asking
+      priority: r.priority,
+      resetsInMs: this.resetsInMs(sub),
+      recentlyLeft: false,
+    });
+  }
+
+  /** Milliseconds until the window that is currently binding turns over, when that is known. */
+  private resetsInMs(sub: Subscription): number | null {
+    const five = sub.usage?.fiveHour ?? null;
+    const seven = sub.usage?.sevenDay ?? null;
+    const binding = (five?.pct ?? 0) >= (seven?.pct ?? 0) ? five : seven;
+    if (!binding?.resetsAt) return null;
+    return Date.parse(binding.resetsAt) - Date.now();
+  }
+
+  /** Subscriptions this session has been moved off recently. */
+  private recentlyLeft(runId: string): Set<string> {
+    const since = new Date(Date.now() - RECENTLY_LEFT_MS).toISOString();
+    const rows = this.db.all<{ from_sub: string | null }>('SELECT DISTINCT from_sub FROM swaps WHERE run_id = ? AND ts >= ?', runId, since);
+    return new Set(rows.map((r) => r.from_sub).filter((x): x is string => !!x));
   }
 
   // ------------------------------------------------------------- profiles
