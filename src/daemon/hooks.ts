@@ -49,6 +49,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
     try {
       switch (event) {
         case 'SessionStart': {
+          coord.forgetPid(sid);
           if (cwd) await coord.setCwd(sid, cwd);
           coord.setStatus(sid, 'idle');
           runs.onSessionStart(sid, cwd);

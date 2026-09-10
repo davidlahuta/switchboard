@@ -273,6 +273,23 @@ describe('pushing agents to use the board', () => {
     assert.match(coord.piggyback('n1111111') ?? '', /went offline without answering/);
   });
 
+  it('believes a hook over a process id that outlived its process', async () => {
+    // The shape this takes in life: the session was swapped or the daemon restarted, so the pid on
+    // record belongs to a process several lifetimes back, while the session itself is mid-turn.
+    const dead = 0x7ffffffe; // nothing is running here
+    coord.raw.run('UPDATE agents SET pid = ?, status = ?, last_seen = ? WHERE id = ?', dead, 'working', new Date().toISOString(), 'n1111111');
+
+    coord.sweep();
+    assert.equal(coord.agent('n1111111')!.status, 'working', 'a session heard from seconds ago is not dead');
+    assert.equal(coord.agent('n1111111')!.pid, null, 'and the pid that said otherwise is dropped as stale');
+
+    // A pid that fails while the session has also gone quiet is taken at its word.
+    await coord.registerAgent({ sessionId: 'n3333333', cwd: dir, name: 'cal', pid: dead });
+    coord.raw.run('UPDATE agents SET last_seen = ? WHERE id = ?', new Date(Date.now() - 10 * 60_000).toISOString(), 'n3333333');
+    coord.sweep();
+    assert.equal(coord.agent('n3333333')!.status, 'offline');
+  });
+
   it('ends sb_status on what this agent owes the others', async () => {
     const status = coord.statusText('n1111111');
     assert.match(status, /Owed by you/);

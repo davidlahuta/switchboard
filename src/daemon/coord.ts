@@ -135,6 +135,11 @@ const SILENT_MS = 8 * 60_000;
 const CLAIM_IDLE_MS = 25 * 60_000;
 /** How long a question may go unanswered before the agent it was put to is reminded. */
 const UNANSWERED_MS = 6 * 60_000;
+/**
+ * How recently a hook has to have arrived for the session to count as answering for itself. A
+ * process that really died stops hooking at once, so anything inside this window is alive.
+ */
+const RECENTLY_SEEN_MS = 2 * 60_000;
 
 export function editedPath(toolName: unknown, toolInput: unknown): string | null {
   if (typeof toolName !== 'string' || !EDIT_TOOLS.has(toolName)) return null;
@@ -298,6 +303,15 @@ export class Coordinator {
   }
 
   /** Update presence from a hook. Cheap no-op when nothing changed. */
+  /**
+   * Forget the process id recorded for a session. Called when it starts again: whatever we held
+   * belonged to the process before this one, and only the MCP shim's hello can supply the new one.
+   * Left in place it outlives its process and the liveness sweep reads it as a session that died.
+   */
+  forgetPid(id: string): void {
+    this.db.run('UPDATE agents SET pid = NULL WHERE id = ?', id);
+  }
+
   setStatus(id: string, status: AgentStatus, lastTool?: string | null): void {
     const a = this.agent(id);
     if (!a) return;
@@ -387,15 +401,29 @@ export class Coordinator {
     const live = this.db.all<AgentRow>("SELECT * FROM agents WHERE status <> 'offline'");
     for (const a of live) {
       if (this.pushTarget.isConnected(a.id)) continue;
+      const silentMs = Date.now() - Date.parse(a.last_seen);
+      /*
+       * A pid is weaker evidence than it looks. It is recorded when the MCP shim says hello and is
+       * never refreshed by a hook, so a session that has been swapped, restarted or resumed — or
+       * whose shim simply did not reconnect after the daemon restarted — carries the pid of a
+       * process that ended several lifetimes ago. Believing it marked live sessions offline once a
+       * minute, and the next hook brought them back, which is the flicker this avoids.
+       *
+       * So a hook wins over a pid: a session heard from within the last couple of minutes is alive
+       * whatever the pid says, and a pid that fails the check when the session is demonstrably alive
+       * is the stale one and gets dropped. A process that genuinely died stops hooking immediately,
+       * so a dead pid still ends the session once the hooks stop.
+       */
       let dead = false;
       if (a.pid) {
         try {
           process.kill(a.pid, 0);
         } catch {
-          dead = true;
+          if (silentMs < RECENTLY_SEEN_MS) this.db.run('UPDATE agents SET pid = NULL WHERE id = ?', a.id);
+          else dead = true;
         }
       }
-      const silentMs = Date.now() - Date.parse(a.last_seen);
+      if (silentMs < RECENTLY_SEEN_MS) continue;
       if (dead || silentMs > 3 * 3600_000 || (!a.pid && silentMs > 30 * 60_000 && a.status === 'starting')) {
         this.markOffline(a.id, dead ? 'process exited' : 'no activity');
       }
