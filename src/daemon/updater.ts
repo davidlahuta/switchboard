@@ -16,6 +16,19 @@ const run = promisify(execFile);
 
 const TICK_MS = 5 * 60_000;
 const UPDATE_TIMEOUT_MS = 10 * 60_000;
+/**
+ * Where what the panel reports is kept. It is a history — when it last looked, what it last saw —
+ * and a history held in memory is not a history: every daemon restart reported "never checked" for
+ * work it had done, and, worse, told the scheduler a check was overdue and ran a full `claude
+ * update` within five minutes of every boot.
+ */
+const STATE_KEY = 'updater.state';
+
+interface SavedState {
+  lastCheckAt: string | null;
+  lastUpdate: { from: string; to: string; at: string } | null;
+  lastError: string | null;
+}
 
 interface LastUpdateResult {
   timestamp?: string;
@@ -54,6 +67,7 @@ export class Updater {
   }
 
   start(): void {
+    this.load();
     void this.readVersion().then((v) => {
       this.currentVersion = v;
       this.bus.invalidate('state');
@@ -74,6 +88,39 @@ export class Updater {
       lastError: this.lastError,
       pendingRestarts: this.runs.pendingRestartCount(),
     };
+  }
+
+  private load(): void {
+    const row = this.db.get<{ value: string }>('SELECT value FROM settings WHERE key = ?', STATE_KEY);
+    try {
+      const saved = row ? (JSON.parse(row.value) as SavedState) : null;
+      this.lastCheckAt = saved?.lastCheckAt ?? null;
+      this.lastUpdate = saved?.lastUpdate ?? null;
+      this.lastError = saved?.lastError ?? null;
+    } catch {
+      // Corrupt: better to report nothing than to report something invented.
+    }
+    this.adoptRecordedUpdate();
+  }
+
+  private save(): void {
+    const state: SavedState = { lastCheckAt: this.lastCheckAt, lastUpdate: this.lastUpdate, lastError: this.lastError };
+    this.db.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', STATE_KEY, JSON.stringify(state));
+  }
+
+  /**
+   * Take the update Claude Code recorded for itself, if it is newer than ours.
+   *
+   * Switchboard is not the only thing that updates that binary — Claude Code has its own updater,
+   * and a session can come back on a build nobody here asked for. Reporting "none seen yet" while
+   * the version plainly moved is the panel talking about itself rather than about claude.
+   */
+  private adoptRecordedUpdate(): void {
+    const r = readJson<LastUpdateResult>(path.join(HOME_CLAUDE_DIR, '.last-update-result.json'));
+    if (!r || r.status !== 'success' || !r.timestamp || !r.version_from || !r.version_to) return;
+    if (r.version_from === r.version_to) return;
+    if (this.lastUpdate && this.lastUpdate.at >= r.timestamp) return;
+    this.lastUpdate = { from: r.version_from, to: r.version_to, at: r.timestamp };
   }
 
   private async readVersion(): Promise<string | null> {
@@ -102,6 +149,7 @@ export class Updater {
     const claude = findClaude();
     if (!claude) {
       this.lastError = 'claude executable not found on PATH';
+      this.save();
       return this.status();
     }
     this.checking = true;
@@ -135,9 +183,12 @@ export class Updater {
         const n = this.runs.restartAll(`claude ${after}`);
         if (n > 0) this.bus.toast('info', `${n} session(s) will restart on ${after} once idle.`);
       }
-    } else if (manual) {
-      this.bus.toast('info', this.lastError ? `Update check failed: ${this.lastError}` : `Already on the latest version (${after ?? 'unknown'}).`);
+    } else {
+      // Nothing moved under us, but something may have moved without us; see adoptRecordedUpdate.
+      this.adoptRecordedUpdate();
+      if (manual) this.bus.toast('info', this.lastError ? `Update check failed: ${this.lastError}` : `Already on the latest version (${after ?? 'unknown'}).`);
     }
+    this.save();
     this.checking = false;
     this.bus.invalidate('state');
     return this.status();
