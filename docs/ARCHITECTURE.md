@@ -209,11 +209,17 @@ serialized current screen and then live data, and can send input. It offers a ke
 ⇧Tab, arrows, Ctrl‑C, Enter) plus a text composer.
 
 The Windows Terminal tab owns the PTY size until a browser fits to its own screen, which is what a
-phone needs. Only one of them can own it: while the browser does, the tab still shows the frame
-drawn for its own dimensions and the TUI repaints a smaller area inside it, leaving the old
-characters around and under the new frame. So the console is cleared on both sides of any size
-change, and the size goes back to it as soon as the browser stops fitting — turning fitting off, or
-the last viewer disconnecting.
+phone needs. Only one of them can own it — claude positions the cursor absolutely and wraps for the
+size it was given, so drawing that into a console of another size lands lines on top of each other,
+and Windows Terminal ignores a programmatic resize (`CSI 8;h;w t`) so the console cannot be made to
+follow. While the browser owns the size the console is therefore **parked**: it is cleared, told
+what is happening, and stops being written to. It takes the size back when the browser stops
+fitting, the last viewer disconnects, or the window is resized, and claude is nudged into a full
+repaint at the console's own dimensions.
+
+The tab's title is the session's name. Tabs are opened without `--suppressApplicationTitle` and the
+runner sets the title itself, so renaming a session reaches its tab; title sequences from claude are
+dropped on the way to the console, which would otherwise put the old name back.
 
 ## Security
 

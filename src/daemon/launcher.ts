@@ -45,7 +45,9 @@ export class Launcher {
     if (IS_WINDOWS && this.wtPath) {
       // Windows Terminal treats ';' as a command separator.
       const esc = (s: string): string => s.replace(/;/g, '\\;');
-      const args = ['-w', this.windowName, 'new-tab', '--title', esc(spec.title), '--suppressApplicationTitle', '-d', esc(cwd), esc(node), esc(CLI_PATH), ...spec.args.map(esc)];
+      // Deliberately not --suppressApplicationTitle: the runner sets the title itself, so renaming
+      // a session reaches its tab instead of leaving the name it was opened with.
+      const args = ['-w', this.windowName, 'new-tab', '--title', esc(spec.title), '-d', esc(cwd), esc(node), esc(CLI_PATH), ...spec.args.map(esc)];
       log.info('opening Windows Terminal tab', { title: spec.title, cwd });
       spawn(this.wtPath, args, { detached: true, stdio: 'ignore' }).unref();
       return;

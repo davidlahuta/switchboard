@@ -1264,6 +1264,9 @@ a.list-main:hover {
   margin-left: 0;
 }
 /* .cell-title > * is display:block, which would flatten these two */
+.cell-title .rename-wrap {
+  display: flex;
+}
 .cell-title .run-tags {
   display: flex;
   flex-wrap: wrap;
@@ -1602,12 +1605,16 @@ a.list-main:hover {
   display: none;
 }
 .popover {
-  position: absolute;
-  top: calc(100% + 6px);
+  /* Fixed, with coordinates from the trigger: see Popover. An absolute panel cannot escape a
+     scrolling ancestor, and every wide table is one. */
+  position: fixed;
+  top: var(--pop-top, 0);
+  left: var(--pop-left, 0);
   z-index: 60;
   min-width: 280px;
   max-width: min(360px, calc(100vw - 24px));
   background: var(--surface);
+  color: var(--text);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
@@ -1615,16 +1622,8 @@ a.list-main:hover {
   max-height: 70vh;
   overflow-y: auto;
 }
-.popover-right {
-  right: 0;
-}
-.popover-left {
-  left: 0;
-}
-.popover-up {
-  top: auto;
-  bottom: calc(100% + 6px);
-}
+/* Alignment and flipping are resolved into --pop-top / --pop-left; the classes stay for the sheet
+   layout below and for styling hooks. */
 .swap-menu {
   display: flex;
   flex-direction: column;
@@ -2268,6 +2267,21 @@ a.list-main:hover {
   flex: none;
   min-width: 0;
 }
+.term-head .run-name {
+  /* The terminal page has its own palette; the app's --text is unreadable on it. */
+  color: #f0f6fc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.term-head .rename-btn {
+  color: var(--t-text-2);
+}
+.term-head .rename-input {
+  background: var(--t-surface-2);
+  border-color: var(--t-border);
+  color: #e6edf3;
+}
 .term-head .btn-ghost {
   color: var(--t-text-2);
 }
@@ -2380,10 +2394,12 @@ a.list-main:hover {
 .term-scroller {
   flex: 1;
   min-height: 0;
-  /* Fitted (the default) the host fills this box and nothing scrolls here — xterm owns
-     scrollback. Unfitted the terminal keeps the PTY's size, so this is how you reach the rest
-     of it; that is the only case where a scrollbar belongs here. */
-  overflow: auto;
+  /* xterm owns vertical scrolling in both modes — it is the one that knows where the scrollback
+     ends. A second vertical scrollbar here scrolled the grid itself, which just moved the TUI off
+     the screen. Unfitted, the terminal keeps the PTY's width, so this is how you reach the rest of
+     it sideways; that is all this box ever scrolls. */
+  overflow-x: auto;
+  overflow-y: hidden;
   position: relative;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
@@ -2406,14 +2422,18 @@ a.list-main:hover {
   border-radius: 6px;
 }
 .term-scroller.fit {
-  /* Fitted, the host is absolutely positioned to this box and nothing can overflow it. Saying so
-     keeps a browser from reserving a scrollbar gutter next to xterm's own. */
+  /* Fitted, the host is absolutely positioned to this box and cannot overflow it at all. */
   overflow: hidden;
 }
 .term-host {
   display: inline-block;
   padding: 4px 6px;
   min-width: 100%;
+  /* Bounded by the scroller so xterm's own viewport does the vertical scrolling. Left to its
+     natural height the grid would overflow instead, and the outer box would scroll the whole
+     terminal out of view. */
+  height: 100%;
+  box-sizing: border-box;
 }
 .term-host.fit {
   display: block;
@@ -2531,6 +2551,30 @@ a.list-main:hover {
   background: #141920;
   border-color: #2b3440;
   color: #e5e9ef;
+}
+/* The panel is dark here, so the menu's own light-palette text has to be remapped or it lands
+   near-black on near-black. */
+.term-page .popover .menu-item,
+.term-page .popover .menu-item-main strong {
+  color: #e5e9ef;
+}
+.term-page .popover .menu-item:hover:not(:disabled) {
+  background: #1f2630;
+}
+.term-page .popover .menu-heading,
+.term-page .popover .menu-sub,
+.term-page .popover .menu-empty,
+.term-page .popover .menu-note,
+.term-page .popover .menu-check {
+  color: var(--t-text-2);
+}
+.term-page .popover .btn {
+  background-color: transparent;
+  border-color: #2b3440;
+  color: #e5e9ef;
+}
+.term-page .popover .btn:hover:not(:disabled) {
+  background: #1f2630;
 }
 /* the terminal chrome is always dark, so badges there use the terminal palette */
 .term-meta .run-tags {

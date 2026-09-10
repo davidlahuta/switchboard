@@ -8,6 +8,20 @@ type IPty = ReturnType<typeof pty.spawn>;
 // Undo whatever modes the TUI left enabled before printing our own output.
 const RESET_TERMINAL = '\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[<u\x1b[?25h\x1b[0m';
 const CLEAR = '\x1b[2J\x1b[3J\x1b[H';
+/** Shown in the console the session lives in while a web viewer owns the pseudo-terminal size. */
+const PARKED = (cols: number, rows: number): string =>
+  `\x1b[1;36m[switchboard]\x1b[0m this session is being driven from the web at ${cols}\u00d7${rows}.\r\n` +
+  `Output is paused here: one terminal cannot draw two sizes at once.\r\n` +
+  `Resize this window, or close the web view, to take it back.\r\n`;
+/** Set the title of the window this runner lives in (Windows Terminal tab, or the console). */
+const setTitle = (t: string): string => `\x1b]0;${t.replace(/[\x1b\x07]/g, '')}\x07`;
+/**
+ * Title sequences claude emits, dropped before they reach this console. The tab carries the
+ * session's name, which the operator can change; letting the session overwrite it would put the
+ * name back a moment after every rename.
+ */
+// eslint-disable-next-line no-control-regex
+const OSC_TITLE_RE = /\x1b][012];[^\x1b\x07]*(?:\x07|\x1b\\)/g;
 const LIMIT_RE =
   /(usage limit reached|you['’]ve (hit|reached) your (usage |session |weekly |5-hour )?limit|(5-hour|weekly|session) limit reached|limit reached[^\n]{0,40}resets)/i;
 // eslint-disable-next-line no-control-regex
@@ -25,7 +39,15 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
   const inp = process.stdin;
   let runId = opts.runId ?? null;
   let child: IPty | null = null;
-  /** The PTY is currently sized by a web viewer rather than by this console. */
+  /**
+   * The PTY is currently sized by a web viewer rather than by this console.
+   *
+   * One pseudo-terminal cannot serve two windows of different sizes: claude positions the cursor
+   * absolutely and wraps for the size it was given, so drawing that into a console of another size
+   * lands lines on top of each other. Windows Terminal ignores a programmatic resize (CSI 8;h;w t),
+   * so the console cannot be made to follow. It is parked instead: output stops being written here
+   * until the size comes back, which is the only state in which this console can show the truth.
+   */
   let webSized = false;
   let swapping = false;
   let stopping = false;
@@ -50,16 +72,34 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     if (inp.isTTY) inp.setRawMode(false);
   });
 
-  out.on('resize', () => {
-    const { cols, rows } = size();
+  /** Take the size back for this console: unpark it and make claude repaint at these dimensions. */
+  const unpark = (): void => {
     if (!child) return;
+    const { cols, rows } = size();
+    webSized = false;
     child.resize(cols, rows);
-    // Coming back from a web-driven size, the console is full of a frame drawn for those other
-    // dimensions; clear it so the repaint starts from a clean screen.
+    out.write(CLEAR);
+    send({ type: 'resize', cols, rows });
+    // Nudge a full repaint: claude only redraws its frame when the size actually changes, and it
+    // has just been told about this one.
+    setTimeout(() => {
+      if (!child || webSized) return;
+      child.resize(Math.max(20, cols - 1), rows);
+      setTimeout(() => {
+        if (child && !webSized) child.resize(cols, rows);
+      }, 60);
+    }, 60);
+  };
+
+  out.on('resize', () => {
+    if (!child) return;
+    // Resizing this window is also how you take the session back from a web viewer.
     if (webSized) {
-      out.write(CLEAR);
-      webSized = false;
+      unpark();
+      return;
     }
+    const { cols, rows } = size();
+    child.resize(cols, rows);
     send({ type: 'resize', cols, rows });
   });
 
@@ -93,7 +133,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     }
     child = p;
     p.onData((d) => {
-      out.write(d);
+      if (!webSized) out.write(d.includes(']') ? d.replace(OSC_TITLE_RE, '') : d);
       send({ type: 'data', data: d });
       detectLimit(d);
     });
@@ -105,6 +145,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       if (!stopping) say(`claude exited (${exitCode}). Resume later with: claude --resume ${s.sessionId}`);
       setTimeout(() => process.exit(exitCode ?? 0), 400);
     });
+    out.write(setTitle(s.title));
     send({ type: 'spawned', pid: p.pid, cols, rows });
     // ConPTY resolves the child pid asynchronously; report it once it is known.
     if (!p.pid) {
@@ -142,32 +183,35 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       case 'input':
         child?.write(msg.data);
         break;
-      case 'resize':
+      case 'resize': {
         if (!child) break;
-        // The web view is taking the size over. The local console keeps showing the frame drawn
-        // for the old size, and the TUI now repaints a smaller area inside it, which leaves the
-        // old characters around and under the new frame. Wipe the console before it repaints.
+        const mine = size();
+        const takenOver = msg.cols !== mine.cols || msg.rows !== mine.rows;
+        if (takenOver && !webSized) {
+          // Park: stop drawing here rather than drawing a frame meant for another size.
+          out.write(CLEAR + PARKED(msg.cols, msg.rows));
+          webSized = true;
+        } else if (!takenOver && webSized) {
+          unpark();
+          break;
+        }
         child.resize(msg.cols, msg.rows);
-        out.write(CLEAR);
-        webSized = msg.cols !== size().cols || msg.rows !== size().rows;
         send({ type: 'resize', cols: msg.cols, rows: msg.rows });
         break;
+      }
       case 'type':
         // Type the text, then submit it separately so the TUI doesn't treat it as a paste.
         child?.write(msg.text);
         await sleep(200);
         child?.write('\r');
         break;
-      case 'restore-size': {
-        if (!child || !webSized) break;
-        // Nobody is watching from a browser any more, so this console owns the size again.
-        const { cols, rows } = size();
-        child.resize(cols, rows);
-        out.write(CLEAR);
-        webSized = false;
-        send({ type: 'resize', cols, rows });
+      case 'restore-size':
+        // Nobody is driving from a browser any more, so this console owns the size again.
+        if (child && webSized) unpark();
         break;
-      }
+      case 'title':
+        out.write(setTitle(msg.text));
+        break;
       case 'redraw': {
         // Nudge the TUI into a full repaint so the daemon's mirror catches up.
         const { cols, rows } = size();

@@ -210,6 +210,7 @@ export class RunManager {
     const { adopt, push } = titleDecision(r.name, r.claude_title, reported);
     if (adopt) {
       this.db.run('UPDATE runs SET name = ?, claude_title = ? WHERE id = ?', adopt, adopt, r.id);
+      this.send(r.id, { type: 'title', text: adopt });
       this.coord.renameAgent(sessionId, adopt);
       this.bus.invalidate('state');
       log.info('session renamed in claude', { run: r.id, name: adopt });
@@ -241,6 +242,7 @@ export class RunManager {
     if (!clean) throw httpError(400, 'Name cannot be empty');
     if (clean.length > 120) throw httpError(400, 'Name is too long');
     this.db.run('UPDATE runs SET name = ? WHERE id = ?', clean, r.id);
+    this.send(r.id, { type: 'title', text: clean });
     this.coord.renameAgent(r.session_id, clean);
     this.bus.invalidate('state');
     // The session hears about it on its next hook: a prompt, or the next time it starts.

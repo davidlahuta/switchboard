@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import type { AgentStatus, RunStatus, Usage, UsageWindow } from '@shared/types.ts';
 import { pctText, usageIssue, usageLevel } from '../lib/format.ts';
 import { absTime, resetsIn, retryIn } from '../lib/time.ts';
@@ -381,6 +381,7 @@ export function Popover({
   const rootRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [flipUp, setFlipUp] = useState(false);
+  const [at, setAt] = useState<{ top: number; left: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -396,12 +397,40 @@ export function Popover({
     };
   }, [open]);
 
+  /**
+   * Positioned against the viewport rather than the trigger's box. A menu opened from a table cell
+   * has a scrolling ancestor (a wide table scrolls sideways, which makes it a scroll container
+   * both ways), and an absolutely positioned panel cannot leave one: it made the row grow instead
+   * of covering it. Below the sheet breakpoint the stylesheet pins it to the bottom edge and these
+   * coordinates are ignored.
+   */
   useLayoutEffect(() => {
-    if (!open || !panelRef.current || !rootRef.current) return;
-    const r = rootRef.current.getBoundingClientRect();
-    const h = panelRef.current.offsetHeight;
-    const vh = window.visualViewport?.height ?? window.innerHeight;
-    setFlipUp(r.bottom + h + 8 > vh && r.top - h - 8 > 0);
+    if (!open) return;
+    const place = (): void => {
+      const panel = panelRef.current;
+      const root = rootRef.current;
+      if (!panel || !root) return;
+      const r = root.getBoundingClientRect();
+      const { offsetHeight: h, offsetWidth: w } = panel;
+      const vh = window.visualViewport?.height ?? window.innerHeight;
+      const vw = window.visualViewport?.width ?? window.innerWidth;
+      const up = r.bottom + h + 8 > vh && r.top - h - 8 > 0;
+      const left = align === 'right' ? r.right - w : r.left;
+      setFlipUp(up);
+      setAt({ top: up ? r.top - h - 6 : r.bottom + 6, left: Math.max(8, Math.min(left, vw - w - 8)) });
+    };
+    place();
+    // Fixed panels do not follow their trigger, so anything that moves it has to reposition them.
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [open, align]);
+
+  useEffect(() => {
+    if (!open) setAt(null);
   }, [open]);
 
   return (
@@ -415,6 +444,7 @@ export function Popover({
             className={`popover popover-${align}${flipUp ? ' popover-up' : ''}`}
             role="menu"
             aria-label={label}
+            style={at ? ({ '--pop-top': `${at.top}px`, '--pop-left': `${at.left}px` } as CSSProperties) : undefined}
           >
             {children(() => setOpen(false))}
           </div>
