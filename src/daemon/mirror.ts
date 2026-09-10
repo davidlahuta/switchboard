@@ -53,6 +53,16 @@ export class TermMirror {
     this.term.reset();
   }
 
+  /** The visible screen as plain text. Used to check what a session is showing before typing at it. */
+  screenText(): string {
+    const buffer = this.term.buffer.active;
+    const lines: string[] = [];
+    for (let i = 0; i < this.rows; i++) {
+      lines.push(buffer.getLine(buffer.viewportY + i)?.translateToString(true) ?? '');
+    }
+    return lines.join('\n');
+  }
+
   broadcast(frame: TermServerFrame): void {
     for (const c of this.clients) {
       if (c.queue) c.queue.push(frame);

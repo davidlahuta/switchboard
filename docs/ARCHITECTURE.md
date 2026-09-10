@@ -198,11 +198,24 @@ its size or mtime changes, so a switch made in an idle session shows up before i
 transcript on `Stop`, because Claude Code names the model in `SessionStart` only and a mid-session
 `/model` would otherwise go unnoticed until the next restart.
 
-**Startup prompts.** Switchboard registers its own MCP server as a channel so it can push into an
-idle session, and that flag makes Claude Code stop at a confirmation every time a session starts.
-The runner answers it, and only it: the warning is about running channels obtained from elsewhere,
-so it is answered only when the list is exactly this machine's own Switchboard server. The folder
-trust prompt is left alone — that one is about the folder, not about Switchboard.
+**Startup prompts.** Two confirmations stand between a launched session and a prompt, and a session
+waiting at either is a session nobody is at.
+
+Switchboard registers its own MCP server as a channel so it can push into an idle session, and that
+flag makes Claude Code stop at a confirmation every time. The runner answers it, and only it: the
+warning is about running channels obtained from elsewhere, so it is answered only when the list is
+exactly this machine's own Switchboard server.
+
+Folder trust is granted in the profile before the process starts, rather than answered on screen —
+choosing the folder here is the trust decision, and repeating it once per subscription only moves it
+to a dialog. Claude Code keys those by absolute path with forward slashes even on Windows; building
+the key any other way matches nothing, which is what left trust silently failing to travel across a
+swap. The dialog is still answered if it appears anyway, for the launch folder and no other.
+
+Nothing is ever typed at a session showing a confirmation. The continue message ends in a carriage
+return, and the option these dialogs start on is the one that exits — which is how a session was
+once killed instead of resumed. The screen is checked first, and a session sitting on a dialog is
+reported rather than answered.
 
 **Resuming.** A session that was started and then restarted before it was ever used has no
 transcript, and Claude Code exits with "No conversation found" when asked to resume one. Switchboard

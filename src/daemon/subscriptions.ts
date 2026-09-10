@@ -335,23 +335,48 @@ export class SubscriptionManager {
    * Without it a swap can land in Claude Code's trust dialog, where the resume message would be
    * answered by the highlighted "No, exit".
    */
-  propagateTrust(fromId: string, toId: string, dir: string): void {
-    const from = this.row(fromId);
-    const to = this.row(toId);
-    if (!from || !to) return;
-    const key = path.resolve(dir);
-    const fromJson = readJson<{ projects?: Record<string, Record<string, unknown>> }>(path.join(from.config_dir, '.claude.json'));
-    const trusted = fromJson?.projects?.[key]?.hasTrustDialogAccepted === true;
-    if (!trusted) return;
-    const file = path.join(to.config_dir, '.claude.json');
+  /**
+   * How Claude Code keys a directory in `.claude.json`: an absolute path with forward slashes,
+   * even on Windows. Building the key with `path.resolve` alone produced backslashes, which
+   * matched nothing — so folder trust silently never travelled, and every session on a profile
+   * that had not seen the folder before stopped at the trust dialog.
+   */
+  private projectKey(dir: string): string {
+    return path.resolve(dir).replace(/\\/g, '/');
+  }
+
+  /**
+   * Mark a folder trusted for a subscription's profile.
+   *
+   * Choosing the folder in Switchboard is the trust decision; asking again once per profile only
+   * moves that decision to a dialog nobody is at, in front of a session that has already been
+   * launched. Recording it is also far safer than answering the dialog by keystroke: the option it
+   * highlights is "No, exit", so a mistimed keypress kills the session.
+   */
+  trustFolder(subscriptionId: string, dir: string): void {
+    const sub = this.row(subscriptionId);
+    if (!sub) return;
+    const key = this.projectKey(dir);
+    const file = path.join(sub.config_dir, '.claude.json');
     const target = readJson<Record<string, any>>(file) ?? {};
     target.projects ??= {};
+    if (target.projects[key]?.hasTrustDialogAccepted === true) return;
     target.projects[key] = { ...(target.projects[key] ?? {}), hasTrustDialogAccepted: true };
     try {
       writeJson(file, target);
+      log.info('trusted folder for profile', { subscription: sub.label, dir: key });
     } catch (err) {
-      log.warn('could not propagate folder trust', err instanceof Error ? err.message : err);
+      log.warn('could not record folder trust', err instanceof Error ? err.message : err);
     }
+  }
+
+  propagateTrust(fromId: string, toId: string, dir: string): void {
+    const from = this.row(fromId);
+    if (!from) return;
+    const key = this.projectKey(dir);
+    const fromJson = readJson<{ projects?: Record<string, Record<string, unknown>> }>(path.join(from.config_dir, '.claude.json'));
+    if (fromJson?.projects?.[key]?.hasTrustDialogAccepted !== true) return;
+    this.trustFolder(toId, dir);
   }
 
   // --------------------------------------------------------------- CRUD

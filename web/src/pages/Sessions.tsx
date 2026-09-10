@@ -150,7 +150,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                     </td>
                     <td className="cell-actions">
                       <div className="row-actions">
-                        <a className="btn btn-sm" href={href.terminal(r.id)} aria-label={`Open terminal for ${r.name}`}>
+                        <a className="btn btn-sm" href={href.terminal(r.id)} aria-label={`Open terminal for ${r.name}`} title="Terminal">
                           <Icon name="terminal" size={16} />
                           <span>Terminal</span>
                         </a>
@@ -158,7 +158,13 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                         {!exited && <SwapMenu run={r} subs={state.subscriptions} compact />}
                         {!exited && <RestartMenu run={r} compact />}
                         {!exited ? (
-                          <button type="button" className="btn btn-sm btn-danger" onClick={() => setStopping(r)}>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-danger"
+                            onClick={() => setStopping(r)}
+                            aria-label={`Stop ${r.name}`}
+                            title="Stop"
+                          >
                             <Icon name="stop" size={14} />
                             <span>Stop</span>
                           </button>
@@ -168,6 +174,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                             className="btn btn-sm btn-ghost"
                             onClick={() => void api.del(`/api/runs/${encodeURIComponent(r.id)}`)}
                             aria-label={`Forget ${r.name}`}
+                            title="Forget"
                           >
                             <Icon name="trash" size={14} />
                             <span>Forget</span>

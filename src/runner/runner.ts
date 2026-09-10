@@ -31,6 +31,17 @@ const DEV_CHANNEL_ACCEPT = 'Iamusingthisforlocaldevelopment';
 /** The only channel this is ever answered for: Switchboard's own server, on this machine. */
 const OWN_CHANNEL = 'server:switchboard';
 
+/**
+ * The folder trust confirmation, matched with the whitespace removed like the one above.
+ *
+ * Trust is normally granted in the profile before the process starts, so this should never be
+ * reached. It is answered anyway for the one folder the session was launched into, because the
+ * option it starts on is "No, exit" and a session stuck here is a session nobody is at.
+ */
+const TRUST_PROMPT = 'Accessingworkspace:';
+const TRUST_ACCEPT = 'Yes,Itrustthisfolder';
+const DOWN = '\x1b[B';
+
 const LIMIT_RE =
   /(usage limit reached|you['’]ve (hit|reached) your (usage |session |weekly |5-hour )?limit|(5-hour|weekly|session) limit reached|limit reached[^\n]{0,40}resets)/i;
 // eslint-disable-next-line no-control-regex
@@ -69,6 +80,8 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
   let tail = '';
   let lastLimitReport = 0;
   let channelPromptAnswered = false;
+  let trustPromptAnswered = false;
+  let cwdKey = '';
 
   const size = (): { cols: number; rows: number } => ({ cols: out.columns || 120, rows: out.rows || 30 });
   const send = (msg: RunnerToDaemon): void => {
@@ -136,6 +149,23 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     setTimeout(() => child?.write('\r'), 150);
   };
 
+  /**
+   * Answer the folder trust confirmation, for the folder this session was launched into and no
+   * other. The wanted option is the second one; the first is "No, exit".
+   */
+  const answerTrustPrompt = (): void => {
+    if (trustPromptAnswered || !child || !cwdKey) return;
+    const squished = tail.replace(/\s+/g, '');
+    if (!squished.includes(TRUST_PROMPT) || !squished.includes(TRUST_ACCEPT)) return;
+    if (!squished.includes(cwdKey)) return;
+    trustPromptAnswered = true;
+    tail = '';
+    setTimeout(() => {
+      child?.write(DOWN);
+      setTimeout(() => child?.write('\r'), 120);
+    }, 150);
+  };
+
   const detectLimit = (data: string): void => {
     tail = (tail + data.replace(ANSI_RE, '')).slice(-2000);
     if (Date.now() - lastLimitReport < 60_000) return;
@@ -149,6 +179,8 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
   const spawnChild = (s: SpawnSpec): void => {
     runId = s.runId;
     channelPromptAnswered = false;
+    trustPromptAnswered = false;
+    cwdKey = s.cwd.replace(/\s+/g, '');
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (typeof v === 'string') env[k] = v;
     for (const [k, v] of Object.entries(s.env)) {
@@ -171,6 +203,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       send({ type: 'data', data: d });
       detectLimit(d);
       answerChannelPrompt();
+      answerTrustPrompt();
     });
     p.onExit(({ exitCode }) => {
       if (child === p) child = null;

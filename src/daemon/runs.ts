@@ -62,6 +62,13 @@ const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
 const CONTINUE_DELAY_MS = 2500;
 /** Without a hook to say the session is at a prompt, long enough for it to have got there. */
 const CONTINUE_SPAWN_DELAY_MS = 9000;
+/**
+ * A confirmation waiting for an answer. Claude Code footers every one of them with this, and the
+ * option it starts on is often the one that exits — so nothing may be typed while it is on screen.
+ */
+const CONFIRM_FOOTER = /Enter\s*to\s*confirm/i;
+const CONTINUE_RETRY_MS = 4000;
+const CONTINUE_RETRIES = 15;
 const CONTINUE_FALLBACK_MS = 25_000;
 const LIMIT_DEBOUNCE_MS = 90_000;
 
@@ -453,6 +460,8 @@ export class RunManager {
     const canResume = resume && !!this.sessionFile(r, path.join('..', `${r.session_id}.jsonl`));
     this.resumedSpawn.set(r.id, canResume);
     const args: string[] = canResume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
+    // Before the process exists, so it never reaches the trust dialog: the folder was chosen here.
+    this.subs.trustFolder(subscriptionId, r.last_cwd ?? r.cwd);
     if (!integrationStatus().mcpInstalled) {
       const file = writeRuntimeJson(`mcp-${r.id}.json`, { mcpServers: { switchboard: mcpServerEntry({ SWITCHBOARD_RUN_ID: r.id }) } });
       args.push('--mcp-config', file);
@@ -765,10 +774,27 @@ export class RunManager {
     this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), CONTINUE_SPAWN_DELAY_MS) });
   }
 
-  private typeContinue(runId: string): void {
+  private typeContinue(runId: string, attempt = 0): void {
     const pending = this.pendingContinue.get(runId);
     if (!pending) return;
     clearTimeout(pending.timer);
+
+    // Never type at a session that is asking something. The continue message ends in a carriage
+    // return, and on the folder trust dialog that answers "No, exit" — which is exactly how a
+    // session was killed rather than resumed.
+    const screen = this.mirrors.get(runId)?.screenText() ?? '';
+    if (CONFIRM_FOOTER.test(screen)) {
+      if (attempt < CONTINUE_RETRIES) {
+        pending.timer = setTimeout(() => this.typeContinue(runId, attempt + 1), CONTINUE_RETRY_MS);
+        return;
+      }
+      this.pendingContinue.delete(runId);
+      const name = this.row(runId)?.name ?? runId;
+      log.warn('continue message not sent: the session is waiting on a dialog', { run: runId });
+      this.bus.toast('warn', `${name} is waiting on a dialog, so it was left alone — answer it in the terminal.`);
+      return;
+    }
+
     this.pendingContinue.delete(runId);
     log.info('typing the continue message', { run: runId, text: pending.text });
     this.send(runId, { type: 'type', text: pending.text });

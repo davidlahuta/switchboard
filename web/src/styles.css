@@ -1298,12 +1298,30 @@ a.list-main:hover {
 .cell-actions {
   text-align: right;
 }
+/*
+ * One row, icons only. Five labelled buttons wrapped onto two or three lines and set the height of
+ * every row in the table; the labels are on each button's tooltip, where a row of familiar icons
+ * does not need them.
+ */
 .row-actions {
   display: inline-flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  gap: 4px;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   align-items: center;
+}
+.row-actions .btn {
+  min-height: 30px;
+  height: 30px;
+  padding: 0 7px;
+  gap: 0;
+}
+.row-actions .btn > span:not(.sr-only) {
+  display: none;
+}
+.row-actions .popover .btn > span:not(.sr-only),
+.row-actions .popover .menu-item span {
+  display: revert;
 }
 .sessions-table {
   background: var(--surface);
