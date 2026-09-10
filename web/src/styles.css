@@ -753,6 +753,28 @@ select.input {
     animation: attention-pulse 2s ease-in-out infinite;
   }
 }
+/* A row whose mark has just changed, lit briefly so the eye can find what moved and why. Slower
+   out than in: the arrival is the news, the fade is only getting out of the way. */
+.row-lit {
+  animation: row-lit 1.4s ease-out;
+}
+@keyframes row-lit {
+  0% {
+    background-color: var(--accent-soft);
+  }
+  12% {
+    background-color: var(--accent-soft);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .row-lit {
+    animation: none;
+  }
+}
+
 @keyframes attention-pulse {
   50% {
     opacity: 0.4;
