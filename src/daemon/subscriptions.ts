@@ -79,6 +79,20 @@ type OAuthWindow = { utilization?: number; resets_at?: string | null } | null | 
 const ASSUMED_PCT = 40;
 /** How close a spent window has to be to turning over before that is worth counting on. */
 const RESET_SOON_MS = 15 * 60_000;
+/**
+ * How long before a token expires Switchboard renews it.
+ *
+ * Claude Code's tokens last about eight hours and the CLI renews them on the next API call it
+ * makes — which is fine for a session that is working and no use at all for one sitting at a
+ * prompt, or for a subscription with nothing running on it. Renewing early rather than at the
+ * cliff edge also keeps Switchboard's renewal well clear of the moment a live session might do
+ * its own; the CLI holds a lock across the refresh either way.
+ */
+const TOKEN_MARGIN_MS = 15 * 60_000;
+/** No more than one renewal attempt per subscription in this window, whatever asks for a token. */
+const RENEW_EVERY_MS = 60_000;
+/** How long to leave a subscription alone after a renewal that did not take. */
+const RENEW_BACKOFF_MS = 5 * 60_000;
 /** How long a session stays away from a subscription it has just left, so it cannot bounce back. */
 const RECENTLY_LEFT_MS = 30 * 60_000;
 /**
@@ -168,6 +182,8 @@ export class SubscriptionManager {
   private readonly lastHistory = new Map<string, number>();
   private readonly watchers = new Map<string, NodeJS.Timeout>();
   private readonly inFlight = new Set<string>();
+  /** When each subscription's token may next be offered for renewal. See freshToken. */
+  private readonly renewAfter = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
 
   constructor(db: Db, bus: Bus, launcher: Launcher) {
@@ -616,25 +632,41 @@ export class SubscriptionManager {
     };
   }
 
-  /** Let the claude CLI refresh an expired token (it owns refresh-token rotation). */
+  /**
+   * A token good for the next call, renewing it through the CLI when it is near the end of its
+   * life. The CLI owns refresh-token rotation and takes a lock across it, so this asks rather than
+   * doing it here: `claude doctor` renews an expired token and leaves a healthy one exactly as it
+   * was, which is the whole of what is wanted and costs no tokens and no conversation.
+   *
+   * `auth status` was what this used to run, and it only ever reported what was on disk — so the
+   * renewal never happened and a subscription nothing was running on simply died at its expiry and
+   * sat there saying "token expired" until somebody logged in again.
+   */
   private async freshToken(r: SubRow): Promise<string | null> {
-    let creds = this.readCredentials(r.config_dir);
+    const creds = this.readCredentials(r.config_dir);
     if (!creds) return null;
-    if (!creds.expiresAt || creds.expiresAt - Date.now() > 60_000) return creds.accessToken;
-    if (this.liveRunsFor(r.id) > 0) return null; // the running session will refresh it
+    const expiresIn = creds.expiresAt ? creds.expiresAt - Date.now() : Infinity;
+    // An expired token is worth nothing, so anything else is worth returning while we renew.
+    const asIs = expiresIn > 0 ? creds.accessToken : null;
+    if (expiresIn > TOKEN_MARGIN_MS) return creds.accessToken;
+    if (Date.now() < (this.renewAfter.get(r.id) ?? 0)) return asIs;
     const claude = findClaude();
-    if (!claude) return null;
+    if (!claude) return asIs;
     try {
       const env: NodeJS.ProcessEnv = withoutParentSession();
       if (r.kind === 'default') delete env.CLAUDE_CONFIG_DIR;
       else env.CLAUDE_CONFIG_DIR = r.config_dir;
-      const cmd = claudeCommand(claude, ['auth', 'status', '--json']);
-      await execFileP(cmd.file, cmd.args, { cwd: SPAWN_CWD, env, timeout: 30_000, windowsHide: true });
+      const cmd = claudeCommand(claude, ['doctor']);
+      await execFileP(cmd.file, cmd.args, { cwd: SPAWN_CWD, env, timeout: 60_000, windowsHide: true });
     } catch (err) {
-      log.debug('auth status failed', err instanceof Error ? err.message : err);
+      log.debug('token renewal failed', err instanceof Error ? err.message : err);
     }
-    creds = this.readCredentials(r.config_dir);
-    return creds && (!creds.expiresAt || creds.expiresAt > Date.now()) ? creds.accessToken : null;
+    const renewed = this.readCredentials(r.config_dir) ?? creds;
+    const good = !renewed.expiresAt || renewed.expiresAt - Date.now() > TOKEN_MARGIN_MS;
+    // A refresh token that no longer works fails the same way every minute; give it room.
+    this.renewAfter.set(r.id, Date.now() + (good ? RENEW_EVERY_MS : RENEW_BACKOFF_MS));
+    if (good && renewed.expiresAt !== creds.expiresAt) log.info('token renewed', { subscription: r.label, until: new Date(renewed.expiresAt!).toISOString() });
+    return !renewed.expiresAt || renewed.expiresAt > Date.now() ? renewed.accessToken : null;
   }
 
   private async oauthGet(token: string, pathname: string): Promise<Response> {
@@ -747,7 +779,7 @@ export class SubscriptionManager {
       }
       const token = await this.freshToken(r);
       if (!token) {
-        this.markStale(r, 'Token expired; it refreshes when a session runs on this subscription.', 'token', null);
+        this.markStale(r, 'Token expired and could not be renewed. Log in again on this subscription.', 'token', null);
         return this.get(id);
       }
       await this.spaceOutRequest();
