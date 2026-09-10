@@ -60,6 +60,8 @@ interface PendingRespawn {
 
 const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
 const CONTINUE_DELAY_MS = 2500;
+/** Without a hook to say the session is at a prompt, long enough for it to have got there. */
+const CONTINUE_SPAWN_DELAY_MS = 9000;
 const CONTINUE_FALLBACK_MS = 25_000;
 const LIMIT_DEBOUNCE_MS = 90_000;
 
@@ -218,6 +220,9 @@ export class RunManager {
     if (process.env.SWITCHBOARD_WT_WINDOW) return undefined;
     return getSettings(this.db).terminalWindow === 'switchboard' ? 'switchboard' : '0';
   }
+
+  /** Whether the process last started for a run was picking up an existing conversation. */
+  private readonly resumedSpawn = new Map<string, boolean>();
 
   /** Files Claude Code keeps for a session, once found: keyed by run id and file name. */
   private readonly sessionFiles = new Map<string, string>();
@@ -442,7 +447,12 @@ export class RunManager {
     if (!claude) throw new Error('claude executable not found on PATH');
     const sub = this.subs.row(subscriptionId);
     if (!sub) throw new Error(`unknown subscription ${subscriptionId}`);
-    const args: string[] = resume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
+    // Claude Code exits with "No conversation found" when asked to resume a session it never wrote
+    // a transcript for, which is any session that was started and then restarted before it was
+    // used. Start it under the same id instead, so the session keeps its identity either way.
+    const canResume = resume && !!this.sessionFile(r, path.join('..', `${r.session_id}.jsonl`));
+    this.resumedSpawn.set(r.id, canResume);
+    const args: string[] = canResume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
     if (!integrationStatus().mcpInstalled) {
       const file = writeRuntimeJson(`mcp-${r.id}.json`, { mcpServers: { switchboard: mcpServerEntry({ SWITCHBOARD_RUN_ID: r.id }) } });
       args.push('--mcp-config', file);
@@ -565,6 +575,7 @@ export class RunManager {
     if (!r) return;
     switch (msg.type) {
       case 'spawned':
+        this.armContinue(r);
         this.db.run(
           'UPDATE runs SET pid = ?, cols = ?, rows = ?, version = ?, ended_at = NULL, exit_code = NULL WHERE id = ?',
           msg.pid,
@@ -735,11 +746,31 @@ export class RunManager {
     log.info(kind, { run: r.id, session: r.session_id, from, to: target, reason });
   }
 
+  /**
+   * Queue the continue message for a session that has just come back up on a conversation it
+   * already had — a restart, a relaunch, a swap, or resuming a session id.
+   *
+   * Armed from the spawn rather than from the SessionStart hook, because the hook is not something
+   * to depend on here: it does not arrive for every way a session comes back, and when it does it
+   * is only in time to shorten the wait. A swap that carries its own message keeps it.
+   */
+  private armContinue(r: RunRow): void {
+    if (!this.resumedSpawn.get(r.id)) return;
+    this.resumedSpawn.delete(r.id);
+    if (this.pendingContinue.has(r.id)) return;
+    const settings = getSettings(this.db);
+    if (!settings.continueOnResume) return;
+    const text = settings.continueMessage.trim();
+    if (!text) return;
+    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), CONTINUE_SPAWN_DELAY_MS) });
+  }
+
   private typeContinue(runId: string): void {
     const pending = this.pendingContinue.get(runId);
     if (!pending) return;
     clearTimeout(pending.timer);
     this.pendingContinue.delete(runId);
+    log.info('typing the continue message', { run: runId, text: pending.text });
     this.send(runId, { type: 'type', text: pending.text });
   }
 
@@ -830,6 +861,8 @@ export class RunManager {
     if (!r) return;
     if (cwd) this.db.run('UPDATE runs SET last_cwd = ? WHERE id = ?', cwd, r.id);
     if (r.status !== 'running') this.setStatus(r.id, 'running');
+    // The session is at a prompt, so a queued continue message need not wait out the full delay
+    // armContinue allowed for.
     const pending = this.pendingContinue.get(r.id);
     if (pending) {
       clearTimeout(pending.timer);

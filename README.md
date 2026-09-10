@@ -48,9 +48,10 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
   - automatically when a session hits a usage limit (then it types `continue` for you),
   - or proactively when a subscription crosses a threshold while the session is idle.
 - **Restart on update**: `claude update` runs on a schedule; when the version changes, sessions restart onto the new build once their agent is idle.
+- A session coming back on a conversation it already had is told to carry on, with a message you write (Settings → *Continue message*).
 - Sessions carry **one name and one model** between Switchboard and Claude Code: rename in the web UI or with `/rename` in the session, change the model with `/model`, and both sides agree either way.
 - Web terminal: full Claude Code TUI in the browser (xterm.js), built for a phone — fitted to the screen, pinned above the keyboard, with a key bar and a prompt composer, and one button to hand the terminal back to the desk.
-- Device pairing for remote access (QR code). Local access needs no login.
+- Device pairing for remote access (QR code). Local access needs no login. Add it to your phone's home screen and it runs without browser chrome.
 - Runs as a Task Scheduler logon task with a supervisor that brings the daemon back if it exits.
 
 ---
@@ -195,6 +196,10 @@ $env:SWITCHBOARD_BIND = "100.x.y.z"   # your Tailscale IP; loopback stays bound 
 ```
 
 Then reach it at `http://100.x.y.z:4477` (Windows Firewall must allow inbound on that port).
+
+On the phone, use **Share → Add to Home Screen**. It opens without browser chrome from then on,
+which for a full-screen terminal is most of the screen back. Safari's own bar above the keyboard is
+not something a page can remove, so the session header collapses while you type instead.
 
 Either way, finish on the desk with **Settings → Remote access → Pair a device** and scan the QR
 code with your phone. Only requests that come straight from the desk skip pairing; anything

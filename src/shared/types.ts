@@ -296,8 +296,16 @@ export interface Settings {
   /** Swap idle sessions proactively once their subscription crosses swapThresholdPct */
   proactiveSwap: boolean;
   swapThresholdPct: number;
-  /** Typed into the session after an automatic swap caused by a limit */
+  /**
+   * Typed into a session once it is back at a prompt on a conversation it already had — after a
+   * swap, a restart, a relaunch, or resuming an existing session id.
+   */
   continueMessage: string;
+  /**
+   * Send it on every resume, not only on a swap made because a limit was hit. A session that
+   * starts a new conversation never gets it: there is nothing yet to continue.
+   */
+  continueOnResume: boolean;
   usagePollSec: number;
   conflictWindowMin: number;
   /** Extra CLI args for every launched session, e.g. ["--permission-mode", "auto"] */

@@ -22,6 +22,15 @@ const setTitle = (t: string): string => `\x1b]0;${t.replace(/[\x1b\x07]/g, '')}\
  */
 // eslint-disable-next-line no-control-regex
 const OSC_TITLE_RE = /\x1b][012];[^\x1b\x07]*(?:\x07|\x1b\\)/g;
+/**
+ * The confirmation Claude Code shows at startup for `--dangerously-load-development-channels`.
+ * Matched with the whitespace removed, because the interface writes it a cell at a time.
+ */
+const DEV_CHANNEL_WARNING = 'WARNING:Loadingdevelopmentchannels';
+const DEV_CHANNEL_ACCEPT = 'Iamusingthisforlocaldevelopment';
+/** The only channel this is ever answered for: Switchboard's own server, on this machine. */
+const OWN_CHANNEL = 'server:switchboard';
+
 const LIMIT_RE =
   /(usage limit reached|you['’]ve (hit|reached) your (usage |session |weekly |5-hour )?limit|(5-hour|weekly|session) limit reached|limit reached[^\n]{0,40}resets)/i;
 // eslint-disable-next-line no-control-regex
@@ -59,6 +68,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
   let backoff = 500;
   let tail = '';
   let lastLimitReport = 0;
+  let channelPromptAnswered = false;
 
   const size = (): { cols: number; rows: number } => ({ cols: out.columns || 120, rows: out.rows || 30 });
   const send = (msg: RunnerToDaemon): void => {
@@ -106,6 +116,26 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     send({ type: 'resize', cols, rows });
   });
 
+  /**
+   * Answer the development-channels warning.
+   *
+   * Switchboard registers its own MCP server as a channel so it can push messages into an idle
+   * session, and that flag makes Claude Code stop at a confirmation every time a session starts.
+   * The warning is about running channels obtained from elsewhere, so it is only answered when the
+   * list is exactly this machine's own Switchboard server and nothing else. The wanted option is
+   * the one already highlighted, so confirming is all it takes.
+   */
+  const answerChannelPrompt = (): void => {
+    if (channelPromptAnswered || !child) return;
+    const squished = tail.replace(/\s+/g, '');
+    if (!squished.includes(DEV_CHANNEL_WARNING) || !squished.includes(DEV_CHANNEL_ACCEPT)) return;
+    const listed = squished.slice(squished.indexOf('Channels:') + 'Channels:'.length, squished.indexOf(DEV_CHANNEL_ACCEPT));
+    if (!listed.includes(OWN_CHANNEL) || listed.replace(OWN_CHANNEL, '').replace(/[^a-z]/gi, '') !== '') return;
+    channelPromptAnswered = true;
+    tail = '';
+    setTimeout(() => child?.write('\r'), 150);
+  };
+
   const detectLimit = (data: string): void => {
     tail = (tail + data.replace(ANSI_RE, '')).slice(-2000);
     if (Date.now() - lastLimitReport < 60_000) return;
@@ -118,6 +148,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
 
   const spawnChild = (s: SpawnSpec): void => {
     runId = s.runId;
+    channelPromptAnswered = false;
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (typeof v === 'string') env[k] = v;
     for (const [k, v] of Object.entries(s.env)) {
@@ -139,6 +170,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
       if (!webSized) out.write(d.includes(']') ? d.replace(OSC_TITLE_RE, '') : d);
       send({ type: 'data', data: d });
       detectLimit(d);
+      answerChannelPrompt();
     });
     p.onExit(({ exitCode }) => {
       if (child === p) child = null;

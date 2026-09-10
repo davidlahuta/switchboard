@@ -341,8 +341,26 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
             onChange={(e) => set('continueMessage', e.target.value)}
             placeholder="Continue where you left off."
           />
-          <span className="field-hint">Typed into the session after an automatic swap caused by a limit. Leave empty to not type anything.</span>
+          <span className="field-hint">
+            Typed into a session once it is back at a prompt on a conversation it already had. Leave empty to not type
+            anything.
+          </span>
         </label>
+
+        <div className="setting">
+          <div className="setting-text">
+            <div className="setting-name">Send it on every resume</div>
+            <div className="setting-desc">
+              After a restart, a relaunch into a new terminal, or resuming a session id — not only after a swap caused by
+              a limit. A session starting a new conversation never gets it: there is nothing yet to continue.
+            </div>
+          </div>
+          <Toggle
+            checked={draft.continueOnResume}
+            onChange={(v) => set('continueOnResume', v)}
+            label="Send the continue message on every resume"
+          />
+        </div>
 
         <div className="field-row">
           <label className="field">

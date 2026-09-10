@@ -198,6 +198,20 @@ its size or mtime changes, so a switch made in an idle session shows up before i
 transcript on `Stop`, because Claude Code names the model in `SessionStart` only and a mid-session
 `/model` would otherwise go unnoticed until the next restart.
 
+**Startup prompts.** Switchboard registers its own MCP server as a channel so it can push into an
+idle session, and that flag makes Claude Code stop at a confirmation every time a session starts.
+The runner answers it, and only it: the warning is about running channels obtained from elsewhere,
+so it is answered only when the list is exactly this machine's own Switchboard server. The folder
+trust prompt is left alone — that one is about the folder, not about Switchboard.
+
+**Resuming.** A session that was started and then restarted before it was ever used has no
+transcript, and Claude Code exits with "No conversation found" when asked to resume one. Switchboard
+checks for the transcript first and starts under the same session id instead, so a session keeps its
+identity either way. Once a session is back at a prompt on a conversation it already had, the
+continue message is typed into it. That is armed when the process spawns rather than from the
+SessionStart hook: the hook does not arrive for every way a session comes back, and when it does it
+only serves to bring the wait forward.
+
 **Swap** = wait until the agent is idle (or it just hit a limit) → kill claude → reset the terminal →
 respawn `claude --resume <same id>` in the session's last cwd with the new `CLAUDE_CONFIG_DIR` →
 when the `SessionStart(resume)` hook arrives, optionally type the continue message. The continue
@@ -219,7 +233,9 @@ into the grid goes through the browser's hidden input where autocorrect rewrites
 there is nowhere to read a prompt back before sending it.
 
 The browser view is always fitted to its own screen — there is no unfitted mode to choose, because
-a mirror of a TUI at someone else's dimensions is not useful. It keeps no scrollback of its own:
+a mirror of a TUI at someone else's dimensions is not useful. It re-fits whenever its box changes
+size, watched rather than caught on window events: on mount the box is often not measurable yet, and
+a fit that cannot measure would leave the terminal at whatever size the pseudo-terminal has. It keeps no scrollback of its own:
 the session tracks the mouse, so xterm hands wheel events to it and the session scrolls its own
 view, which is what a reader wants and leaves no second scrollbar to get lost in. Touch is bridged
 to the same path — xterm's own touch scrolling bows out whenever a program tracks the mouse, so a

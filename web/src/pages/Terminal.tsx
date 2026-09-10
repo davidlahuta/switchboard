@@ -106,6 +106,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   const [liveStatus, setLiveStatus] = useState<RunStatus | null>(null);
   const [liveSub, setLiveSub] = useState<string | null>(null);
   const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
+  const [typing, setTyping] = useState<'composer' | 'terminal' | null>(null);
   const [fontSize, setFontSize] = useState(initialFontSize);
   // Fitted on every open, deliberately not remembered: it is a per-screen choice, and the screen
   // you open a session on is rarely the one you last turned it off on.
@@ -261,6 +262,22 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const focusTerminal = useCallback(() => termRef.current?.focus(), []);
+
+  /** Which field is live, so the chrome around it can stand down while a keyboard is up. */
+  useEffect(() => {
+    const ta = termRef.current?.textarea;
+    if (!ta) return;
+    const on = () => setTyping('terminal');
+    const off = () => setTyping((t) => (t === 'terminal' ? null : t));
+    ta.addEventListener('focus', on);
+    ta.addEventListener('blur', off);
+    return () => {
+      ta.removeEventListener('focus', on);
+      ta.removeEventListener('blur', off);
+    };
+  }, []);
+
   /**
    * iOS rubber-bands the document whenever a drag finds nothing to scroll, which on a page that is
    * a single fixed panel is every drag that misses the terminal. Nothing here scrolls the
@@ -268,7 +285,15 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
    */
   useEffect(() => {
     document.body.classList.add('term-open');
-    return () => document.body.classList.remove('term-open');
+    // Safari and Chrome tint their own bars with this, which is as close to one application as a
+    // page in a browser tab gets. Installed to the home screen there are no bars at all.
+    const tags = [...document.querySelectorAll('meta[name="theme-color"]')] as HTMLMetaElement[];
+    const previous = tags.map((t) => t.content);
+    for (const t of tags) t.content = '#0b0e13';
+    return () => {
+      document.body.classList.remove('term-open');
+      tags.forEach((t, i) => (t.content = previous[i]));
+    };
   }, []);
 
   // ---- websocket with reconnect ----
@@ -386,39 +411,43 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     if (fitOnRef.current) requestAnimationFrame(requestFit);
   }, [fontSize, requestFit]);
 
-  // ---- fit mode + window resize ----
+  // ---- fit mode ----
   useEffect(() => {
     fitOnRef.current = fit;
+    const host = hostRef.current;
+    const box = scrollerRef.current;
     if (!fit) {
       // Following the desktop terminal: the grid is laid out at its own size, so the pixel height
       // pinned for fitted mode has to go or it would crop it.
-      const host = hostRef.current;
       if (host) {
         host.style.top = '';
         host.style.height = '';
       }
       return;
     }
-    const raf = requestAnimationFrame(requestFit);
+    if (!box) return;
+    /*
+     * Fit whenever the box changes size, rather than once on mount and then on window resizes.
+     * On mount the box is often not measurable yet, and a fit that cannot measure leaves the
+     * terminal at the size the pseudo-terminal happens to have — larger than the screen, with the
+     * bottom of the conversation cut off. Banners appearing and disappearing move it too.
+     *
+     * A keyboard also shrinks the box, and that must not re-fit: the terminal is pinned to the
+     * bottom precisely so the keyboard can cover the top of it without the session reflowing.
+     */
     let t = 0;
-    // Width, not height: on a phone the height changes every time the keyboard opens, and the
-    // terminal must not be resized for that. Rotating or resizing a window changes the width.
-    let lastWidth = window.innerWidth;
-    const onResize = () => {
-      const width = window.innerWidth;
-      const widthChanged = width !== lastWidth;
-      lastWidth = width;
-      if (!widthChanged && window.visualViewport && window.visualViewport.height < window.innerHeight - 80) return;
+    const observer = new ResizeObserver(() => {
+      const vv = window.visualViewport;
+      if (vv && vv.height < window.innerHeight - 80) return;
       window.clearTimeout(t);
-      t = window.setTimeout(requestFit, 150);
-    };
-    window.addEventListener('resize', onResize);
-    window.addEventListener('orientationchange', onResize);
+      t = window.setTimeout(requestFit, 60);
+    });
+    observer.observe(box);
+    const raf = requestAnimationFrame(requestFit);
     return () => {
       cancelAnimationFrame(raf);
       window.clearTimeout(t);
-      window.removeEventListener('resize', onResize);
-      window.removeEventListener('orientationchange', onResize);
+      observer.disconnect();
     };
   }, [fit, requestFit]);
 
@@ -520,7 +549,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   const keepFocus = (e: React.MouseEvent) => e.preventDefault();
 
   return (
-    <div className="term-page" ref={pageRef}>
+    <div className="term-page" ref={pageRef} data-typing={typing ?? undefined}>
       <header className="term-head">
         <a className="btn btn-icon btn-ghost" href={href.sessions()} aria-label="Back to sessions" title="Back">
           <Icon name="back" />
@@ -626,6 +655,8 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onComposerKey}
+            onFocus={() => setTyping('composer')}
+            onBlur={() => setTyping((t) => (t === 'composer' ? null : t))}
             placeholder="Type a prompt… (Ctrl+Enter sends)"
             aria-label="Prompt composer"
             autoCapitalize="sentences"
@@ -653,7 +684,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
           type="button"
           className="key key-tool"
           onMouseDown={keepFocus}
-          onClick={() => termRef.current?.focus()}
+          onClick={focusTerminal}
           aria-label="Type directly in the terminal (opens the keyboard)"
           title="Type in terminal"
         >

@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS: Settings = {
   proactiveSwap: false,
   swapThresholdPct: 95,
   continueMessage: 'continue',
+  continueOnResume: true,
   // The usage endpoint is shared across all subscriptions and rate-limits aggressively; five
   // accounts polling every two minutes was enough to draw 429s.
   usagePollSec: 300,
@@ -56,6 +57,7 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
   if (typeof patch.proactiveSwap === 'boolean') next.proactiveSwap = patch.proactiveSwap;
   if (patch.swapThresholdPct !== undefined) next.swapThresholdPct = n(patch.swapThresholdPct, 50, 100, current.swapThresholdPct);
   if (typeof patch.continueMessage === 'string') next.continueMessage = patch.continueMessage.slice(0, 2000);
+  if (typeof patch.continueOnResume === 'boolean') next.continueOnResume = patch.continueOnResume;
   if (patch.conflictWindowMin !== undefined) next.conflictWindowMin = n(patch.conflictWindowMin, 5, 24 * 60, current.conflictWindowMin);
   if (Array.isArray(patch.claudeArgs)) next.claudeArgs = patch.claudeArgs.filter((a) => typeof a === 'string' && a.length > 0);
   if (Array.isArray(patch.repoRoots)) {

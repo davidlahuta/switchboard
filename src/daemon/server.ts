@@ -333,7 +333,7 @@ export function createServer(s: Services): http.Server {
     const ext = path.extname(file);
     res.writeHead(200, {
       'Content-Type': MIME[ext] ?? 'application/octet-stream',
-      'Cache-Control': file === index ? 'no-cache' : 'public, max-age=31536000, immutable',
+      'Cache-Control': url.pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
       'X-Frame-Options': 'DENY',
