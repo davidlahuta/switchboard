@@ -1272,6 +1272,35 @@ a.list-main:hover {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+/*
+ * A session row identifies the session first and describes it second.
+ *
+ * The badges are open-ended — model, permissions, version, auto-continue, a stale host, a queued
+ * swap — and with `min-width: 0` the name beside them could be squeezed to nothing. Since the title
+ * is clipped rather than wrapped, that renders as no name at all: the overview ended up listing
+ * sessions identified only by their model, and the one row that kept its name was the one carrying
+ * the fewest badges.
+ *
+ * So the name gets a floor it cannot be pushed below, and the row is allowed to wrap. Badges that
+ * no longer fit beside a name at its minimum take a second line of their own, which is where they
+ * belong: they are what the session is, and the name is which session it is.
+ */
+.run-row {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.run-row > .list-main {
+  flex: 1 1 13rem;
+  min-width: min(13rem, 100%);
+}
+.run-row > .list-badges {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* The dot rides the name's own line, and never shrinks with it. */
+.list-title .attention {
+  vertical-align: middle;
+}
 .list-time {
   font-size: 12px;
   color: var(--muted);
