@@ -63,6 +63,7 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 |--------|--------------------------|--------------------|---------|
 | GET    | `/api/runs`              |                    | `Run[]` |
 | POST   | `/api/runs`              | `CreateRunRequest` – opens a Windows Terminal tab. Besides `cwd`/`subscriptionId` it takes `name`, `worktree`, `resumeSessionId` (a GUID), `autoSwap`, `model`, `autoCompact`, `autoCompactTokens` and `args` (extra `claude` arguments; ones Switchboard manages are refused with 400) | `Run` |
+| PATCH  | `/api/runs/:id`          | `UpdateRunRequest` – `{ name }` renames the session; Claude Code is renamed with it on its next hook | `Run` |
 | POST   | `/api/runs/:id/swap`     | `SwapRequest`      | `Run`   |
 | POST   | `/api/runs/:id/restart`  | `{ force? }` – same subscription, resumes the same session GUID | `Run` |
 | POST   | `/api/runs/:id/stop`     |                    | `{ ok }`|
@@ -93,7 +94,8 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 * `/ws/ui` – server pushes `UiFrame`. On `invalidate`, refetch: scope `state` → `/api/state`,
   `repo:<id>` → `/api/repos/<id>`.
 * `/ws/term/:runId` – terminal mirror. Server sends `TermServerFrame` (first a `snapshot`), client
-  sends `TermClientFrame`.
+  sends `TermClientFrame`. `resize` takes the PTY size over for the browser; `release-size` gives it
+  back to the console the session runs in, which also happens when the last viewer disconnects.
 * `/ws/agent` – used by the `switchboard mcp` stdio shim (internal).
 * `/ws/runner` – used by `switchboard run` (internal).
 
@@ -102,3 +104,7 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 `POST /hooks/:event` receives Claude Code HTTP hook payloads (`SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`, `CwdChanged`)
 and answers with hook JSON output. Internal.
+
+`SessionStart` and `UserPromptSubmit` are also how the session name stays shared: they report the
+session's current title, and their response can set it. `Stop` and `SessionStart` re-read the model
+from the session transcript, which is the only place a mid-session `/model` shows up.

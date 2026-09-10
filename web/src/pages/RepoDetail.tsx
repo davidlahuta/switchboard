@@ -11,6 +11,7 @@ import type {
   RepoDetail,
   StateSnapshot,
 } from '@shared/types.ts';
+import { UNREAD_CAP } from '@shared/types.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { PageHead } from '../components/PageHead.tsx';
 import { Badge, Empty, Icon, IconButton, Section, Spinner, StatusPill } from '../components/ui.tsx';
@@ -183,7 +184,7 @@ function AgentTable({ agents, subLabel, now }: { agents: Agent[]; subLabel: (id:
                   {a.name}
                   {a.unread > 0 && (
                     <Badge tone="accent" title="Messages waiting for this agent">
-                      {a.unread} unread
+                      {a.unread >= UNREAD_CAP ? `${UNREAD_CAP}+` : a.unread} unread
                     </Badge>
                   )}
                   {a.runId && (

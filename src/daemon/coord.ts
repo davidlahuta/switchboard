@@ -15,6 +15,7 @@ import type {
   Repo,
   RepoDetail,
 } from '../shared/types.ts';
+import { UNREAD_CAP } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
 import { bool, type Db, now } from './db.ts';
 import { getSettings } from './settings.ts';
@@ -47,6 +48,7 @@ export interface AgentRow {
   last_seen: string;
   ended_at: string | null;
   last_piggyback_at: string | null;
+  read_through_id: number;
 }
 
 interface MessageRow {
@@ -152,8 +154,6 @@ export interface DetailLimits {
 export const DEFAULT_LIMITS: DetailLimits = { messages: 150, events: 150, files: 250 };
 /** How many recent touch rows the file panel aggregates over. Bounds the cost on busy repos. */
 const TOUCH_SCAN = 4000;
-/** Unread is counted over this window only, so the scan does not grow with history. */
-const UNREAD_WINDOW_MS = 24 * 3600_000;
 /** Retention for the high-volume tables, applied by the periodic sweep. */
 const EVENT_RETENTION_DAYS = 14;
 const TOUCH_RETENTION_DAYS = 14;
@@ -264,8 +264,9 @@ export class Coordinator {
     } else {
       const name = this.uniqueName(repo.id, input.name || this.defaultName(info.branch, info.worktree, input.sessionId), input.sessionId);
       this.db.run(
-        `INSERT INTO agents (id, repo_id, name, worktree, branch, cwd, pid, status, subscription_id, run_id, has_channel, started_at, last_seen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?)`,
+        `INSERT INTO agents (id, repo_id, name, worktree, branch, cwd, pid, status, subscription_id, run_id, has_channel, started_at, last_seen, read_through_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?,
+           (SELECT COALESCE(MAX(id), 0) FROM messages WHERE repo_id = ?))`,
         input.sessionId,
         repo.id,
         name,
@@ -278,6 +279,7 @@ export class Coordinator {
         input.hasChannel ? 1 : 0,
         ts,
         ts,
+        repo.id,
       );
       this.event(repo.id, input.sessionId, 'joined', `${name} joined${info.branch ? ` on ${info.branch}` : ''}`);
       log.info('agent joined', { name, repo: repo.name });
@@ -314,13 +316,16 @@ export class Coordinator {
     this.db.tx(() => {
       this.db.run('UPDATE claims SET released_at = ? WHERE agent_id = ? AND released_at IS NULL', ts, id);
       this.db.run(
-        'UPDATE agents SET repo_id = ?, name = ?, cwd = ?, worktree = ?, branch = ?, intent = NULL, last_seen = ? WHERE id = ?',
+        `UPDATE agents SET repo_id = ?, name = ?, cwd = ?, worktree = ?, branch = ?, intent = NULL, last_seen = ?,
+           read_through_id = (SELECT COALESCE(MAX(id), 0) FROM messages WHERE repo_id = ?)
+         WHERE id = ?`,
         repo.id,
         name,
         cwd,
         info.worktree,
         info.branch,
         ts,
+        repo.id,
         id,
       );
     });
@@ -489,6 +494,20 @@ export class Coordinator {
       }
     }
     return [...new Set(lines)];
+  }
+
+  /**
+   * Follow a session rename. The agent's name is what peers address in messages and claims, so it
+   * tracks the session name rather than drifting from it.
+   */
+  renameAgent(agentId: string, name: string): void {
+    const a = this.agent(agentId);
+    if (!a) return;
+    const next = this.uniqueName(a.repo_id, name.trim().replace(/\s+/g, '-').slice(0, 40), a.id);
+    if (next === a.name) return;
+    this.db.run('UPDATE agents SET name = ? WHERE id = ?', next, agentId);
+    this.event(a.repo_id, agentId, 'renamed', `${a.name} is now ${next}`);
+    this.bus.invalidate('state', `repo:${a.repo_id}`);
   }
 
   setIntent(agentId: string, summary: string, files: string[] = [], name?: string): string {
@@ -824,17 +843,35 @@ export class Coordinator {
   }
 
   private pending(a: AgentRow): MessageRow[] {
-    return this.db.all<MessageRow>(
+    const rows = this.db.all<MessageRow>(
       `SELECT m.* FROM messages m
-       WHERE m.repo_id = ? AND m.from_id <> ? AND (m.to_id = ? OR m.to_id IS NULL) AND m.created_at >= ?
+       WHERE m.repo_id = ? AND m.id > ? AND m.from_id <> ? AND (m.to_id = ? OR m.to_id IS NULL) AND m.created_at >= ?
          AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = ?)
        ORDER BY m.id`,
       a.repo_id,
+      a.read_through_id,
       a.id,
       a.id,
       a.started_at,
       a.id,
     );
+    this.advanceWatermark(a, rows.length ? rows[0].id : null);
+    return rows;
+  }
+
+  /**
+   * Move an agent's watermark up to just below its oldest still-unread message, or to the newest
+   * message in the repo when it has none. Everything below is settled for good — a delivery is
+   * never taken back — so the next scan starts there instead of at the beginning of history.
+   */
+  private advanceWatermark(a: AgentRow, oldestUnread: number | null): void {
+    const to =
+      oldestUnread !== null
+        ? oldestUnread - 1
+        : (this.db.get<{ n: number | null }>('SELECT MAX(id) AS n FROM messages WHERE repo_id = ?', a.repo_id)?.n ?? 0);
+    if (to <= a.read_through_id) return;
+    a.read_through_id = to;
+    this.db.run('UPDATE agents SET read_through_id = ? WHERE id = ? AND read_through_id < ?', to, a.id, to);
   }
 
   private isPushWorthy(m: MessageRow, a: AgentRow): boolean {
@@ -1097,22 +1134,34 @@ export class Coordinator {
    * NOT EXISTS over every message once per agent, which is the dominant cost on a busy repo.
    */
   private unreadByAgent(repoId: string): Map<string, number> {
-    const rows = this.db.all<{ id: string; n: number }>(
-      `SELECT a.id AS id, COUNT(m.id) AS n
-         FROM agents a
-         LEFT JOIN messages m
-           ON m.repo_id = a.repo_id
-          AND m.from_id <> a.id
-          AND (m.to_id = a.id OR m.to_id IS NULL)
-          AND m.created_at >= a.started_at
-          AND m.created_at >= ?
-          AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = a.id)
-        WHERE a.repo_id = ? AND a.status <> 'offline'
-        GROUP BY a.id`,
-      new Date(Date.now() - UNREAD_WINDOW_MS).toISOString(),
+    const agents = this.db.all<{ id: string; started_at: string; read_through_id: number }>(
+      "SELECT id, started_at, read_through_id FROM agents WHERE repo_id = ? AND status <> 'offline'",
       repoId,
     );
-    return new Map(rows.map((r) => [r.id, r.n]));
+    const head = this.db.get<{ n: number | null }>('SELECT MAX(id) AS n FROM messages WHERE repo_id = ?', repoId)?.n ?? 0;
+    const out = new Map<string, number>();
+    for (const a of agents) {
+      // Walks forward from the watermark over the repo's (repo_id, id) index and stops as soon as
+      // it has enough for the badge. An agent that is up to date scans nothing; one that is far
+      // behind stops after the cap instead of walking its whole backlog.
+      const rows = this.db.all<{ id: number }>(
+        `SELECT m.id FROM messages m
+          WHERE m.repo_id = ? AND m.id > ? AND m.from_id <> ? AND (m.to_id = ? OR m.to_id IS NULL) AND m.created_at >= ?
+            AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = ?)
+          ORDER BY m.id LIMIT ?`,
+        repoId,
+        a.read_through_id,
+        a.id,
+        a.id,
+        a.started_at,
+        a.id,
+        UNREAD_CAP,
+      );
+      out.set(a.id, rows.length);
+      const to = rows.length ? rows[0].id - 1 : head;
+      if (to > a.read_through_id) this.db.run('UPDATE agents SET read_through_id = ? WHERE id = ? AND read_through_id < ?', to, a.id, to);
+    }
+    return out;
   }
 
   agentDto(r: AgentRow, unread?: number): Agent {

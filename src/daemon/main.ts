@@ -39,6 +39,10 @@ export async function startDaemon(): Promise<void> {
   updater.start();
   void models.refresh();
   const sweep = setInterval(() => coord.sweep(), 60_000);
+  // Retention runs far less often than the liveness sweep: it is a bulk delete, and an hour of
+  // extra history costs nothing next to doing it on every pass.
+  const prune = setInterval(() => coord.prune(), 3600_000);
+  coord.prune();
 
   // One server per bound address: loopback for the desk's own hooks/shims/runners, plus any
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
@@ -60,6 +64,7 @@ export async function startDaemon(): Promise<void> {
   const shutdown = (): void => {
     log.info('shutting down');
     clearInterval(sweep);
+    clearInterval(prune);
     subs.stop();
     updater.stop();
     for (const server of servers) {

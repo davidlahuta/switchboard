@@ -277,6 +277,10 @@ export function createServer(s: Services): http.Server {
     s.runs.swap(params[0], typeof body.subscriptionId === 'string' ? body.subscriptionId : 'auto', 'manual switch', { force: body.force === true }),
   );
   route('POST', '/api/runs/:id/restart', ({ params, body }) => s.runs.restart(params[0], 'manual restart', body.force === true));
+  route('PATCH', '/api/runs/:id', ({ params, body }) => {
+    if (typeof body.name === 'string') return s.runs.rename(params[0], body.name);
+    return fail(400, 'Nothing to change');
+  });
   route('POST', '/api/runs/:id/stop', ({ params }) => (s.runs.stop(params[0]), { ok: true }));
   route('DELETE', '/api/runs/:id', ({ params }) => (s.runs.forget(params[0]), { ok: true }));
   route('GET', '/api/sessions/recent', ({ url }) => s.runs.recentSessions(url.searchParams.get('cwd') ?? fail(400, 'cwd is required')));

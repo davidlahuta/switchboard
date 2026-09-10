@@ -60,7 +60,25 @@ Waking an idle agent costs a full model turn, so delivery is tiered:
   and rate-limited, so awareness spreads without spending extra turns.
 * **Pull (tool)** – `sb_inbox` and `sb_status` always work, even for sessions with neither.
 
-Each message is delivered once per recipient (tracked in `message_delivery`).
+Each message is delivered once per recipient (tracked in `deliveries`).
+
+### Busy repos
+
+A repo with a dozen agents on it produces messages, events and file touches faster than anyone
+reads them, and the repo view is refetched on every change. Three things keep that flat:
+
+* **Watermark.** Each agent carries `read_through_id`: everything at or below it is settled for
+  that agent — delivered, sent by it, addressed elsewhere, or older than it. "What has this agent
+  not seen" only ever looks above the watermark, and the watermark moves up to just below the
+  oldest still-unread message on each pass. An agent joining a repo starts at the newest message
+  that predates it, so it never walks the history it was never going to be shown.
+* **Caps.** The unread badge stops counting at `UNREAD_CAP` (200) and the file panel aggregates the
+  most recent `TOUCH_SCAN` (4000) touches rather than the whole window, so its counts read as
+  "recently", not "ever". Payloads are capped per panel.
+* **Retention.** Events and file touches older than 14 days are deleted hourly, and events are
+  capped per repo. Messages and notes are kept.
+
+At 40 agents with 50k messages, 250k events and 400k touches, one repo view is ~25 ms and ~90 KB.
 
 ### Conflict prevention
 
@@ -165,6 +183,13 @@ console (the Windows Terminal tab). It always passes:
   (`--session-id`, `--resume`, `--mcp-config`, `--settings`, `--worktree`, …) are refused, because
   overriding them would break the session's identity or its coordination.
 
+**Name and model** are shared with Claude Code rather than mirrored. `SessionStart` and
+`UserPromptSubmit` report the session's title and can set it, so a rename in the web UI reaches the
+session on its next prompt and a `/rename` in the session reaches the UI the same way; a shadow copy
+of the last reported title is what says which side moved. The model is read back from the session
+transcript on `Stop`, because Claude Code names the model in `SessionStart` only and a mid-session
+`/model` would otherwise go unnoticed until the next restart.
+
 **Swap** = wait until the agent is idle (or it just hit a limit) → kill claude → reset the terminal →
 respawn `claude --resume <same id>` in the session's last cwd with the new `CLAUDE_CONFIG_DIR` →
 when the `SessionStart(resume)` hook arrives, optionally type the continue message. The continue
@@ -180,9 +205,15 @@ Target = the enabled, logged-in subscription with the most headroom, weighted by
 
 The runner streams PTY output to the daemon, which feeds a headless xterm per run
 (`@xterm/headless` + serialize addon). A browser attaching to `/ws/term/:runId` receives the
-serialized current screen and then live data, and can send input. The terminal size is owned by
-the Windows Terminal tab; the web view renders at the same size (zoom/scroll on phones) and
-offers a key bar (Esc, Tab, ⇧Tab, arrows, Ctrl‑C, Enter) plus a text composer.
+serialized current screen and then live data, and can send input. It offers a key bar (Esc, Tab,
+⇧Tab, arrows, Ctrl‑C, Enter) plus a text composer.
+
+The Windows Terminal tab owns the PTY size until a browser fits to its own screen, which is what a
+phone needs. Only one of them can own it: while the browser does, the tab still shows the frame
+drawn for its own dimensions and the TUI repaints a smaller area inside it, leaving the old
+characters around and under the new frame. So the console is cleared on both sides of any size
+change, and the size goes back to it as soon as the browser stops fitting — turning fitting off, or
+the last viewer disconnecting.
 
 ## Security
 
@@ -197,3 +228,6 @@ offers a key bar (Esc, Tab, ⇧Tab, arrows, Ctrl‑C, Enter) plus a text compose
 
 SQLite via the built-in `node:sqlite` at `%LOCALAPPDATA%\switchboard\switchboard.db`
 (override with `SWITCHBOARD_DATA_DIR`). No native build step anywhere except the prebuilt PTY.
+
+Schema changes are an append-only list of migrations in `src/daemon/db.ts`, applied on open and
+tracked with `PRAGMA user_version`.

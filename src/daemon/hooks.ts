@@ -6,9 +6,21 @@ const log = logger('hooks');
 
 type Payload = Record<string, any>;
 
-function context(event: string, parts: Array<string | null | undefined>): object {
+function context(event: string, parts: Array<string | null | undefined>, extra?: Record<string, unknown>): object {
   const text = parts.filter((p): p is string => !!p).join('\n\n');
-  return text ? { hookSpecificOutput: { hookEventName: event, additionalContext: text } } : {};
+  const out: Record<string, unknown> = { hookEventName: event, ...extra };
+  if (text) out.additionalContext = text;
+  return Object.keys(out).length > 1 ? { hookSpecificOutput: out } : {};
+}
+
+/**
+ * The name Switchboard holds for the session, when the session is carrying a different one.
+ * SessionStart and UserPromptSubmit are the two events that can both report and set the title,
+ * which is what keeps the two names from drifting apart.
+ */
+function titleSync(runs: RunManager, sid: string, p: Payload): Record<string, unknown> | undefined {
+  const push = runs.syncTitle(sid, typeof p.session_title === 'string' ? p.session_title : null);
+  return push ? { sessionTitle: push } : undefined;
 }
 
 /** Claude Code HTTP hook endpoint: presence, conflict checks, lazy message delivery, swap signals. */
@@ -16,6 +28,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
   return (event: string, p: Payload, runHeader: string | undefined): object => {
     const sid = typeof p.session_id === 'string' ? p.session_id : null;
     const cwd = typeof p.cwd === 'string' ? p.cwd : null;
+    const transcript = typeof p.transcript_path === 'string' ? p.transcript_path : null;
     if (!sid) return {};
     const runId = runHeader && !runHeader.startsWith('$') ? runHeader : null;
     if (runId) runs.rebind(runId, sid);
@@ -39,11 +52,12 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
           if (cwd) coord.setCwd(sid, cwd);
           coord.setStatus(sid, 'idle');
           runs.onSessionStart(sid, cwd);
-          return context('SessionStart', [coord.digest(sid), coord.piggyback(sid)]);
+          runs.syncModel(sid, transcript);
+          return context('SessionStart', [coord.digest(sid), coord.piggyback(sid)], titleSync(runs, sid, p));
         }
         case 'UserPromptSubmit':
           coord.setStatus(sid, 'working', null);
-          return context('UserPromptSubmit', [coord.piggyback(sid)]);
+          return context('UserPromptSubmit', [coord.piggyback(sid)], titleSync(runs, sid, p));
         case 'PreToolUse': {
           coord.setStatus(sid, 'working', typeof p.tool_name === 'string' ? p.tool_name : null);
           const file = editedPath(p.tool_name, p.tool_input);
@@ -67,6 +81,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
           }
           coord.setStatus(sid, 'idle', null);
           runs.onIdle(sid);
+          runs.syncModel(sid, transcript);
           return {};
         }
         case 'StopFailure': {

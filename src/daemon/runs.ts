@@ -10,6 +10,7 @@ import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, writeRuntimeJson } from './claude.ts';
 import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
+import { readSessionModel } from './transcript.ts';
 import { hooksInstalledIn, integrationStatus } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import { TermMirror } from './mirror.ts';
@@ -44,6 +45,7 @@ interface RunRow {
   auto_compact: number | null;
   auto_compact_tokens: number | null;
   skip_permissions: number | null;
+  claude_title: string | null;
 }
 
 /** A respawn waiting for the session to finish its turn. */
@@ -61,6 +63,21 @@ const CONTINUE_FALLBACK_MS = 25_000;
 const LIMIT_DEBOUNCE_MS = 90_000;
 
 const httpError = (status: number, message: string): Error => Object.assign(new Error(message), { status });
+
+/**
+ * Which side renamed the session. `shadow` is the last title the session reported, so it differing
+ * from what the session reports now means the rename happened in there (/rename, or the title
+ * Claude generates from a first prompt) and Switchboard follows. Otherwise a name that has moved
+ * away from the shadow is the operator's, and it goes the other way. Exported for tests.
+ */
+export function titleDecision(name: string, shadow: string | null, reported: string | null): { adopt?: string; push?: string } {
+  const title = reported?.trim() || null;
+  // Adopting a title that already matches the name is a no-op rename that records the shadow, so
+  // the two stop looking out of step.
+  if (title && title !== shadow) return { adopt: title };
+  if (name === shadow) return {};
+  return { push: name };
+}
 
 function parseArgs(json: string | null): string[] {
   if (!json) return [];
@@ -151,6 +168,7 @@ export class RunManager {
     );
     const lastSwap: Swap | null = swap ? { fromSubscriptionId: swap.from_sub, toSubscriptionId: swap.to_sub, reason: swap.reason, ts: swap.ts } : null;
     const status: RunStatus = this.pendingRespawn.has(r.id) && r.status === 'running' ? 'swapping' : r.status;
+    const agent = this.coord.agent(r.session_id);
     return {
       id: r.id,
       name: r.name,
@@ -160,7 +178,7 @@ export class RunManager {
       subscriptionId: r.subscription_id,
       subscriptionLabel: this.subs.row(r.subscription_id)?.label ?? r.subscription_id,
       status,
-      agentStatus: this.coord.agent(r.session_id)?.status ?? null,
+      agentStatus: agent?.status ?? null,
       autoSwap: bool(r.auto_swap),
       swapCount: r.swap_count,
       lastSwap,
@@ -174,9 +192,59 @@ export class RunManager {
       cols: r.cols,
       rows: r.rows,
       createdAt: r.created_at,
+      lastActivity: agent?.last_seen ?? r.ended_at ?? r.created_at,
       endedAt: r.ended_at,
       exitCode: r.exit_code,
     };
+  }
+
+  // ------------------------------------------------------------ session name
+
+  /**
+   * Switchboard and Claude Code hold one name between them; see titleDecision. Returns the title to
+   * push into the session, if any.
+   */
+  syncTitle(sessionId: string, reported: string | null): string | null {
+    const r = this.bySession(sessionId);
+    if (!r) return null;
+    const { adopt, push } = titleDecision(r.name, r.claude_title, reported);
+    if (adopt) {
+      this.db.run('UPDATE runs SET name = ?, claude_title = ? WHERE id = ?', adopt, adopt, r.id);
+      this.coord.renameAgent(sessionId, adopt);
+      this.bus.invalidate('state');
+      log.info('session renamed in claude', { run: r.id, name: adopt });
+      return null;
+    }
+    if (push) this.db.run('UPDATE runs SET claude_title = ? WHERE id = ?', push, r.id);
+    return push ?? null;
+  }
+
+  /**
+   * Follow a `/model` made inside the session. Claude Code names the model in the SessionStart
+   * hook only, so the transcript is the live source; see readSessionModel.
+   */
+  syncModel(sessionId: string, transcriptPath: string | null): void {
+    if (!transcriptPath) return;
+    const r = this.bySession(sessionId);
+    if (!r) return;
+    const model = readSessionModel(transcriptPath);
+    if (!model || model === r.model) return;
+    this.db.run('UPDATE runs SET model = ? WHERE id = ?', model, r.id);
+    this.bus.invalidate('state');
+    log.info('session model changed in claude', { run: r.id, model });
+  }
+
+  rename(runId: string, name: string): Run {
+    const r = this.row(runId);
+    if (!r) throw httpError(404, 'Unknown session');
+    const clean = name.trim();
+    if (!clean) throw httpError(400, 'Name cannot be empty');
+    if (clean.length > 120) throw httpError(400, 'Name is too long');
+    this.db.run('UPDATE runs SET name = ? WHERE id = ?', clean, r.id);
+    this.coord.renameAgent(r.session_id, clean);
+    this.bus.invalidate('state');
+    // The session hears about it on its next hook: a prompt, or the next time it starts.
+    return this.dto(this.row(runId)!);
   }
 
   list(): Run[] {
@@ -451,6 +519,9 @@ export class RunManager {
       if (frame.type === 'resize' && frame.cols >= 20 && frame.rows >= 5 && frame.cols <= 500 && frame.rows <= 200) {
         this.send(runId, { type: 'resize', cols: Math.floor(frame.cols), rows: Math.floor(frame.rows) });
       }
+      // The browser stopped fitting: the console the session runs in owns the size again, so both
+      // views end up showing the same frame rather than one of them keeping a phone's dimensions.
+      if (frame.type === 'release-size') this.send(runId, { type: 'restore-size' });
     });
     ws.on('close', () => {
       detach();

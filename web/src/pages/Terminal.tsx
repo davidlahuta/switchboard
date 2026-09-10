@@ -5,6 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { RunStatus, StateSnapshot, TermClientFrame, TermServerFrame } from '@shared/types.ts';
 import { RestartMenu } from '../components/RestartMenu.tsx';
+import { SessionName } from '../components/SessionName.tsx';
 import { RunTags } from '../components/RunTags.tsx';
 import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Icon, StatusPill } from '../components/ui.tsx';
@@ -154,6 +155,18 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     lastRequested.current = { key, at: Date.now() };
     setSize({ cols, rows });
     sendFrame({ type: 'resize', cols, rows });
+  }, [sendFrame]);
+
+  /**
+   * Turning fitting off hands the size back to the console the session runs in, so the two views
+   * show the same frame again. Leaving it on the phone's dimensions is what made the desktop
+   * terminal repaint a small frame inside a larger stale one.
+   */
+  const toggleFit = useCallback(() => {
+    setFit((f) => {
+      if (f) sendFrame({ type: 'release-size' });
+      return !f;
+    });
   }, [sendFrame]);
 
   // ---- xterm lifecycle ----
@@ -426,7 +439,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
           <Icon name="back" />
         </a>
         <div className="term-title">
-          <div className="term-name">{run?.name ?? 'Session'}</div>
+          <div className="term-name">{run ? <SessionName run={run} as="div" /> : 'Session'}</div>
           <div className="term-meta">
             {status && <StatusPill status={status} title="Run status" />}
             {run?.agentStatus && status !== 'exited' && <StatusPill status={run.agentStatus} title="Agent status" />}
@@ -464,7 +477,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             type="button"
             className={fit ? 'btn btn-icon btn-ghost is-on' : 'btn btn-icon btn-ghost'}
             aria-pressed={fit}
-            onClick={() => setFit((f) => !f)}
+            onClick={() => toggleFit()}
             aria-label="Fit to this screen"
             title={fit ? 'Fitted to this screen (resizing the desktop tab takes it back)' : 'Fit to this screen (takes over the terminal size)'}
           >
@@ -511,7 +524,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             This session is not in the list of runs. Showing whatever the daemon streams.
           </div>
         )}
-        <div className="term-scroller" ref={scrollerRef}>
+        <div className={fit ? 'term-scroller fit' : 'term-scroller'} ref={scrollerRef}>
           <div className={fit ? 'term-host fit' : 'term-host'} ref={hostRef} />
         </div>
       </div>

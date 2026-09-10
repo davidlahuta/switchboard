@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { rejectReservedArgs } from '../src/daemon/runs.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { rejectReservedArgs, titleDecision } from '../src/daemon/runs.ts';
+import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, weightFor } from '../src/daemon/subscriptions.ts';
 import type { Usage } from '../src/shared/types.ts';
 
@@ -33,6 +37,51 @@ describe('subscription headroom', () => {
     assert.equal(headroomOf(usage(100, 100), 5).headroom, 0);
     assert.equal(headroomOf(usage(null, null), 5).bindingWindow, null);
     assert.equal(headroomOf(null, 5).bindingWindow, null);
+  });
+});
+
+describe('session name sync', () => {
+  it('adopts a rename made inside the session', () => {
+    assert.deepEqual(titleDecision('old', 'old', 'new'), { adopt: 'new' });
+  });
+
+  it('pushes a rename made in switchboard', () => {
+    assert.deepEqual(titleDecision('new', 'old', 'old'), { push: 'new' });
+  });
+
+  it('does nothing once both sides agree', () => {
+    assert.deepEqual(titleDecision('same', 'same', 'same'), {});
+  });
+
+  it('pushes when the session has no title yet', () => {
+    assert.deepEqual(titleDecision('mine', null, null), { push: 'mine' });
+  });
+
+  it('settles rather than pushing forever when the session already has the name', () => {
+    assert.deepEqual(titleDecision('mine', null, 'mine'), { adopt: 'mine' });
+  });
+});
+
+describe('session model sync', () => {
+  it('reads the newest model from a transcript, ignoring subagent turns', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-transcript-'));
+    const file = path.join(dir, 't.jsonl');
+    try {
+      fs.writeFileSync(
+        file,
+        [
+          JSON.stringify({ type: 'assistant', isSidechain: false, message: { model: 'claude-opus-5' } }),
+          JSON.stringify({ type: 'user', message: { content: 'hi' } }),
+          JSON.stringify({ type: 'assistant', isSidechain: false, message: { model: 'claude-fable-5-1' } }),
+          JSON.stringify({ type: 'assistant', isSidechain: true, message: { model: 'claude-haiku-4-5-20251001' } }),
+          '',
+        ].join('\n'),
+      );
+      assert.equal(readSessionModel(file), 'claude-fable-5-1');
+      assert.equal(readSessionModel(path.join(dir, 'missing.jsonl')), null);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

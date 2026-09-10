@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { Run, StateSnapshot } from '@shared/types.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
+import { SessionName } from '../components/SessionName.tsx';
 import { PageHead } from '../components/PageHead.tsx';
 import { RestartMenu } from '../components/RestartMenu.tsx';
 import { RunArgs, RunTags } from '../components/RunTags.tsx';
@@ -17,12 +18,19 @@ export function Sessions({ state }: { state: StateSnapshot }) {
   const [newOpen, setNewOpen] = useState(false);
   const [stopping, setStopping] = useState<Run | null>(null);
   const [showExited, setShowExited] = useState(true);
+  const [repoFilter, setRepoFilter] = useState('all');
 
+  // Live sessions first, then whichever was worked on most recently: with a dozen open at once the
+  // one being used has to be at the top, not the one that happened to be started last.
   const runs = [...state.runs].sort(
-    (a, b) => Number(a.status === 'exited') - Number(b.status === 'exited') || b.createdAt.localeCompare(a.createdAt),
+    (a, b) => Number(a.status === 'exited') - Number(b.status === 'exited') || b.lastActivity.localeCompare(a.lastActivity),
   );
-  const visible = showExited ? runs : runs.filter((r) => r.status !== 'exited');
-  const exitedCount = runs.filter((r) => r.status === 'exited').length;
+  const repoOf = (r: Run) => r.repoId ?? '';
+  const usedRepos = state.repos.filter((repo) => runs.some((r) => r.repoId === repo.id));
+  const hasLoose = runs.some((r) => !r.repoId);
+  const inRepo = repoFilter === 'all' ? runs : runs.filter((r) => repoOf(r) === repoFilter);
+  const visible = showExited ? inRepo : inRepo.filter((r) => r.status !== 'exited');
+  const exitedCount = inRepo.filter((r) => r.status === 'exited').length;
 
   const stop = async () => {
     if (!stopping) return;
@@ -38,6 +46,20 @@ export function Sessions({ state }: { state: StateSnapshot }) {
         subtitle="Claude Code sessions hosted by Switchboard"
         actions={
           <>
+            {(usedRepos.length > 1 || (usedRepos.length === 1 && hasLoose)) && (
+              <label className="check check-inline">
+                <span className="sr-only">Filter by repository</span>
+                <select className="input select-inline" value={repoFilter} onChange={(e) => setRepoFilter(e.target.value)} aria-label="Filter by repository">
+                  <option value="all">All repositories</option>
+                  {usedRepos.map((repo) => (
+                    <option key={repo.id} value={repo.id}>
+                      {repo.name}
+                    </option>
+                  ))}
+                  {hasLoose && <option value="">Outside a repository</option>}
+                </select>
+              </label>
+            )}
             {exitedCount > 0 && (
               <label className="check check-inline">
                 <input type="checkbox" checked={showExited} onChange={(e) => setShowExited(e.target.checked)} />
@@ -54,7 +76,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
 
       {visible.length === 0 ? (
         <Empty icon="terminal">
-          No sessions.{' '}
+          {repoFilter !== 'all' ? 'No sessions in that repository. ' : 'No sessions. '}
           <button type="button" className="link-btn" onClick={() => setNewOpen(true)}>
             Start one
           </button>{' '}
@@ -82,9 +104,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                 return (
                   <tr key={r.id} className={exited ? 'row-muted' : undefined}>
                     <td data-label="Session" className="cell-title">
-                      <a href={href.terminal(r.id)} className="run-name">
-                        {r.name}
-                      </a>
+                      <SessionName run={r} href={href.terminal(r.id)} />
                       {r.autoSwap && (
                         <span className="auto-swap" title="Auto-swap on limits is on" aria-label="Auto-swap on">
                           <Icon name="bolt" size={12} />

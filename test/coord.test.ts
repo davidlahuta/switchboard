@@ -7,6 +7,7 @@ import { Bus } from '../src/daemon/bus.ts';
 import { Coordinator, type PushTarget } from '../src/daemon/coord.ts';
 import { Db } from '../src/daemon/db.ts';
 import { matchesPattern, patternsOverlap, relPath } from '../src/git.ts';
+import { UNREAD_CAP } from '../src/shared/types.ts';
 
 describe('path matching', () => {
   it('matches exact files, directories and globs', () => {
@@ -161,5 +162,31 @@ describe('coordinator', () => {
     coord.send('bbbb2222', repoId, 'alpha', 'request', 'please rebase on main');
     assert.match(coord.stopBlockReason('aaaa1111') ?? '', /please rebase on main/);
     assert.equal(coord.stopBlockReason('aaaa1111'), null);
+  });
+
+  it('counts unread from the watermark and stops at the cap', () => {
+    const repoId = coord.agent('aaaa1111')!.repo_id;
+    const unreadFor = (id: string): number => coord.repoDetail(repoId)!.agents.find((a) => a.id === id)!.unread;
+    const mark = (id: string): number => coord.raw.get<{ n: number }>('SELECT read_through_id AS n FROM agents WHERE id = ?', id)!.n;
+
+    coord.piggyback('aaaa1111');
+    const settled = mark('aaaa1111');
+    assert.ok(settled > 0, 'an agent with nothing waiting is watermarked at the head');
+
+    coord.send('bbbb2222', repoId, 'alpha', 'info', 'one for you');
+    assert.equal(unreadFor('aaaa1111'), 1);
+    assert.equal(mark('aaaa1111'), settled, 'the watermark cannot pass an unread message');
+    coord.piggyback('aaaa1111');
+    assert.equal(unreadFor('aaaa1111'), 0);
+    assert.ok(mark('aaaa1111') > settled, 'delivering it moves the watermark on');
+
+    for (let i = 0; i < UNREAD_CAP + 25; i++) coord.send('bbbb2222', repoId, 'alpha', 'info', `bulk ${i}`);
+    assert.equal(unreadFor('aaaa1111'), UNREAD_CAP, 'counting stops at the cap rather than walking the backlog');
+  });
+
+  it('renames an agent when its session is renamed', () => {
+    coord.renameAgent('aaaa1111', 'billing work');
+    assert.equal(coord.agent('aaaa1111')!.name, 'billing-work');
+    coord.renameAgent('aaaa1111', 'alpha');
   });
 });

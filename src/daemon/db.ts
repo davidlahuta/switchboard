@@ -192,6 +192,20 @@ const MIGRATIONS: string[] = [
   CREATE INDEX file_touches_repo_ts ON file_touches (repo_id, ts);
   CREATE INDEX messages_repo_created ON messages (repo_id, created_at);
   `,
+  `
+  -- Everything at or below the watermark has been accounted for for this agent: delivered, sent
+  -- by it, addressed elsewhere, or older than it. Only the tail above it is ever examined, so
+  -- "what has this agent not seen" costs the same on a repo with fifty messages and one with
+  -- fifty thousand. Existing agents start at the newest message that predates them, which is
+  -- exactly what the created_at >= started_at filter already excluded.
+  ALTER TABLE agents ADD COLUMN read_through_id INTEGER NOT NULL DEFAULT 0;
+  UPDATE agents SET read_through_id =
+    COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.repo_id = agents.repo_id AND m.created_at < agents.started_at), 0);
+
+  -- Last session title Claude Code reported. The name and this shadow diverging is how each side
+  -- learns the other renamed the session; see RunManager.syncTitle.
+  ALTER TABLE runs ADD COLUMN claude_title TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

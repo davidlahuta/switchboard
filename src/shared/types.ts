@@ -87,6 +87,13 @@ export interface Repo {
 
 export type AgentStatus = 'starting' | 'working' | 'idle' | 'waiting' | 'limited' | 'offline';
 
+/**
+ * An agent's unread count stops being exact past this. It is a badge: the difference between 200
+ * and 1700 does not change what the operator does, and counting exactly would mean walking every
+ * message an agent behind on its inbox has not taken yet.
+ */
+export const UNREAD_CAP = 200;
+
 export interface Agent {
   /** Claude Code session id */
   id: string;
@@ -223,6 +230,11 @@ export interface Run {
   cols: number;
   rows: number;
   createdAt: string;
+  /**
+   * Newest sign of life: the agent's last hook or MCP call, else the moment the run ended or
+   * started. Sessions are listed by this, so the ones being worked on stay at the top.
+   */
+  lastActivity: string;
   endedAt: string | null;
   exitCode: number | null;
 }
@@ -374,6 +386,16 @@ export interface CreateRunRequest {
   skipPermissions?: boolean;
 }
 
+/** Fields the operator can change on an existing session. */
+export interface UpdateRunRequest {
+  /**
+   * Session name. Switchboard and Claude Code keep one name between them: this is pushed into the
+   * session, and a /rename inside the session comes back the same way.
+   */
+  name?: string;
+  autoSwap?: boolean;
+}
+
 export interface SwapRequest {
   /** subscription id or 'auto' */
   subscriptionId: string;
@@ -430,7 +452,9 @@ export type TermServerFrame =
  */
 export type TermClientFrame =
   | { type: 'input'; data: string }
-  | { type: 'resize'; cols: number; rows: number };
+  | { type: 'resize'; cols: number; rows: number }
+  /** Stop driving the size from here: the console the session runs in owns it again. */
+  | { type: 'release-size' };
 
 // ---- auth / pairing ----
 

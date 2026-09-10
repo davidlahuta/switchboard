@@ -1303,6 +1303,41 @@ a.list-main:hover {
 .sessions-table td:first-child {
   padding-left: 14px;
 }
+/* The pencil only appears on hover or keyboard focus: a row of them next to every session name
+   reads as clutter, and the name itself is the affordance. */
+.rename-wrap {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.rename-btn {
+  opacity: 0;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  color: var(--text-2);
+}
+.rename-wrap:hover .rename-btn,
+.rename-btn:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .rename-btn {
+    opacity: 1;
+  }
+}
+.rename-input {
+  font-weight: 600;
+  max-width: 260px;
+  height: 30px;
+  padding: 2px 8px;
+}
+.select-inline {
+  height: 34px;
+  padding: 4px 8px;
+  min-width: 170px;
+}
 .run-name {
   font-weight: 600;
   color: var(--text);
@@ -2369,6 +2404,11 @@ a.list-main:hover {
   background: #39424f;
   border: 3px solid #0b0e13;
   border-radius: 6px;
+}
+.term-scroller.fit {
+  /* Fitted, the host is absolutely positioned to this box and nothing can overflow it. Saying so
+     keeps a browser from reserving a scrollbar gutter next to xterm's own. */
+  overflow: hidden;
 }
 .term-host {
   display: inline-block;

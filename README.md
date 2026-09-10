@@ -48,7 +48,8 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
   - automatically when a session hits a usage limit (then it types `continue` for you),
   - or proactively when a subscription crosses a threshold while the session is idle.
 - **Restart on update**: `claude update` runs on a schedule; when the version changes, sessions restart onto the new build once their agent is idle.
-- Web terminal: full Claude Code TUI in the browser (xterm.js), with a mobile key bar, a prompt composer and a "fit to this screen" mode.
+- Sessions carry **one name and one model** between Switchboard and Claude Code: rename in the web UI or with `/rename` in the session, change the model with `/model`, and both sides agree either way.
+- Web terminal: full Claude Code TUI in the browser (xterm.js), with a mobile key bar, a prompt composer and a "fit to this screen" mode that hands the size back to the desktop terminal when you turn it off.
 - Device pairing for remote access (QR code). Local access needs no login.
 - Runs as a Task Scheduler logon task with a supervisor that brings the daemon back if it exits.
 
@@ -100,9 +101,15 @@ you can:
 - **Swap** it to another subscription at any time. If the agent is mid-turn, the swap waits for the turn to finish.
 - Open it in the browser and keep working.
 - Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default).
+- **Rename** it from the pencil next to its name, or with `/rename` inside the session — there is one
+  name, and whichever side you change it on the other follows. The same goes for `/model`.
+
+The session list is ordered by activity, so whatever you are working on is at the top, and can be
+filtered to one repository when a dozen are open at once.
 
 Each session can override the model (1M-context models only, listed live from the API rather than
-hardcoded), auto-compact and its threshold, whether to skip permission prompts
+hardcoded; a later `/model` inside the session is picked up automatically), auto-compact and its
+threshold, whether to skip permission prompts
 (`--dangerously-skip-permissions`, on by default — sessions running that way are badged
 *no prompts*), and pass extra `claude` arguments.
 

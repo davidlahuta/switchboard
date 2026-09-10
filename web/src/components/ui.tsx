@@ -38,6 +38,7 @@ const ICONS = {
   phone: 'M7 2h10v20H7zM11 18h2',
   warn: 'M12 3l10 18H2zM12 10v5M12 18h.01',
   more: 'M5 12h.01M12 12h.01M19 12h.01',
+  pencil: 'M4 20h4L20 8l-4-4L4 16zM14 6l4 4',
 } as const;
 
 export type IconName = keyof typeof ICONS;
