@@ -198,6 +198,11 @@ its size or mtime changes, so a switch made in an idle session shows up before i
 transcript on `Stop`, because Claude Code names the model in `SessionStart` only and a mid-session
 `/model` would otherwise go unnoticed until the next restart.
 
+**A folder that is gone.** A session is tied to the directory it works in, and directories are
+deleted and moved. Launching into one that is not there gives a terminal that exits on a Windows
+error code and explains nothing, so the run reports it instead: the list says *folder gone*, Resume
+is not offered, and the API refuses with the path and the session id to resume elsewhere.
+
 **Closing the tab.** Windows Terminal keeps a tab whose process exited non-zero, and killing claude
 reports 1 — so a stop or a relaunch used to leave its tab behind every time. An exit that was asked
 for reports success and the tab goes; a session that fell over on its own keeps its tab, because at

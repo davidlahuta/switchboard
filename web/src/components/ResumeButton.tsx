@@ -15,6 +15,17 @@ import { Icon } from './ui.tsx';
 export function ResumeButton({ run, compact }: { run: Run; compact?: boolean }) {
   const [busy, setBusy] = useState(false);
 
+  // Nowhere to resume into. Claude Code would start, fail on the directory and exit on a Win32
+  // error code, which reads like a crash rather than a moved folder.
+  if (run.cwdMissing) {
+    return (
+      <button type="button" className={compact ? 'btn btn-sm' : 'btn'} disabled aria-label={`Cannot resume ${run.name}`} title={`${run.cwd} no longer exists`}>
+        <Icon name="warn" size={16} />
+        <span>Folder gone</span>
+      </button>
+    );
+  }
+
   const resume = async () => {
     setBusy(true);
     const body: RelaunchRequest = { force: true };

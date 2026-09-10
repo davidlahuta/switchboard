@@ -232,6 +232,11 @@ export interface Run {
    * change up — restarting in place reuses the same host process.
    */
   staleRunner: boolean;
+  /**
+   * The directory this session works in is gone. It cannot be resumed there: Claude Code exits
+   * immediately with a Windows "invalid directory" error, which says nothing about why.
+   */
+  cwdMissing: boolean;
   pid: number | null;
   cols: number;
   rows: number;

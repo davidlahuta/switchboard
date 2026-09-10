@@ -128,6 +128,11 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                         {' '}
                         {shortPath(r.cwd, 2)}
                       </span>
+                      {r.cwdMissing && (
+                        <Badge tone="warn" title={`${r.cwd} no longer exists, so this session cannot be opened there`}>
+                          folder gone
+                        </Badge>
+                      )}
                     </td>
                     <td data-label="Subscription">{r.subscriptionLabel}</td>
                     <td data-label="Status">

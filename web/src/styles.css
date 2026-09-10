@@ -1319,7 +1319,8 @@ a.list-main:hover {
 .row-actions .btn > span:not(.sr-only) {
   display: none;
 }
-.row-actions .btn-primary > span:not(.sr-only) {
+.row-actions .btn-primary > span:not(.sr-only),
+.row-actions .btn:disabled > span:not(.sr-only) {
   display: revert;
 }
 .row-actions .btn-primary {

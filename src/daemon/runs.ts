@@ -205,6 +205,7 @@ export class RunManager {
       args: parseArgs(r.extra_args),
       version: r.version,
       staleRunner: this.runnerStale(r.id),
+      cwdMissing: !fs.existsSync(r.last_cwd ?? r.cwd),
       model: r.model,
       autoCompact: r.auto_compact === null ? getSettings(this.db).defaultAutoCompact : bool(r.auto_compact),
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
@@ -813,8 +814,21 @@ export class RunManager {
    * Open a new terminal for a run that already exists. The runner reconnects with this run's id,
    * finds no live claude, and is told to resume the same session GUID.
    */
+  /** The folder a session works in, or nothing if it has since been moved or deleted. */
+  private workDir(r: RunRow): string | null {
+    const dir = r.last_cwd ?? r.cwd;
+    return fs.existsSync(dir) ? dir : null;
+  }
+
   private openTerminalFor(r: RunRow): void {
     this.relaunching.delete(r.id);
+    if (!this.workDir(r)) {
+      // Launching anyway gives a terminal that exits on a Win32 error code and nothing else.
+      this.db.run('UPDATE runs SET ended_at = ? WHERE id = ?', now(), r.id);
+      this.setStatus(r.id, 'exited');
+      this.bus.toast('error', `${r.name}: ${r.last_cwd ?? r.cwd} no longer exists, so it cannot be opened there.`);
+      return;
+    }
     this.db.run('UPDATE runs SET resume = 1 WHERE id = ?', r.id);
     this.launcher.openTerminal({ title: r.name, cwd: r.last_cwd ?? r.cwd, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
   }
@@ -831,6 +845,9 @@ export class RunManager {
   relaunch(runId: string, force = false): Run {
     const r = this.row(runId);
     if (!r) throw httpError(404, 'Unknown run');
+    if (!this.workDir(r)) {
+      throw httpError(409, `${r.last_cwd ?? r.cwd} no longer exists. Start a session in another folder and resume ${r.session_id} there.`);
+    }
     const agent = this.coord.agent(r.session_id);
     if (!force && r.status !== 'exited' && agent && agent.status === 'working') {
       throw httpError(409, 'The agent is mid-turn. Wait for it to finish, or relaunch with force.');
