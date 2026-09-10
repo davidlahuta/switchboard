@@ -206,6 +206,11 @@ npm test            # node:test suite
 aspire run          # daemon with --watch + Vite HMR
 ```
 
+## Contributing
+
+Issues and pull requests are open. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, what's most
+useful to work on, and the few conventions worth knowing before changing code.
+
 ## License
 
 [MIT](LICENSE)
