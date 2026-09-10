@@ -3011,6 +3011,16 @@ a.list-main:hover {
   .list-row {
     flex-wrap: wrap;
   }
+  /*
+   * The badges take a line of their own here. Without a basis of its own the name beside them keeps
+   * `flex: 1` of whatever is left on the first line, which can be nothing — and since the title is
+   * clipped with `overflow: hidden`, a session at zero width renders as no name at all rather than
+   * as an ellipsis. Give it the whole line it is already wrapping onto.
+   */
+  .list-row > .list-main {
+    flex: 1 0 100%;
+    min-width: 100%;
+  }
   .run-row .list-badges {
     width: 100%;
     justify-content: flex-start;

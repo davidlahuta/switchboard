@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Run, StateSnapshot, Subscription } from '@shared/types.ts';
+import { AttentionDot } from '../components/AttentionDot.tsx';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { PageHead } from '../components/PageHead.tsx';
 import { RestartMenu } from '../components/RestartMenu.tsx';
@@ -218,6 +219,7 @@ function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
     <li className="list-row run-row">
       <a className="list-main" href={href.terminal(run.id)}>
         <span className="list-title">
+          <AttentionDot run={run} />
           {run.name}
           {run.autoSwap && (
             <span className="auto-swap" title="Auto-swap on limits">
