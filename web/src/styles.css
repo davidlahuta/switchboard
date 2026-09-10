@@ -1294,8 +1294,13 @@ a.list-main:hover {
   min-width: min(13rem, 100%);
 }
 .run-row > .list-badges {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
+}
+/* The actions are a fixed set of icons: they neither stretch nor squash. */
+.run-row > .row-actions {
+  flex: none;
+  margin-left: auto;
 }
 /* The dot rides the name's own line, and never shrinks with it. */
 .list-title .attention {

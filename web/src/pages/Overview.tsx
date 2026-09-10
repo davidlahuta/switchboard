@@ -232,11 +232,15 @@ function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
         </span>
       </a>
       <span className="list-badges">
-        <RunTags run={run} models={state.models} update={state.update} />
+        <RunTags run={run} models={state.models} update={state.update} compact />
         <StatusPill status={run.agentStatus ?? run.status} title={`run: ${run.status}`} />
-        <a className="btn btn-sm" href={href.terminal(run.id)} aria-label={`Open terminal for ${run.name}`}>
+      </span>
+      {/* The same icon-only actions the sessions table uses: labels stay in the markup for screen
+          readers and come back inside the menus, where there is room to read them. */}
+      <span className="row-actions">
+        <a className="btn btn-sm" href={href.terminal(run.id)} aria-label={`Open terminal for ${run.name}`} title="Terminal">
           <Icon name="terminal" size={16} />
-          <span className="hide-sm">Open</span>
+          <span>Terminal</span>
         </a>
         <SwapMenu run={run} subs={state.subscriptions} compact />
         <RestartMenu run={run} compact />

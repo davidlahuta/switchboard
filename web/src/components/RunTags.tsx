@@ -6,22 +6,31 @@ import { Badge } from './ui.tsx';
  * What you want to know about a running session at a glance beyond its status: which model it is
  * on, whether its claude build is the one that is installed now, and whether it is running without
  * tool-approval prompts.
+ *
+ * `compact` keeps a row to one line by dropping everything the session merely *is* — how it was
+ * configured, which build it runs — and keeping only what is unusual about it. Those settings are
+ * the same on nearly every session, so repeating them down a list says nothing while costing the
+ * width that the name and the exceptions need. The sessions table, where a row is read one at a
+ * time, still shows them all.
  */
 export function RunTags({
   run,
   models,
   update,
   className,
+  compact,
 }: {
   run: Run;
   models: Model[];
   update: UpdateStatus;
   className?: string;
+  compact?: boolean;
 }) {
   const model = modelShort(run.model, models);
   const latest = update.currentVersion;
   const outdated = !!run.version && !!latest && run.version !== latest;
-  if (!model && !run.version && !run.skipPermissions && !run.staleRunner && !run.continueOnResume && !run.waiting) return null;
+  const settings = !compact && (run.skipPermissions || run.continueOnResume || !!run.version);
+  if (!model && !settings && !run.staleRunner && !run.waiting) return null;
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
       {run.waiting && (
@@ -42,12 +51,12 @@ export function RunTags({
           {model}
         </Badge>
       )}
-      {run.skipPermissions && (
+      {!compact && run.skipPermissions && (
         <Badge tone="muted" title="Started with --dangerously-skip-permissions: tools run without asking for approval">
           skip tool permissions
         </Badge>
       )}
-      {run.version && (
+      {!compact && run.version && (
         <span className="mono dim small" title={`Claude Code ${run.version}`}>
           v{run.version}
         </span>
@@ -57,7 +66,7 @@ export function RunTags({
           outdated
         </Badge>
       )}
-      {run.continueOnResume && (
+      {!compact && run.continueOnResume && (
         <Badge tone="accent" title="This session is told to carry on whenever it comes back — after a swap, a restart, a relaunch or a resume">
           auto-continue
         </Badge>
