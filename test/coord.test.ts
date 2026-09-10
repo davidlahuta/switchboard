@@ -112,6 +112,26 @@ describe('coordinator', () => {
     assert.match(result.text, /yes, go ahead/);
   });
 
+  it('re-groups an agent that moves to another repo', () => {
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-other-'));
+    try {
+      const before = coord.agent('aaaa1111')!;
+      coord.claim('aaaa1111', ['src/**'], false, null, 30);
+      coord.setIntent('aaaa1111', 'work in the first repo', []);
+      coord.setCwd('aaaa1111', other);
+      const after = coord.agent('aaaa1111')!;
+      assert.notEqual(after.repo_id, before.repo_id, 'agent must join the new repo group');
+      assert.equal(after.intent, null, 'intent belonged to the old repo');
+      assert.equal(coord.repoDetail(before.repo_id)!.claims.filter((c) => c.agentId === 'aaaa1111').length, 0);
+      // and it is gone from the old repo's roster
+      assert.ok(!coord.repoDetail(before.repo_id)!.agents.some((x) => x.id === 'aaaa1111'));
+      coord.setCwd('aaaa1111', dir); // move back for the remaining tests
+      assert.equal(coord.agent('aaaa1111')!.repo_id, before.repo_id);
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  });
+
   it('keeps a non-channel agent working when someone waits on it', () => {
     const repoId = coord.agent('aaaa1111')!.repo_id;
     coord.piggyback('aaaa1111');

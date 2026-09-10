@@ -279,8 +279,34 @@ export class Coordinator {
     const a = this.agent(id);
     if (!a) return;
     const info = resolveRepo(cwd);
-    this.db.run('UPDATE agents SET cwd = ?, worktree = ?, branch = ?, last_seen = ? WHERE id = ?', cwd, info.worktree, info.branch, now(), id);
-    this.bus.invalidate(`repo:${a.repo_id}`);
+    const ts = now();
+    const repo = this.ensureRepo(info.root);
+    if (repo.id === a.repo_id) {
+      this.db.run('UPDATE agents SET cwd = ?, worktree = ?, branch = ?, last_seen = ? WHERE id = ?', cwd, info.worktree, info.branch, ts, id);
+      this.bus.invalidate(`repo:${a.repo_id}`);
+      return;
+    }
+    // The session moved to a different repository: it must coordinate with that repo's agents
+    // instead. Its claims and intent belonged to the old repo, so they do not travel with it.
+    const name = this.uniqueName(repo.id, a.name, id);
+    this.db.tx(() => {
+      this.db.run('UPDATE claims SET released_at = ? WHERE agent_id = ? AND released_at IS NULL', ts, id);
+      this.db.run(
+        'UPDATE agents SET repo_id = ?, name = ?, cwd = ?, worktree = ?, branch = ?, intent = NULL, last_seen = ? WHERE id = ?',
+        repo.id,
+        name,
+        cwd,
+        info.worktree,
+        info.branch,
+        ts,
+        id,
+      );
+    });
+    const old = this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', a.repo_id);
+    this.event(a.repo_id, id, 'left', `${a.name} moved to ${repo.name}`);
+    this.event(repo.id, id, 'joined', `${name} moved in from ${old?.name ?? 'another repo'}`);
+    log.info('agent changed repo', { agent: name, from: old?.name, to: repo.name });
+    this.bus.invalidate('state', `repo:${a.repo_id}`, `repo:${repo.id}`);
   }
 
   setSubscription(id: string, subscriptionId: string): void {
