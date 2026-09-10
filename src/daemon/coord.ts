@@ -127,6 +127,14 @@ const SYSTEM = 'switchboard';
 const HUMAN = 'human';
 const WARN_TTL_MS = 10 * 60_000;
 const PIGGYBACK_MIN_INTERVAL_MS = 20_000;
+/** A nudge is a reminder, not an alarm: the same one is not repeated inside this window. */
+const NUDGE_TTL_MS = 45 * 60_000;
+/** How long an agent may edit without announcing anything while others share the repo. */
+const SILENT_MS = 8 * 60_000;
+/** How long a claim may sit unused before its holder is asked whether they still need it. */
+const CLAIM_IDLE_MS = 25 * 60_000;
+/** How long a question may go unanswered before the agent it was put to is reminded. */
+const UNANSWERED_MS = 6 * 60_000;
 
 export function editedPath(toolName: unknown, toolInput: unknown): string | null {
   if (typeof toolName !== 'string' || !EDIT_TOOLS.has(toolName)) return null;
@@ -392,6 +400,74 @@ export class Coordinator {
         this.markOffline(a.id, dead ? 'process exited' : 'no activity');
       }
     }
+    for (const repo of this.db.all<{ id: string }>('SELECT id FROM repos')) {
+      this.nudgeStaleClaims(repo.id);
+      this.nudgeUnanswered(repo.id);
+    }
+  }
+
+  /**
+   * A claim its holder has stopped using. Nobody has to be blocked yet for this to be worth saying:
+   * an exclusive claim left behind by an agent that moved on to something else is how two agents end
+   * up waiting on each other, so the holder is asked while the answer is still cheap.
+   */
+  private nudgeStaleClaims(repoId: string): void {
+    const idleSince = new Date(Date.now() - CLAIM_IDLE_MS).toISOString();
+    for (const c of this.activeClaims(repoId)) {
+      if (c.created_at > idleSince) continue;
+      const used = this.db.get(
+        'SELECT 1 FROM file_touches WHERE repo_id = ? AND agent_id = ? AND ts >= ?',
+        repoId,
+        c.agent_id,
+        idleSince,
+      );
+      if (used) continue;
+      if (!this.shouldWarn(`nudge-claim|${c.id}`, NUDGE_TTL_MS)) continue;
+      const exclusive = bool(c.exclusive);
+      const body = [
+        `You have held ${exclusive ? 'an exclusive claim' : 'a claim'} on "${c.pattern}"${c.reason ? ` (${c.reason})` : ''} since ${ago(c.created_at)} without touching it.`,
+        exclusive ? 'Other agents are blocked from editing there.' : '',
+        'Release it with sb_release if you are done, or tell the repo what you are still waiting on with sb_send to "all".',
+      ]
+        .filter(Boolean)
+        .join(' ');
+      this.send(SYSTEM, repoId, c.agent_id, exclusive ? 'request' : 'info', body);
+    }
+  }
+
+  /**
+   * A question nobody answered. Either the agent it was put to is still live and has let it slide,
+   * or it went offline holding the answer — both leave whoever asked waiting, so both are said out
+   * loud, to the side that can still act on it.
+   */
+  private nudgeUnanswered(repoId: string): void {
+    const cutoff = new Date(Date.now() - UNANSWERED_MS).toISOString();
+    const rows = this.db.all<MessageRow>(
+      `SELECT m.* FROM messages m
+       WHERE m.repo_id = ? AND m.to_id IS NOT NULL AND m.to_id <> ? AND m.from_id <> ?
+         AND m.kind IN ('question', 'request', 'handoff') AND m.created_at < ? AND m.created_at > ?
+         AND EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = m.to_id)
+         AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id AND r.from_id = m.to_id)
+       ORDER BY m.id`,
+      repoId,
+      HUMAN,
+      SYSTEM,
+      cutoff,
+      new Date(Date.now() - 6 * 3600_000).toISOString(),
+    );
+    for (const m of rows) {
+      const target = this.agent(m.to_id!);
+      if (!target) continue;
+      if (!this.shouldWarn(`nudge-reply|${m.id}`, NUDGE_TTL_MS)) continue;
+      const asker = this.nameOf(m.from_id);
+      if (target.status === 'offline') {
+        if (m.from_id !== HUMAN && this.agent(m.from_id)?.status !== 'offline') {
+          this.send(SYSTEM, repoId, m.from_id, 'info', `${target.name} went offline without answering your #${m.id}. Do not wait on it — ask someone else with sb_send, or take it to "human".`);
+        }
+        continue;
+      }
+      this.send(SYSTEM, repoId, target.id, 'request', `You have not answered #${m.id} from ${asker} (${ago(m.created_at)}): "${clip(m.body, 200)}". Reply now with sb_send (reply_to=${m.id}), even if the answer is that you have not got to it — ${asker} is waiting on you.`);
+    }
   }
 
   /**
@@ -532,6 +608,11 @@ export class Coordinator {
       }
     });
     this.event(a.repo_id, agentId, 'intent', `${newName}: ${summary}`);
+    // The feed shows this to the operator; the agents already running would otherwise never hear it.
+    // Lazily, as info: it rides along with their next hook rather than costing them a turn.
+    if (this.liveAgents(a.repo_id).some((x) => x.id !== agentId)) {
+      this.send(agentId, a.repo_id, null, 'info', `Now working on: ${summary}${files.length ? ` — expect changes in ${files.slice(0, 10).join(', ')}` : ''}`);
+    }
     const overlaps = this.overlapReport({ ...a, name: newName }, files);
     return [
       `Intent set. You are "${newName}".`,
@@ -590,6 +671,11 @@ export class Coordinator {
     const a = this.agent(agentId);
     if (!a) throw new Error('unknown session');
     const ts = now();
+    // Agents told their edits would be blocked until this was released have no other way to learn
+    // that it has been, and would otherwise keep steering around a claim that is gone.
+    const freed = this.activeClaims(a.repo_id)
+      .filter((c) => c.agent_id === agentId && bool(c.exclusive) && (!patterns?.length || patterns.includes(c.pattern)))
+      .map((c) => c.pattern);
     let changes = 0;
     if (patterns?.length) {
       for (const p of patterns) changes += this.db.run('UPDATE claims SET released_at = ? WHERE agent_id = ? AND pattern = ? AND released_at IS NULL', ts, agentId, p).changes;
@@ -597,6 +683,9 @@ export class Coordinator {
       changes = this.db.run('UPDATE claims SET released_at = ? WHERE agent_id = ? AND released_at IS NULL', ts, agentId).changes;
     }
     if (changes) this.event(a.repo_id, agentId, 'release', `${a.name} released ${patterns?.length ? patterns.join(', ') : 'all claims'}`);
+    if (freed.length && this.liveAgents(a.repo_id).some((x) => x.id !== agentId)) {
+      this.send(agentId, a.repo_id, null, 'info', `Released ${freed.join(', ')} — open for editing again.`);
+    }
     return `Released ${changes} claim(s).`;
   }
 
@@ -610,12 +699,12 @@ export class Coordinator {
 
   // ------------------------------------------------------------ conflicts
 
-  private shouldWarn(key: string): boolean {
+  private shouldWarn(key: string, ttlMs = WARN_TTL_MS): boolean {
     const last = this.warned.get(key);
-    if (last && Date.now() - last < WARN_TTL_MS) return false;
+    if (last && Date.now() - last < ttlMs) return false;
     this.warned.set(key, Date.now());
     if (this.warned.size > 5000) {
-      for (const [k, t] of this.warned) if (Date.now() - t > WARN_TTL_MS) this.warned.delete(k);
+      for (const [k, t] of this.warned) if (Date.now() - t > NUDGE_TTL_MS) this.warned.delete(k);
     }
     return true;
   }
@@ -681,11 +770,28 @@ export class Coordinator {
         deny: `Switchboard: ${rel} is exclusively claimed by agent "${hard.agent_name}"${hard.reason ? ` (${hard.reason})` : ''}${hard.expires_at ? ` until ${hard.expires_at.slice(11, 16)} UTC` : ''}. Do not edit it now: ask them with sb_send (to: "${hard.agent_name}", kind: "request") or continue with other work. The operator can release the claim in the Switchboard UI.`,
       };
     }
+    const notes: string[] = [];
+    const silent = this.silentTooLong(a);
+    if (silent) notes.push(silent);
     const soft = hits[0];
     if (soft && this.shouldWarn(`soft|${agentId}|${rel}|${soft.agent_id}`)) {
-      return { context: `Switchboard: ${rel} is inside ${soft.agent_name}'s claim "${soft.pattern}"${soft.reason ? ` (${soft.reason})` : ''}. Coordinate with them before larger changes.` };
+      notes.push(`Switchboard: ${rel} is inside ${soft.agent_name}'s claim "${soft.pattern}"${soft.reason ? ` (${soft.reason})` : ''}. Coordinate with them before larger changes.`);
     }
-    return {};
+    return notes.length ? { context: notes.join('\n') } : {};
+  }
+
+  /**
+   * An agent editing a shared repo without ever having said what it is doing. The others have no
+   * way to steer around work they cannot see, so this is the one nudge delivered at the moment of
+   * the edit rather than left for the sweep.
+   */
+  private silentTooLong(a: AgentRow): string | null {
+    if (a.intent) return null;
+    if (Date.now() - Date.parse(a.started_at) < SILENT_MS) return null;
+    const others = this.liveAgents(a.repo_id).filter((x) => x.id !== a.id);
+    if (!others.length) return null;
+    if (!this.shouldWarn(`nudge-intent|${a.id}`, NUDGE_TTL_MS)) return null;
+    return `Switchboard: you are editing this repo without having announced anything, and ${others.length === 1 ? `${others[0].name} is` : `${others.length} other agents are`} working in it too (${others.slice(0, 6).map((x) => x.name).join(', ')}). Call sb_intent now with one line on your task and the paths you expect to change, so they can work around you.`;
   }
 
   /** PostToolUse on edit tools: record the touch, detect overlaps, warn both sides once. */
@@ -1018,9 +1124,40 @@ export class Coordinator {
     const mine = claims.filter((c) => c.agent_id === x.id);
     const parts = [`${x.name} [${x.status}]`, x.branch ?? 'no branch'];
     if (x.intent) parts.push(`intent: "${x.intent}"`);
-    if (mine.length) parts.push(`claims: ${mine.map((c) => `${c.pattern}${bool(c.exclusive) ? '(X)' : ''}`).join(', ')}`);
+    if (mine.length) {
+      // An sb_intent listing thirty files becomes thirty claims. Naming them all here would bury
+      // the rest of the digest in one agent's file list; sb_who_touches answers the specific case.
+      const shown = mine.slice(0, 4).map((c) => `${c.pattern}${bool(c.exclusive) ? '(X)' : ''}`);
+      parts.push(`claims: ${shown.join(', ')}${mine.length > shown.length ? ` (+${mine.length - shown.length} more)` : ''}`);
+    }
     parts.push(`seen ${ago(x.last_seen)}`);
     return `- ${parts.join(' · ')}`;
+  }
+
+  /**
+   * What this agent owes the rest of the repo, as things it can go and do. sb_status and the
+   * session digest both end on it: a board that only reports state gets read and forgotten, and the
+   * two entries that matter — an unanswered question and a claim nobody released — are exactly the
+   * ones that leave another agent waiting.
+   */
+  private owes(a: AgentRow, claims: ClaimRow[]): string[] {
+    const todo: string[] = [];
+    if (!a.intent) todo.push('Announce your task with sb_intent, including the paths you expect to change.');
+    const unanswered = this.db.all<MessageRow>(
+      `SELECT m.* FROM messages m
+       WHERE m.repo_id = ? AND m.to_id = ? AND m.from_id <> ? AND m.kind IN ('question', 'request', 'handoff')
+         AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id AND r.from_id = m.to_id)
+       ORDER BY m.id DESC LIMIT 5`,
+      a.repo_id,
+      a.id,
+      SYSTEM,
+    );
+    for (const m of unanswered.reverse()) {
+      todo.push(`Answer #${m.id} from ${this.nameOf(m.from_id)} with sb_send (reply_to=${m.id}): "${clip(m.body, 120)}"`);
+    }
+    const mine = claims.filter((c) => c.agent_id === a.id);
+    if (mine.length) todo.push(`Release ${mine.map((c) => c.pattern).join(', ')} with sb_release as soon as you are done with ${mine.length > 1 ? 'them' : 'it'}.`);
+    return todo;
   }
 
   statusText(agentId: string): string {
@@ -1046,6 +1183,8 @@ export class Coordinator {
     }
     if (notes.length) out.push(`Pinned notes:\n${notes.map((n) => `- [${n.kind}] ${clip(n.body, 300)}`).join('\n')}`);
     out.push(unread ? `Unread messages: ${unread} (sb_inbox).` : 'No unread messages.');
+    const todo = this.owes(a, claims);
+    if (todo.length) out.push(`Owed by you:\n${todo.map((t) => `- ${t}`).join('\n')}`);
     return out.join('\n');
   }
 
@@ -1063,7 +1202,9 @@ export class Coordinator {
     const out = [`Switchboard: you are "${a.name}" in ${repo.name}.`];
     if (others.length) out.push(`${others.length} other agent(s) are working in this repo:\n${others.slice(0, 12).map((x) => this.agentLine(x, claims)).join('\n')}`);
     if (notes.length) out.push(`Pinned notes:\n${notes.map((n) => `- [${n.kind}] ${clip(n.body, 300)}`).join('\n')}`);
-    out.push('Announce your task with sb_intent (include the files you expect to touch) before editing.');
+    const todo = this.owes(a, claims);
+    if (todo.length) out.push(`Before you start:\n${todo.map((t) => `- ${t}`).join('\n')}`);
+    if (others.length) out.push('Say what you land with sb_send to "all" as you go — they cannot see your worktree.');
     return out.join('\n');
   }
 

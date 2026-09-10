@@ -190,3 +190,92 @@ describe('coordinator', () => {
     coord.renameAgent('aaaa1111', 'alpha');
   });
 });
+
+describe('pushing agents to use the board', () => {
+  let dir: string;
+  let db: Db;
+  let coord: Coordinator;
+  let repoId: string;
+  const ago = (ms: number): string => new Date(Date.now() - ms).toISOString();
+
+  before(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-nudge-'));
+    db = new Db(':memory:');
+    coord = new Coordinator(db, new Bus());
+    coord.setPushTarget({ push: () => false, isConnected: () => false });
+    repoId = coord.registerAgent({ sessionId: 'n1111111', cwd: dir, name: 'ann' }).repo_id;
+    coord.registerAgent({ sessionId: 'n2222222', cwd: dir, name: 'bob' });
+  });
+
+  after(() => {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('asks an agent that has been editing without announcing anything', () => {
+    const file = path.join(dir, 'src', 'quiet.ts');
+    assert.equal(coord.preEdit('n1111111', file).context, undefined, 'a session that just started is left alone');
+
+    coord.raw.run('UPDATE agents SET started_at = ? WHERE id = ?', ago(20 * 60_000), 'n1111111');
+    assert.match(coord.preEdit('n1111111', file).context ?? '', /sb_intent/);
+    assert.equal(coord.preEdit('n1111111', file).context, undefined, 'said once, not on every edit');
+  });
+
+  it('says nothing to an agent that has announced its task', () => {
+    coord.raw.run('UPDATE agents SET started_at = ? WHERE id = ?', ago(20 * 60_000), 'n2222222');
+    coord.setIntent('n2222222', 'rewriting the parser', ['src/parse/**']);
+    assert.equal(coord.preEdit('n2222222', path.join(dir, 'src', 'parse', 'lex.ts')).context, undefined);
+  });
+
+  it('broadcasts an intent to the agents already running', () => {
+    assert.match(coord.piggyback('n1111111') ?? '', /rewriting the parser/);
+  });
+
+  it('asks the holder of a claim it has stopped using to release it', () => {
+    coord.claim('n2222222', ['src/parse/**'], true, 'parser rewrite', 120);
+    coord.sweep();
+    assert.equal(coord.piggyback('n2222222'), null, 'a fresh claim is not worth mentioning');
+
+    coord.raw.run('UPDATE claims SET created_at = ? WHERE agent_id = ?', ago(60 * 60_000), 'n2222222');
+    coord.sweep();
+    const nudge = coord.piggyback('n2222222') ?? '';
+    assert.match(nudge, /sb_release/);
+    assert.match(nudge, /src\/parse/);
+    coord.sweep();
+    assert.equal(coord.piggyback('n2222222'), null, 'the reminder does not repeat every minute');
+    coord.release('n2222222');
+  });
+
+  it('tells the agent that owes an answer, and the asker once it is gone', () => {
+    const asked = coord.send('n1111111', repoId, 'bob', 'question', 'can I touch src/parse/lex.ts?');
+    coord.piggyback('n2222222');
+    coord.raw.run('UPDATE messages SET created_at = ? WHERE id = ?', ago(30 * 60_000), asked.id);
+
+    coord.sweep();
+    assert.match(coord.piggyback('n2222222') ?? '', new RegExp(`not answered #${asked.id}`));
+
+    // Gone without replying: the one left waiting is the one who needs to hear about it.
+    coord.markOffline('n2222222', 'test');
+    coord.raw.run('UPDATE messages SET created_at = ? WHERE id = ?', ago(30 * 60_000), asked.id);
+    coord.sweep();
+    assert.equal(coord.piggyback('n1111111'), null, 'still inside the reminder window');
+
+    const second = coord.send('n1111111', repoId, 'bob', 'question', 'and src/parse/ast.ts?');
+    coord.raw.run(
+      'INSERT INTO deliveries (message_id, agent_id, via, delivered_at) VALUES (?, ?, ?, ?)',
+      second.id,
+      'n2222222',
+      'test',
+      new Date().toISOString(),
+    );
+    coord.raw.run('UPDATE messages SET created_at = ? WHERE id = ?', ago(30 * 60_000), second.id);
+    coord.sweep();
+    assert.match(coord.piggyback('n1111111') ?? '', /went offline without answering/);
+  });
+
+  it('ends sb_status on what this agent owes the others', () => {
+    const status = coord.statusText('n1111111');
+    assert.match(status, /Owed by you/);
+    assert.match(status, /sb_intent/, 'it never announced a task');
+  });
+});

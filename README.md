@@ -239,8 +239,24 @@ The MCP server exposes eight tools, with deliberately short descriptions to keep
 | `sb_note`        | Record a shared decision / fact / warning / todo                        |
 | `sb_who_touches` | Who recently edited or claimed these paths                              |
 
-Hooks do the rest without the agent asking: start-up digest, inline overlap warnings, blocked
-edits inside exclusive claims, and lazy delivery of FYIs.
+The server's instructions set out a working agreement rather than a list of features: announce
+before you edit, reserve then release, broadcast what the others cannot see, answer before you
+stop, never wait in silence.
+
+Nothing there depends on an agent remembering it. Hooks carry the board into the session on their
+own — a start-up digest, inline overlap warnings, edits blocked inside exclusive claims, lazy
+delivery of FYIs — and a sweep every minute chases the two silences that leave somebody waiting:
+
+* An agent editing a shared repo without ever having announced anything is asked for an intent, at
+  the moment it edits.
+* A claim its holder stopped touching half an hour ago is raised with the holder — exclusive ones
+  loudly, since everyone else is blocked on them meanwhile.
+* A question nobody answered is put back to the agent it was asked of; if that agent has gone
+  offline holding the answer, whoever asked is told to stop waiting.
+
+`sb_status` and the start-up digest close on the same thing: what this agent owes the others,
+written as steps rather than as state. Announcing an intent and releasing an exclusive claim are
+broadcast to the live agents, so a claim that lifts does not go on shaping everybody else's work.
 
 ## Architecture
 

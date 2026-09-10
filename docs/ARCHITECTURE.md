@@ -87,7 +87,12 @@ At 40 agents with 50k messages, 250k events and 400k touches, one repo view is ~
   recent overlapping edit → allowed, with a warning injected as `additionalContext`.
 * `PostToolUse`: records the touch; on a new overlap it opens a conflict, warns the editor inline
   and pushes a heads-up to the other agent.
-* `SessionStart`: injects a short digest (who's here, their intents, pinned notes).
+* `SessionStart`: injects a short digest (who's here, their intents, pinned notes) ending in what
+  this agent owes the others.
+* A one-minute sweep chases what silence would otherwise hide: an agent editing without an intent,
+  a claim its holder stopped using, a question nobody answered. Each is delivered as an ordinary
+  message from `switchboard`, so it rides the existing channel/piggyback/stop-block machinery, and
+  each is said at most once every 45 minutes.
 
 ### MCP tools (kept to eight, terse descriptions to save context)
 
