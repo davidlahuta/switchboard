@@ -219,20 +219,28 @@ export class RunManager {
     return getSettings(this.db).terminalWindow === 'switchboard' ? 'switchboard' : '0';
   }
 
-  /** Where Claude Code keeps this session's name, once found. */
-  private readonly titleFiles = new Map<string, string>();
+  /** Files Claude Code keeps for a session, once found: keyed by run id and file name. */
+  private readonly sessionFiles = new Map<string, string>();
+  /** Size and mtime of each transcript when it was last read, so an unchanged one is not reread. */
+  private readonly transcriptSeen = new Map<string, string>();
 
-  private customTitlePath(r: RunRow): string | null {
-    const cached = this.titleFiles.get(r.id);
+  /**
+   * Find a file Claude Code keeps for this session under its project directory: either inside the
+   * session's own directory (`custom-title.json`) or, via `..`, beside it (the transcript is
+   * `<session>.jsonl`, next to the `<session>/` directory).
+   */
+  private sessionFile(r: RunRow, name: string): string | null {
+    const key = `${r.id}:${name}`;
+    const cached = this.sessionFiles.get(key);
     if (cached && fs.existsSync(cached)) return cached;
     const roots = [this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR].filter((x): x is string => !!x);
     const remember = (file: string): string => {
-      this.titleFiles.set(r.id, file);
+      this.sessionFiles.set(key, file);
       return file;
     };
     for (const root of roots) {
       for (const dir of new Set([r.last_cwd ?? r.cwd, r.cwd])) {
-        const file = path.join(root, 'projects', projectSlug(dir), r.session_id, 'custom-title.json');
+        const file = path.join(root, 'projects', projectSlug(dir), r.session_id, name);
         if (fs.existsSync(file)) return remember(file);
       }
     }
@@ -245,7 +253,7 @@ export class RunManager {
         continue;
       }
       for (const slug of projects) {
-        const file = path.join(root, 'projects', slug, r.session_id, 'custom-title.json');
+        const file = path.join(root, 'projects', slug, r.session_id, name);
         if (fs.existsSync(file)) return remember(file);
       }
     }
@@ -253,24 +261,41 @@ export class RunManager {
   }
 
   /**
-   * Pick up renames made inside a session with `/rename`.
+   * Pick up what changed inside a live session without waiting for it to say so. `/rename` and
+   * `/model` both write to disk at once and fire no hook, so a session renamed or switched while
+   * idle would otherwise show the old value until someone typed into it.
    *
-   * Only the adopt direction: a rename made here is carried into the session by a hook response,
-   * and this must not consume that. See titleDecision.
+   * Names go one way only here: a rename made in Switchboard is carried into the session by a hook
+   * response, and consuming that pending push would lose it. See titleDecision.
    */
-  pollTitles(): void {
+  pollSessions(): void {
     for (const r of this.db.all<RunRow>("SELECT * FROM runs WHERE status <> 'exited'")) {
-      const file = this.customTitlePath(r);
-      if (!file) continue;
-      const title = readCustomTitle(file);
+      const titleFile = this.sessionFile(r, 'custom-title.json');
+      const title = titleFile ? readCustomTitle(titleFile) : null;
       // Adopting a title that already matches the name is a no-op rename that records the shadow.
-      if (!title || title === r.claude_title) continue;
-      this.db.run('UPDATE runs SET name = ?, claude_title = ? WHERE id = ?', title, title, r.id);
-      this.send(r.id, { type: 'title', text: title });
-      this.coord.renameAgent(r.session_id, title);
-      this.bus.invalidate('state');
-      log.info('session renamed in claude', { run: r.id, name: title });
+      if (title && title !== r.claude_title) {
+        this.db.run('UPDATE runs SET name = ?, claude_title = ? WHERE id = ?', title, title, r.id);
+        this.send(r.id, { type: 'title', text: title });
+        this.coord.renameAgent(r.session_id, title);
+        this.bus.invalidate('state');
+        log.info('session renamed in claude', { run: r.id, name: title });
+      }
+      const transcript = this.sessionFile(r, path.join('..', `${r.session_id}.jsonl`));
+      if (transcript && this.transcriptChanged(r.id, transcript)) this.syncModel(r.session_id, transcript);
     }
+  }
+
+  private transcriptChanged(runId: string, file: string): boolean {
+    let stamp: string;
+    try {
+      const st = fs.statSync(file);
+      stamp = `${st.size}:${st.mtimeMs}`;
+    } catch {
+      return false;
+    }
+    if (this.transcriptSeen.get(runId) === stamp) return false;
+    this.transcriptSeen.set(runId, stamp);
+    return true;
   }
 
   /**

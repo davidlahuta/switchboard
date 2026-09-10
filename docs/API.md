@@ -107,6 +107,6 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 `PreToolUse`, `PostToolUse`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`, `CwdChanged`)
 and answers with hook JSON output. Internal.
 
-`SessionStart` and `UserPromptSubmit` are also how the session name stays shared: they report the
-session's current title, and their response can set it. `Stop` and `SessionStart` re-read the model
-from the session transcript, which is the only place a mid-session `/model` shows up.
+`SessionStart` and `UserPromptSubmit` are also how a Switchboard-side rename reaches the session:
+they report the session's current title, and their response can set it. Renames and model changes
+made inside the session are picked up from disk by a poll, since `/rename` and `/model` fire no hook.

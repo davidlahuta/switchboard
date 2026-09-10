@@ -7,15 +7,17 @@ interface Entry {
   type?: string;
   isSidechain?: boolean;
   message?: { model?: string };
+  attachment?: { type?: string; identity?: { modelId?: string } };
 }
 
 /**
- * The model in force for a session, read from the newest assistant turn in its transcript.
+ * The model in force for a session, from its transcript.
  *
- * Claude Code reports the model in the SessionStart hook and nowhere else, so a mid-session
- * `/model` would otherwise go unnoticed until the session restarts. The transcript records it on
- * every assistant message, which makes it the only live source. Subagent turns run on their own
- * model and are skipped.
+ * Claude Code reports the model in the SessionStart hook and nowhere else, so the transcript is
+ * the live source. Two kinds of record carry it: every assistant turn names the model it ran on,
+ * and `/model` appends an attachment naming the new one the moment it is chosen — which is what
+ * lets a change made in an idle session show up before its next turn. Whichever is newest wins.
+ * Subagent turns run on their own model and are skipped.
  */
 export function readSessionModel(file: string): string | null {
   let text: string;
@@ -44,8 +46,9 @@ export function readSessionModel(file: string): string | null {
     } catch {
       continue;
     }
-    if (entry.type !== 'assistant' || entry.isSidechain) continue;
-    const model = entry.message?.model;
+    if (entry.isSidechain) continue;
+    const model =
+      entry.type === 'assistant' ? entry.message?.model : entry.attachment?.type === 'model' ? entry.attachment.identity?.modelId : undefined;
     if (typeof model === 'string' && model && model !== '<synthetic>') return model;
   }
   return null;

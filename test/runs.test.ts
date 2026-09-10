@@ -79,6 +79,12 @@ describe('session model sync', () => {
       );
       assert.equal(readSessionModel(file), 'claude-fable-5-1');
       assert.equal(readSessionModel(path.join(dir, 'missing.jsonl')), null);
+      // /model appends an attachment naming the new model before any turn has run on it.
+      fs.appendFileSync(
+        file,
+        JSON.stringify({ type: 'attachment', isSidechain: false, attachment: { type: 'model', identity: { modelId: 'claude-opus-5' } } }) + '\n',
+      );
+      assert.equal(readSessionModel(file), 'claude-opus-5', 'a /model record newer than the last turn wins');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
