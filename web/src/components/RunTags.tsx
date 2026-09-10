@@ -1,4 +1,5 @@
 import type { Model, Run, UpdateStatus } from '@shared/types.ts';
+import { kindLabel, triggerLabel } from '@shared/respawn.ts';
 import { modelShort } from '../lib/format.ts';
 import { Badge } from './ui.tsx';
 
@@ -37,13 +38,14 @@ export function RunTags({
         <Badge
           tone="warn"
           title={
-            `A ${run.waiting.kind} is queued (${run.waiting.reason}), waiting since ${new Date(run.waiting.since).toLocaleTimeString()} for this turn to end. ` +
+            `${kindLabel(run.waiting.kind)} queued — ${triggerLabel(run.waiting.trigger)}: ${run.waiting.reason}. ` +
+            `Waiting since ${new Date(run.waiting.since).toLocaleTimeString()} for this turn to end. ` +
             (run.waiting.deadline
               ? `It happens regardless at ${new Date(run.waiting.deadline).toLocaleTimeString()}.`
               : 'It waits however long the turn takes.')
           }
         >
-          {run.waiting.kind} queued
+          {kindLabel(run.waiting.kind)} queued · {triggerLabel(run.waiting.trigger)}
         </Badge>
       )}
       {model && (

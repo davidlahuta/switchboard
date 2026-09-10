@@ -3,12 +3,22 @@ import { describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { attentionFor, limitSwapPlan, rebindDecision, rejectReservedArgs, rescueDecision, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
+import {
+  attentionFor,
+  limitSwapPlan,
+  rebindDecision,
+  rejectReservedArgs,
+  rescueDecision,
+  respawnPlacement,
+  safeToRespawn,
+  titleDecision,
+} from '../src/daemon/runs.ts';
 import { attentionMark, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
 import { PTY_TERM, withoutParentSession } from '../src/config.ts';
-import type { Run, Usage } from '../src/shared/types.ts';
+import type { AgentStatus, Run, Usage } from '../src/shared/types.ts';
+import { willWaitForTurn } from '../web/src/lib/respawn.ts';
 
 const usage = (five: number | null, seven: number | null): Usage => ({
   fiveHour: five === null ? null : { pct: five, resetsAt: null },
@@ -87,6 +97,60 @@ describe('moving a session off a spent subscription', () => {
     assert.equal(plan.force, false);
     assert.ok(plan.deadline! > now, 'queued behind the turn');
     assert.ok(plan.deadline! - now <= 5 * 60_000, 'but not indefinitely: the subscription is spent');
+  });
+});
+
+describe('which terminal a session comes back into', () => {
+  it('gives a relaunch a new terminal, whatever the host is running', () => {
+    assert.equal(respawnPlacement({ kind: 'relaunch', staleHost: false }), 'new-terminal');
+  });
+
+  it('reuses the terminal for a restart or a swap when its host is current', () => {
+    assert.equal(respawnPlacement({ kind: 'restart', staleHost: false }), 'in-place');
+    assert.equal(respawnPlacement({ kind: 'swap', staleHost: false }), 'in-place');
+  });
+
+  it('replaces an out-of-date terminal on every automated way back', () => {
+    // An update restart and a subscription swap both bring the session back on a new claude; doing
+    // that inside a host that predates the current build is what leaves a session badged old host
+    // for the rest of its life.
+    for (const kind of ['restart', 'swap'] as const) {
+      assert.equal(respawnPlacement({ kind, staleHost: true }), 'new-terminal', kind);
+    }
+  });
+});
+
+describe('when a session is taken for a restart, swap or relaunch', () => {
+  it('agrees with the menus about what a click will do', () => {
+    // The web says "now" or "when the turn ends" on the button; the daemon decides which actually
+    // happens. Two answers to one question, so they are checked against each other here.
+    const statuses: Array<AgentStatus | null> = ['starting', 'working', 'idle', 'waiting', 'limited', 'offline', null];
+    for (const agentStatus of statuses) {
+      const run = { status: 'running', agentStatus } as Run;
+      assert.equal(
+        willWaitForTurn(run, false),
+        !safeToRespawn(agentStatus ?? undefined),
+        `web and daemon disagree about ${agentStatus}`,
+      );
+    }
+  });
+
+  it('never waits when the operator forced it', () => {
+    assert.equal(willWaitForTurn({ status: 'running', agentStatus: 'working' } as Run, true), false);
+  });
+
+
+  it('waits for a turn that is running rather than cutting it', () => {
+    assert.equal(safeToRespawn('working'), false);
+    assert.equal(safeToRespawn('starting'), false);
+    assert.equal(safeToRespawn('waiting'), false);
+  });
+
+  it('goes at once when there is no turn to protect', () => {
+    // limited means the turn ended on a limit; undefined means no agent has ever reported.
+    assert.equal(safeToRespawn('idle'), true);
+    assert.equal(safeToRespawn('limited'), true);
+    assert.equal(safeToRespawn(undefined), true);
   });
 });
 

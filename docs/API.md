@@ -67,14 +67,21 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | POST   | `/api/runs/:id/swap`     | `SwapRequest`      | `Run`   |
 | POST   | `/api/runs/:id/restart`  | `{ force? }` – same subscription, resumes the same session GUID, same terminal | `Run` |
 | POST   | `/api/runs/:id/relaunch` | `RelaunchRequest` – opens a terminal on the same session GUID, closing the old one first if there is one. Works on a run in any state: it is both "pick up a change to Switchboard's own runner" and "resume this session after it exited or the machine went down" | `Run` |
+| POST   | `/api/runs/restart-all`  | `{ kind?: 'restart' \| 'relaunch', force? }` – queues one across every live session; `relaunch` gives each a new terminal | `{ queued }` |
 | POST   | `/api/runs/:id/handoff`  | give the terminal size back to the window the session runs in | `{ ok }` |
 | POST   | `/api/runs/:id/stop`     |                    | `{ ok }`|
 | DELETE | `/api/runs/:id`          | forget an exited run | `{ ok }` |
 | GET    | `/api/sessions/recent?cwd=` | recent Claude sessions for a directory (for "resume") | `{ id, title, mtime }[]` |
 
-A `Run` carries two fields worth reading together. `waiting` is a swap or restart queued behind a
-turn that has not finished, with when it was queued and whether anything eventually overrides the
-wait. `attention` is why the session wants looking at — `waiting` (stopped on a prompt only a
+Swap, restart and relaunch all take the session down and bring it back on the same conversation, so
+all three behave the same way about timing: a request that lands mid-turn is **queued**, not
+refused, and taken the moment the turn ends. `force` takes it now and loses whatever the turn had in
+flight. A queued respawn survives a daemon restart.
+
+A `Run` carries two fields worth reading together. `waiting` is the swap, restart or relaunch queued
+behind a turn that has not finished — its `kind`, the `trigger` that asked for it (`manual`,
+`update`, `limit`, `proactive`, `rescue`), when it was queued, and whether anything eventually
+overrides the wait. `attention` is why the session wants looking at — `waiting` (stopped on a prompt only a
 person can clear), `unread` (messages it addressed to the operator), `unseen` (it finished
 something and its terminal has not been open since). Opening the terminal over `/ws/term/:runId`
 clears the last two; a session merely mid-turn sets none of them.
