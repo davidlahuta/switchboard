@@ -1,6 +1,6 @@
 import pty from '@lydell/node-pty';
 import WebSocket from 'ws';
-import { DAEMON_URL, DAEMON_WS } from '../config.ts';
+import { DAEMON_URL, DAEMON_WS, withoutParentSession } from '../config.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
 
 type IPty = ReturnType<typeof pty.spawn>;
@@ -181,8 +181,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     channelPromptAnswered = false;
     trustPromptAnswered = false;
     cwdKey = s.cwd.replace(/\s+/g, '');
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) if (typeof v === 'string') env[k] = v;
+    const env = withoutParentSession();
     for (const [k, v] of Object.entries(s.env)) {
       if (v === null) delete env[k];
       else env[k] = v;

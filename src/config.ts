@@ -33,6 +33,43 @@ export const RUNTIME_DIR = path.join(DATA_DIR, 'runtime');
  * registers itself on the board as an agent in a repository called System32.
  */
 export const SPAWN_CWD = DATA_DIR;
+
+/**
+ * What a Claude Code session stamps on every process it launches: which session it is, how to talk
+ * back to it, and the marker saying that whatever you are, you are a child of it.
+ */
+const PARENT_SESSION_ENV = new Set([
+  'CLAUDECODE',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_PID',
+]);
+
+/**
+ * The environment with a launching session's fingerprints wiped off it.
+ *
+ * A session Switchboard hosts is nobody's child. It owns its own conversation, and its transcript is
+ * the only thing a swap, a restart or a resume has to come back to — Claude Code exits with "No
+ * conversation found" when asked to resume a session that never wrote one, and Switchboard falls
+ * back to starting a fresh session under the same id, which reads as the conversation vanishing.
+ *
+ * Claude Code turns transcript saving off for a session carrying CLAUDE_CODE_CHILD_SESSION. So a
+ * daemon that happened to be started from inside a Claude Code session — which is exactly what
+ * developing Switchboard from inside Switchboard leads to — hands that marker down through the
+ * runner to every session it launches, and their conversations quietly stop being resumable. Strip
+ * it wherever we start claude ourselves, rather than trusting how the daemon came to be running.
+ */
+export function withoutParentSession(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (typeof v === 'string' && !PARENT_SESSION_ENV.has(k)) out[k] = v;
+  }
+  return out;
+}
 export const DB_PATH = path.join(DATA_DIR, 'switchboard.db');
 
 /** The user's regular Claude Code config dir: the "default" subscription and the shared source. */

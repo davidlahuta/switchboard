@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { HOME_CLAUDE_DIR, SPAWN_CWD } from '../config.ts';
+import { HOME_CLAUDE_DIR, SPAWN_CWD, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
 import type { UpdateStatus } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
@@ -81,7 +81,7 @@ export class Updater {
     if (!claude) return null;
     try {
       const cmd = claudeCommand(claude, ['--version']);
-      const { stdout } = await run(cmd.file, cmd.args, { cwd: SPAWN_CWD, timeout: 30_000, windowsHide: true });
+      const { stdout } = await run(cmd.file, cmd.args, { cwd: SPAWN_CWD, env: withoutParentSession(), timeout: 30_000, windowsHide: true });
       return parseVersion(stdout);
     } catch (err) {
       log.warn('could not read claude version', err instanceof Error ? err.message : err);
@@ -110,7 +110,7 @@ export class Updater {
     const before = (await this.readVersion()) ?? this.currentVersion;
     try {
       const cmd = claudeCommand(claude, ['update']);
-      const { stdout, stderr } = await run(cmd.file, cmd.args, { cwd: SPAWN_CWD, timeout: UPDATE_TIMEOUT_MS, windowsHide: true });
+      const { stdout, stderr } = await run(cmd.file, cmd.args, { cwd: SPAWN_CWD, env: withoutParentSession(), timeout: UPDATE_TIMEOUT_MS, windowsHide: true });
       log.debug('claude update output', (stdout || stderr).trim().slice(0, 400));
     } catch (err) {
       // A failed update is not fatal: report it and keep the current version.

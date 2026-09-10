@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, SPAWN_CWD } from '../config.ts';
+import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, SPAWN_CWD, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
 import type { IntegrationStatus } from '../shared/types.ts';
 import { claudeCommand, findClaude, hooksConfig, isSwitchboardHookUrl, mcpServerEntry, readJson, writeJson } from './claude.ts';
@@ -41,7 +41,7 @@ async function claudeCli(args: string[]): Promise<void> {
   const claude = findClaude();
   if (!claude) throw new Error('claude executable not found on PATH');
   const cmd = claudeCommand(claude, args);
-  await run(cmd.file, cmd.args, { cwd: SPAWN_CWD, timeout: 30_000, windowsHide: true });
+  await run(cmd.file, cmd.args, { cwd: SPAWN_CWD, env: withoutParentSession(), timeout: 30_000, windowsHide: true });
 }
 
 /** Register the MCP shim at user scope and add Switchboard's HTTP hooks to ~/.claude/settings.json. */

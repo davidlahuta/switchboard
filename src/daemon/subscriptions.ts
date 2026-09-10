@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, IS_WINDOWS, PROFILES_DIR, SPAWN_CWD, VERSION } from '../config.ts';
+import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, IS_WINDOWS, PROFILES_DIR, SPAWN_CWD, VERSION, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
 import type { Subscription, SubscriptionKind, SubscriptionStatus, Usage, UsagePoint } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
@@ -597,7 +597,7 @@ export class SubscriptionManager {
     const claude = findClaude();
     if (!claude) return null;
     try {
-      const env: NodeJS.ProcessEnv = { ...process.env };
+      const env: NodeJS.ProcessEnv = withoutParentSession();
       if (r.kind === 'default') delete env.CLAUDE_CONFIG_DIR;
       else env.CLAUDE_CONFIG_DIR = r.config_dir;
       const cmd = claudeCommand(claude, ['auth', 'status', '--json']);

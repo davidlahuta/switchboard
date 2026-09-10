@@ -6,6 +6,7 @@ import path from 'node:path';
 import { attentionFor, limitSwapPlan, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
+import { withoutParentSession } from '../src/config.ts';
 import type { Usage } from '../src/shared/types.ts';
 
 const usage = (five: number | null, seven: number | null): Usage => ({
@@ -85,6 +86,38 @@ describe('moving a session off a spent subscription', () => {
     assert.equal(plan.force, false);
     assert.ok(plan.deadline! > now, 'queued behind the turn');
     assert.ok(plan.deadline! - now <= 5 * 60_000, 'but not indefinitely: the subscription is spent');
+  });
+});
+
+describe('a hosted session belongs to no other session', () => {
+  it('drops the launching session marks and keeps everything else', () => {
+    const env = withoutParentSession({
+      PATH: '/usr/bin',
+      CLAUDE_CONFIG_DIR: '/profiles/one',
+      CLAUDECODE: '1',
+      CLAUDE_CODE_CHILD_SESSION: '1',
+      CLAUDE_CODE_SESSION_ID: 'abc',
+      CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/sock',
+      CLAUDE_CODE_MESSAGING_TOKEN: 'secret',
+      CLAUDE_PID: '4242',
+      CLAUDE_CODE_ENTRYPOINT: 'cli',
+      CLAUDE_CODE_EXECPATH: '/bin/claude',
+    });
+
+    // The marker is why this matters: claude stops writing a transcript for a session it thinks is a
+    // child, and a session with no transcript cannot be resumed after a swap.
+    assert.equal(env.CLAUDE_CODE_CHILD_SESSION, undefined);
+    assert.equal(env.CLAUDE_CODE_SESSION_ID, undefined);
+    assert.equal(env.CLAUDE_CODE_MESSAGING_TOKEN, undefined);
+    assert.equal(env.CLAUDE_PID, undefined);
+
+    // Switchboard's own per-subscription setting is not the parent's, and has to survive.
+    assert.equal(env.CLAUDE_CONFIG_DIR, '/profiles/one');
+    assert.equal(env.PATH, '/usr/bin');
+  });
+
+  it('leaves an ordinary environment alone', () => {
+    assert.deepEqual(withoutParentSession({ PATH: '/usr/bin', HOME: '/home/x' }), { PATH: '/usr/bin', HOME: '/home/x' });
   });
 });
 
