@@ -1,25 +1,16 @@
 import type { Run } from '@shared/types.ts';
+import { attentionMark } from '@shared/marks.ts';
 
-/**
- * A dot next to a session that wants looking at, so the list answers "which of these needs me?"
- * without opening any of them.
- *
- * It is deliberately not a busy indicator. A session mid-turn is working and will finish on its
- * own; marking that too would put a dot on nearly every row, and a dot on everything is a dot worth
- * nothing. What earns one is the session being stopped on something only a person can clear, having
- * addressed the operator directly, or having finished something nobody has read yet.
- */
-/** Whether this session has a dot — the same test the dot itself makes. */
+/** Whether this session is asking for the operator — the same test the mark itself makes. */
 export function wantsAttention(run: Run): boolean {
-  const { waiting, unread, unseen } = run.attention;
-  return waiting || unread > 0 || unseen;
+  return attentionMark(run) !== null;
 }
 
 /**
  * One order for every list of sessions, so the overview and the sessions table cannot disagree
  * about which session is at the top.
  *
- * What wants the operator comes first — that is what a dot is for, and a list that shows dots and
+ * What wants the operator comes first — that is what a mark is for, and a list that shows marks and
  * then buries them below a dozen quiet rows has made the reader do the sorting. Then the most
  * recently active, because with a dozen sessions open the one being worked on is the one being
  * looked for; then by name, so a list of idle sessions holds still between refreshes rather than
@@ -35,16 +26,21 @@ export function byAttention(a: Run, b: Run): number {
   );
 }
 
+/**
+ * The mark next to a session that wants looking at, so the list answers "which of these needs me?"
+ * without opening any of them.
+ *
+ * The same character its terminal tab carries, so a wall of tabs and this list read the same way;
+ * see shared/marks.ts for what earns one and why being busy does not. The colour is what this
+ * surface can add and a tab title cannot.
+ */
 export function AttentionDot({ run }: { run: Run }) {
-  const { waiting, unread, unseen } = run.attention;
-  if (!waiting && !unread && !unseen) return null;
+  const mark = attentionMark(run);
+  if (!mark) return null;
 
-  // Ordered by how much it wants you: blocked beats spoken-to beats merely unread.
-  const [tone, why] = waiting
-    ? (['blocked', 'Waiting for you: it is stopped on a prompt only you can answer'] as const)
-    : unread
-      ? (['message', `${unread} message${unread === 1 ? '' : 's'} for you from this session`] as const)
-      : (['unseen', 'It has done something since you last opened its terminal'] as const);
-
-  return <span className={`attention attention-${tone}`} role="status" title={why} aria-label={why} />;
+  return (
+    <span className={`attention attention-${mark.tone}`} role="status" title={mark.why} aria-label={mark.why}>
+      <span aria-hidden="true">{mark.glyph}</span>
+    </span>
+  );
 }
