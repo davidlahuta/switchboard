@@ -53,6 +53,7 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
 - Web terminal: full Claude Code TUI in the browser (xterm.js), built for a phone — fitted to the screen, pinned above the keyboard, with a key bar and a prompt composer, and one button to hand the terminal back to the desk.
 - Device pairing for remote access (QR code). Local access needs no login. Add it to your phone's home screen and it runs without browser chrome.
 - Runs as a Task Scheduler logon task with a supervisor that brings the daemon back if it exits.
+- Sessions outlive their terminals. After a crash, a power cut or an exit, they are still listed — **Resume** opens a new terminal on the same conversation.
 
 ---
 
@@ -167,6 +168,23 @@ desktop, which a session-0 service does not have. After an unattended reboot —
 power cut — the daemon comes back as soon as the desk signs in. If you want that to happen without
 touching the machine, turn on *Settings → Accounts → Sign-in options → Use my sign-in info to
 automatically finish setting up after an update*, and set the BIOS to power on after AC loss.
+
+### What survives the machine going down
+
+The conversations do. Claude Code writes them to disk under the subscription's profile, and
+Switchboard only ever addresses a session by its id, so a terminal is a window onto a conversation
+rather than the conversation itself.
+
+When the daemon starts and finds sessions it recorded as running, it marks them **disconnected** —
+the terminal is gone, the conversation is not. They stay in the list with everything they had:
+directory, subscription, model, arguments, session id. **Resume** opens a new terminal and picks the
+conversation up where it stopped. The same button is there when a session exits on its own, so an
+unexpected exit is one click rather than a new session and a pasted GUID.
+
+Tailscale and RustDesk are Windows services set to start automatically, so they are up before anyone
+signs in. Switchboard is not, for the reason above — so after a power cut the path is: the machine
+boots, you reach it over Tailscale with RustDesk, sign in, and Switchboard and every session are one
+click from where they were.
 
 ## Claude Code updates
 

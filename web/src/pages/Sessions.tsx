@@ -5,6 +5,7 @@ import { HandoffButton } from '../components/HandoffButton.tsx';
 import { SessionName } from '../components/SessionName.tsx';
 import { PageHead } from '../components/PageHead.tsx';
 import { RestartMenu } from '../components/RestartMenu.tsx';
+import { ResumeButton } from '../components/ResumeButton.tsx';
 import { RunArgs, RunTags } from '../components/RunTags.tsx';
 import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Badge, ConfirmDialog, Empty, Icon, StatusPill } from '../components/ui.tsx';
@@ -154,6 +155,8 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                           <Icon name="terminal" size={16} />
                           <span>Terminal</span>
                         </a>
+                        {/* No terminal of its own: exited on its own, or the machine was off. */}
+                        {(exited || r.status === 'disconnected') && <ResumeButton run={r} compact />}
                         {!exited && <HandoffButton run={r} compact />}
                         {!exited && <SwapMenu run={r} subs={state.subscriptions} compact />}
                         {!exited && <RestartMenu run={r} compact />}

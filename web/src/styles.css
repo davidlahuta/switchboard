@@ -1319,6 +1319,13 @@ a.list-main:hover {
 .row-actions .btn > span:not(.sr-only) {
   display: none;
 }
+.row-actions .btn-primary > span:not(.sr-only) {
+  display: revert;
+}
+.row-actions .btn-primary {
+  gap: 5px;
+  padding: 0 10px;
+}
 .row-actions .popover .btn > span:not(.sr-only),
 .row-actions .popover .menu-item span {
   display: revert;

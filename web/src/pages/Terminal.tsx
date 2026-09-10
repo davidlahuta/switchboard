@@ -5,6 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { RunStatus, StateSnapshot, TermClientFrame, TermServerFrame } from '@shared/types.ts';
 import { RestartMenu } from '../components/RestartMenu.tsx';
+import { ResumeButton } from '../components/ResumeButton.tsx';
 import { HandoffButton } from '../components/HandoffButton.tsx';
 import { SessionName } from '../components/SessionName.tsx';
 import { RunTags } from '../components/RunTags.tsx';
@@ -647,15 +648,22 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
         )}
         {status === 'disconnected' && (
           <div className="term-banner term-banner-warn" role="status">
-            The runner is disconnected. Waiting for it to come back…
+            <span>This session has no terminal — the machine may have been restarted. The conversation is kept.</span>
+            {run && (
+              <span className="term-banner-actions">
+                <ResumeButton run={run} compact />
+              </span>
+            )}
           </div>
         )}
         {exited && (
           <div className="term-banner term-banner-exited" role="status">
             <span>
-              Session exited{run?.exitCode != null ? ` (code ${run.exitCode})` : ''}.
+              Session exited{run?.exitCode != null ? ` (code ${run.exitCode})` : ''}. The conversation is kept — resuming
+              opens a new terminal on it.
             </span>
             <span className="term-banner-actions">
+              {run && <ResumeButton run={run} compact />}
               <a className="btn btn-sm" href={href.sessions()}>
                 Sessions
               </a>

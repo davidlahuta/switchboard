@@ -66,7 +66,7 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | PATCH  | `/api/runs/:id`          | `UpdateRunRequest` – `{ name }` renames the session; Claude Code is renamed with it on its next hook | `Run` |
 | POST   | `/api/runs/:id/swap`     | `SwapRequest`      | `Run`   |
 | POST   | `/api/runs/:id/restart`  | `{ force? }` – same subscription, resumes the same session GUID, same terminal | `Run` |
-| POST   | `/api/runs/:id/relaunch` | `RelaunchRequest` – closes the terminal and opens a new one, resuming the same session GUID. The only way to pick up a change to Switchboard's own runner | `Run` |
+| POST   | `/api/runs/:id/relaunch` | `RelaunchRequest` – opens a terminal on the same session GUID, closing the old one first if there is one. Works on a run in any state: it is both "pick up a change to Switchboard's own runner" and "resume this session after it exited or the machine went down" | `Run` |
 | POST   | `/api/runs/:id/handoff`  | give the terminal size back to the window the session runs in | `{ ok }` |
 | POST   | `/api/runs/:id/stop`     |                    | `{ ok }`|
 | DELETE | `/api/runs/:id`          | forget an exited run | `{ ok }` |

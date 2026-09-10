@@ -820,17 +820,25 @@ export class RunManager {
   }
 
   /**
-   * Close this session's terminal and open a new one, resuming the same session GUID.
+   * Open a terminal for this session, resuming the same session GUID.
    *
-   * Restarting in place reuses the process hosting the terminal, which is where half of
-   * Switchboard's own code lives; only a new terminal picks up a change to it. Nothing is lost:
-   * the conversation is addressed by GUID and resumed.
+   * This is how a session comes back from anything: a restart in place reuses the process hosting
+   * the terminal, which is where half of Switchboard's own code lives, so only a new terminal picks
+   * up a change to it — and after the machine has been off, or after a session exited on its own,
+   * there is no terminal left to reuse at all. Nothing is lost either way: the conversation is
+   * addressed by GUID, and Claude Code resumes it.
    */
   relaunch(runId: string, force = false): Run {
-    const r = this.liveRun(runId);
+    const r = this.row(runId);
+    if (!r) throw httpError(404, 'Unknown run');
     const agent = this.coord.agent(r.session_id);
-    if (!force && agent && agent.status === 'working') {
+    if (!force && r.status !== 'exited' && agent && agent.status === 'working') {
       throw httpError(409, 'The agent is mid-turn. Wait for it to finish, or relaunch with force.');
+    }
+    if (r.status === 'exited') {
+      // It ended — on its own, or because the machine did. Clear that so it is a live run again.
+      this.db.run("UPDATE runs SET ended_at = NULL, exit_code = NULL WHERE id = ?", r.id);
+      this.setStatus(r.id, 'starting');
     }
     if (!this.send(r.id, { type: 'stop' })) {
       // Nothing attached, so there is no terminal to wait for.
