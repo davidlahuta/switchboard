@@ -47,6 +47,7 @@ export function NewSessionDialog({
   const [model, setModel] = useState('');
   const [autoCompact, setAutoCompact] = useState(state.settings.defaultAutoCompact);
   const [compactTokens, setCompactTokens] = useState(state.settings.defaultAutoCompactTokens);
+  const [continueOnResume, setContinueOnResume] = useState(state.settings.continueOnResume);
   const [skipPermissions, setSkipPermissions] = useState(state.settings.defaultSkipPermissions);
   const [argsText, setArgsText] = useState('');
   const [recent, setRecent] = useState<RecentSession[] | null>(null);
@@ -69,6 +70,7 @@ export function NewSessionDialog({
     setAutoCompact(state.settings.defaultAutoCompact);
     setCompactTokens(state.settings.defaultAutoCompactTokens);
     setSkipPermissions(state.settings.defaultSkipPermissions);
+    setContinueOnResume(state.settings.continueOnResume);
     setArgsText('');
     setError(null);
     setAdvOpen(false);
@@ -146,6 +148,7 @@ export function NewSessionDialog({
       autoCompact,
       autoCompactTokens: clampTokens(compactTokens),
       skipPermissions,
+      continueOnResume,
       ...(name.trim() ? { name: name.trim() } : {}),
       ...(worktree.trim() && !resumeId ? { worktree: worktree.trim() } : {}),
       // Sessions are addressed by GUID; the title next to it is only a label.
@@ -338,21 +341,31 @@ export function NewSessionDialog({
           </div>
         </div>
 
-        <label className="check">
-          <input type="checkbox" checked={skipPermissions} onChange={(e) => setSkipPermissions(e.target.checked)} />
-          <span>
-            Skip tool permissions
-            <span className="field-hint">The session runs tools without asking you to approve each one.</span>
-          </span>
-        </label>
+        <div className="check-grid">
+          <label className="check">
+            <input type="checkbox" checked={skipPermissions} onChange={(e) => setSkipPermissions(e.target.checked)} />
+            <span>
+              Skip tool permissions
+              <span className="field-hint">Runs tools without asking you to approve each one.</span>
+            </span>
+          </label>
 
-        <label className="check">
-          <input type="checkbox" checked={autoSwap} onChange={(e) => setAutoSwap(e.target.checked)} />
-          <span>
-            Auto-swap on limits
-            <span className="field-hint">Resume on the subscription with the most headroom when this one runs out.</span>
-          </span>
-        </label>
+          <label className="check">
+            <input type="checkbox" checked={autoSwap} onChange={(e) => setAutoSwap(e.target.checked)} />
+            <span>
+              Auto-swap on limits
+              <span className="field-hint">Move to the subscription with the most headroom when this one runs out.</span>
+            </span>
+          </label>
+
+          <label className="check">
+            <input type="checkbox" checked={continueOnResume} onChange={(e) => setContinueOnResume(e.target.checked)} />
+            <span>
+              Continue when it comes back
+              <span className="field-hint">Types the continue message after a swap, restart or resume.</span>
+            </span>
+          </label>
+        </div>
 
         <details className="collapse advanced" open={advOpen} onToggle={(e) => setAdvOpen(e.currentTarget.open)}>
           <summary>Advanced</summary>

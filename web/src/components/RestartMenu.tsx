@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { RelaunchRequest, RestartRequest, Run } from '@shared/types.ts';
+import type { RelaunchRequest, RestartRequest, Run, UpdateRunRequest } from '@shared/types.ts';
 import { api } from '../lib/api.ts';
 import { emitToast } from '../lib/toast.ts';
 import { Icon, Popover } from './ui.tsx';
@@ -31,6 +31,15 @@ export function RestartMenu({
     if (res) emitToast('info', `Restarting ${res.name}`);
   };
 
+  /**
+   * What this session does when it next comes back, changed here because this menu is where coming
+   * back is decided. It applies to every resume, not only the ones started from this menu.
+   */
+  const setContinue = async (on: boolean) => {
+    const body: UpdateRunRequest = { continueOnResume: on };
+    await api.patch<Run>(`/api/runs/${encodeURIComponent(run.id)}`, body);
+  };
+
   const relaunch = async (close: () => void) => {
     close();
     setBusy(true);
@@ -49,7 +58,7 @@ export function RestartMenu({
           type="button"
           className={compact ? 'btn btn-sm' : 'btn'}
           disabled={disabled}
-          aria-label={`Restart ${run.name}`}
+          aria-label={`Restart or resume ${run.name}`}
           {...p}
         >
           <Icon name="refresh" size={16} />
@@ -86,6 +95,14 @@ export function RestartMenu({
             <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
             Force now (even mid-turn)
           </label>
+          <div className="menu-heading">When it comes back</div>
+          <label className="menu-check">
+            <input type="checkbox" checked={run.continueOnResume} onChange={(e) => void setContinue(e.target.checked)} />
+            Send the continue message
+          </label>
+          <p className="menu-note">
+            Applies to every resume of this session — a swap, a restart, a relaunch — not only the ones started here.
+          </p>
         </div>
       )}
     </Popover>

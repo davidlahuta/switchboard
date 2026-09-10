@@ -47,6 +47,7 @@ interface RunRow {
   auto_compact_tokens: number | null;
   skip_permissions: number | null;
   claude_title: string | null;
+  continue_on_resume: number | null;
 }
 
 /** A respawn waiting for the session to finish its turn. */
@@ -210,6 +211,7 @@ export class RunManager {
       autoCompact: r.auto_compact === null ? getSettings(this.db).defaultAutoCompact : bool(r.auto_compact),
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
       skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
+      continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
       pid: r.pid,
       cols: r.cols,
       rows: r.rows,
@@ -346,6 +348,15 @@ export class RunManager {
     log.info('session model changed in claude', { run: r.id, model });
   }
 
+  /** Change what this session does when it comes back. Takes effect on its next resume. */
+  setContinueOnResume(runId: string, on: boolean): Run {
+    const r = this.row(runId);
+    if (!r) throw httpError(404, 'Unknown session');
+    this.db.run('UPDATE runs SET continue_on_resume = ? WHERE id = ?', on ? 1 : 0, r.id);
+    this.bus.invalidate('state');
+    return this.dto(this.row(runId)!);
+  }
+
   rename(runId: string, name: string): Run {
     const r = this.row(runId);
     if (!r) throw httpError(404, 'Unknown session');
@@ -397,6 +408,7 @@ export class RunManager {
     autoCompact?: boolean;
     autoCompactTokens?: number;
     skipPermissions?: boolean;
+    continueOnResume?: boolean;
   }): RunRow {
     const cwd = path.resolve(spec.cwd);
     let isDir = false;
@@ -419,8 +431,8 @@ export class RunManager {
     const id = crypto.randomBytes(4).toString('hex');
     const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
     this.db.run(
-      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, continue_on_resume, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       name.slice(0, 80),
       cwd,
@@ -435,6 +447,7 @@ export class RunManager {
       autoCompact ? 1 : 0,
       autoCompactTokens,
       skipPermissions ? 1 : 0,
+      spec.continueOnResume === undefined ? null : spec.continueOnResume ? 1 : 0,
       now(),
     );
     this.subs.syncProfile(subscriptionId);
@@ -768,9 +781,8 @@ export class RunManager {
     if (!this.resumedSpawn.get(r.id)) return;
     this.resumedSpawn.delete(r.id);
     if (this.pendingContinue.has(r.id)) return;
-    const settings = getSettings(this.db);
-    if (!settings.continueOnResume) return;
-    const text = settings.continueMessage.trim();
+    if (!this.dto(r).continueOnResume) return;
+    const text = getSettings(this.db).continueMessage.trim();
     if (!text) return;
     this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), CONTINUE_SPAWN_DELAY_MS) });
   }

@@ -21,7 +21,7 @@ export function RunTags({
   const model = modelShort(run.model, models);
   const latest = update.currentVersion;
   const outdated = !!run.version && !!latest && run.version !== latest;
-  if (!model && !run.version && !run.skipPermissions && !run.staleRunner) return null;
+  if (!model && !run.version && !run.skipPermissions && !run.staleRunner && run.continueOnResume) return null;
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
       {model && (
@@ -42,6 +42,11 @@ export function RunTags({
       {outdated && (
         <Badge tone="warn" title={`Running claude ${run.version}, latest is ${latest} — restart to update`}>
           outdated
+        </Badge>
+      )}
+      {!run.continueOnResume && (
+        <Badge tone="muted" title="This session is not told to carry on when it comes back from a swap, restart or resume">
+          no auto-continue
         </Badge>
       )}
       {run.staleRunner && (

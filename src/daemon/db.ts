@@ -206,6 +206,11 @@ const MIGRATIONS: string[] = [
   -- learns the other renamed the session; see RunManager.syncTitle.
   ALTER TABLE runs ADD COLUMN claude_title TEXT;
   `,
+  `
+  -- Whether this session is told to carry on when it comes back. NULL follows the global setting,
+  -- like the other per-session overrides.
+  ALTER TABLE runs ADD COLUMN continue_on_resume INTEGER;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

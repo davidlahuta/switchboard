@@ -703,6 +703,16 @@ select.input {
   accent-color: var(--accent);
   flex: none;
 }
+/* The dialog's switches, packed so adding one does not make the dialog taller on a phone. */
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 4px 16px;
+}
+.check-grid .check {
+  align-items: flex-start;
+  min-height: 0;
+}
 .check-inline {
   align-items: center;
   min-height: 38px;

@@ -224,6 +224,8 @@ export interface Run {
   autoCompact: boolean;
   autoCompactTokens: number;
   skipPermissions: boolean;
+  /** told to carry on when it comes back, resolved against the global setting */
+  continueOnResume: boolean;
   /** claude version this session is currently running on, when known */
   version: string | null;
   /**
@@ -414,6 +416,8 @@ export interface CreateRunRequest {
   autoCompactTokens?: number;
   /** run with --dangerously-skip-permissions (no tool approval prompts) */
   skipPermissions?: boolean;
+  /** type the continue message when this session comes back; omit to follow the global setting */
+  continueOnResume?: boolean;
 }
 
 /** Fields the operator can change on an existing session. */
@@ -424,6 +428,8 @@ export interface UpdateRunRequest {
    */
   name?: string;
   autoSwap?: boolean;
+  /** Type the continue message when this session comes back. Takes effect on its next resume. */
+  continueOnResume?: boolean;
 }
 
 export interface RelaunchRequest {

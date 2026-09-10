@@ -259,6 +259,7 @@ export function createServer(s: Services): http.Server {
       autoCompact: typeof body.autoCompact === 'boolean' ? body.autoCompact : undefined,
       autoCompactTokens: typeof body.autoCompactTokens === 'number' ? body.autoCompactTokens : undefined,
       skipPermissions: typeof body.skipPermissions === 'boolean' ? body.skipPermissions : undefined,
+      continueOnResume: typeof body.continueOnResume === 'boolean' ? body.continueOnResume : undefined,
     });
   });
   route('POST', '/api/runs/:id/swap', ({ params, body }) =>
@@ -266,6 +267,7 @@ export function createServer(s: Services): http.Server {
   );
   route('POST', '/api/runs/:id/restart', ({ params, body }) => s.runs.restart(params[0], 'manual restart', body.force === true));
   route('PATCH', '/api/runs/:id', ({ params, body }) => {
+    if (typeof body.continueOnResume === 'boolean') return s.runs.setContinueOnResume(params[0], body.continueOnResume);
     if (typeof body.name === 'string') return s.runs.rename(params[0], body.name);
     return fail(400, 'Nothing to change');
   });
