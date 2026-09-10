@@ -11,7 +11,7 @@ import { Icon } from './ui.tsx';
  * and the desktop terminal is parked rather than shown a frame drawn for other dimensions. This is
  * how you take it back without going to the machine.
  */
-export function HandoffButton({ run, compact }: { run: Run; compact?: boolean }) {
+export function HandoffButton({ run, compact, onHandoff }: { run: Run; compact?: boolean; onHandoff?: () => void }) {
   const [busy, setBusy] = useState(false);
   const disabled = run.status === 'exited' || run.status === 'disconnected' || busy;
 
@@ -19,7 +19,10 @@ export function HandoffButton({ run, compact }: { run: Run; compact?: boolean })
     setBusy(true);
     const ok = await api.post(`/api/runs/${encodeURIComponent(run.id)}/handoff`);
     setBusy(false);
-    if (ok) emitToast('info', `${run.name} is back on its own terminal`);
+    if (ok) {
+      onHandoff?.();
+      emitToast('info', `${run.name} is back on its own terminal`);
+    }
   };
 
   return (

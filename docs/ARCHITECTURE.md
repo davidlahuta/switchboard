@@ -214,7 +214,19 @@ Target = the enabled, logged-in subscription with the most headroom, weighted by
 The runner streams PTY output to the daemon, which feeds a headless xterm per run
 (`@xterm/headless` + serialize addon). A browser attaching to `/ws/term/:runId` receives the
 serialized current screen and then live data, and can send input. It offers a key bar (Esc, Tab,
-⇧Tab, arrows, Ctrl‑C, Enter) plus a text composer.
+⇧Tab, arrows, Ctrl‑C, Enter) plus a text composer, which is the default way in: on a phone, typing
+into the grid goes through the browser's hidden input where autocorrect rewrites as it pleases, and
+there is nowhere to read a prompt back before sending it.
+
+The browser view is always fitted to its own screen — there is no unfitted mode to choose, because
+a mirror of a TUI at someone else's dimensions is not useful. It carries no scrollback either: this
+is a frame the session repaints, so scrolling away from it shows history that is about to be
+overwritten and leaves a scrollbar that does nothing. The terminal is pinned to the bottom of its
+box at a fixed height rather than stretched to it, so a phone's keyboard covers the top of the frame
+and leaves the prompt visible; re-fitting on the keyboard instead would resize the pseudo-terminal
+twice per message and reflow the whole session each time. **Hand back** returns the size to the
+desktop terminal, and the browser then follows at whatever size that window has until it is asked
+to fit again.
 
 The Windows Terminal tab owns the PTY size until a browser fits to its own screen, which is what a
 phone needs. Only one of them can own it — claude positions the cursor absolutely and wraps for the

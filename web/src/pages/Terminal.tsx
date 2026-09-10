@@ -110,6 +110,9 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   // Fitted on every open, deliberately not remembered: it is a per-screen choice, and the screen
   // you open a session on is rarely the one you last turned it off on.
   const [fit, setFit] = useState(true);
+  // Open by default. On a phone the composer is the reliable way to write a prompt: typing into
+  // the grid goes through the browser's hidden input, where autocorrect and IME rewrite as they
+  // please, and there is nowhere to see what you typed before you send it.
   const [composerOpen, setComposerOpen] = useState(() => readStorage(COMPOSER_KEY) !== '0');
   const [draft, setDraft] = useState(() => {
     try {
@@ -142,39 +145,39 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   );
 
   // ---- fit to screen ----
+  /**
+   * Size the session to the space this page has for it.
+   *
+   * The terminal is pinned to the bottom of that space at a fixed pixel height rather than filling
+   * it, so that when a phone's keyboard takes half the screen the top of the frame is covered and
+   * the prompt stays in view. Re-fitting on a keyboard instead would resize the pseudo-terminal
+   * twice per message and make the session reflow its whole layout each time.
+   */
   const requestFit = useCallback(() => {
     const term = termRef.current;
     const fitAddon = fitAddonRef.current;
-    if (!term || !fitAddon) return;
+    const host = hostRef.current;
+    const box = scrollerRef.current;
+    if (!term || !fitAddon || !host || !box) return;
+    host.style.top = '0';
+    host.style.height = '';
     const dims = fitAddon.proposeDimensions();
     if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
     const cols = Math.max(20, dims.cols);
     const rows = Math.max(6, dims.rows);
     if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
+    host.style.height = `${box.clientHeight}px`;
+    host.style.top = 'auto';
     const key = `${cols}x${rows}`;
     lastRequested.current = { key, at: Date.now() };
     setSize({ cols, rows });
     sendFrame({ type: 'resize', cols, rows });
   }, [sendFrame]);
 
-  /**
-   * Turning fitting off hands the size back to the console the session runs in, so the two views
-   * show the same frame again. Leaving it on the phone's dimensions is what made the desktop
-   * terminal repaint a small frame inside a larger stale one.
-   */
-  const toggleFit = useCallback(() => {
-    setFit((f) => {
-      if (f) {
-        sendFrame({ type: 'release-size' });
-        // Unfitted the grid is taller than the box; land at the prompt, not at the top of it.
-        requestAnimationFrame(() => {
-          const sc = scrollerRef.current;
-          if (sc) sc.scrollTop = sc.scrollHeight;
-        });
-      }
-      return !f;
-    });
-  }, [sendFrame]);
+  /** Take the size back from the desktop terminal and fit to this screen again. */
+  const takeOver = useCallback(() => {
+    setFit(true);
+  }, []);
 
   // ---- xterm lifecycle ----
   useEffect(() => {
@@ -188,7 +191,10 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       lineHeight: 1.1,
       theme: THEME,
       cursorBlink: true,
-      scrollback: 5000,
+      // No scrollback. This view mirrors a TUI that repaints its own frame: scrolling away from
+      // that frame shows history the session is about to overwrite, and leaves a scrollbar that
+      // does nothing useful. The desktop terminal keeps its own scrollback.
+      scrollback: 0,
       allowProposedApi: false,
       macOptionIsMeta: true,
       rightClickSelectsWord: true,
@@ -332,23 +338,39 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     if (fitOnRef.current) requestAnimationFrame(requestFit);
   }, [fontSize, requestFit]);
 
-  // ---- fit toggle + window resize ----
+  // ---- fit mode + window resize ----
   useEffect(() => {
     fitOnRef.current = fit;
-    if (!fit) return;
+    if (!fit) {
+      // Following the desktop terminal: the grid is laid out at its own size, so the pixel height
+      // pinned for fitted mode has to go or it would crop it.
+      const host = hostRef.current;
+      if (host) {
+        host.style.top = '';
+        host.style.height = '';
+      }
+      return;
+    }
     const raf = requestAnimationFrame(requestFit);
     let t = 0;
+    // Width, not height: on a phone the height changes every time the keyboard opens, and the
+    // terminal must not be resized for that. Rotating or resizing a window changes the width.
+    let lastWidth = window.innerWidth;
     const onResize = () => {
+      const width = window.innerWidth;
+      const widthChanged = width !== lastWidth;
+      lastWidth = width;
+      if (!widthChanged && window.visualViewport && window.visualViewport.height < window.innerHeight - 80) return;
       window.clearTimeout(t);
       t = window.setTimeout(requestFit, 150);
     };
     window.addEventListener('resize', onResize);
-    window.visualViewport?.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
     return () => {
       cancelAnimationFrame(raf);
       window.clearTimeout(t);
       window.removeEventListener('resize', onResize);
-      window.visualViewport?.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
     };
   }, [fit, requestFit]);
 
@@ -357,16 +379,14 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     const vv = window.visualViewport;
     const el = pageRef.current;
     if (!vv || !el) return;
-    let prevH = vv.height;
     const update = () => {
+      // The page follows the visible area, so the composer and key bar sit above the keyboard. The
+      // terminal keeps the height it was fitted at and is pinned to the bottom, so the keyboard
+      // covers the top of the frame rather than reflowing the session.
       el.style.height = `${vv.height}px`;
       el.style.transform = `translateY(${vv.offsetTop}px)`;
-      if (vv.height < prevH - 80) {
-        // keyboard opened: keep the prompt (bottom of the screen) in view
-        const sc = scrollerRef.current;
-        if (sc) sc.scrollTop = sc.scrollHeight;
-      }
-      prevH = vv.height;
+      const sc = scrollerRef.current;
+      if (sc && !fitOnRef.current) sc.scrollTop = sc.scrollHeight;
     };
     update();
     vv.addEventListener('resize', update);
@@ -492,17 +512,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
           >
             <span className="aa">A+</span>
           </button>
-          <button
-            type="button"
-            className={fit ? 'btn btn-icon btn-ghost is-on' : 'btn btn-icon btn-ghost'}
-            aria-pressed={fit}
-            onClick={() => toggleFit()}
-            aria-label="Fit to this screen"
-            title={fit ? 'Fitted to this screen (resizing the desktop tab takes it back)' : 'Fit to this screen (takes over the terminal size)'}
-          >
-            <Icon name="fit" />
-          </button>
-          {run && <HandoffButton run={{ ...run, status: status ?? run.status }} compact />}
+          {run && <HandoffButton run={{ ...run, status: status ?? run.status }} compact onHandoff={() => setFit(false)} />}
           {run && <SwapMenu run={{ ...run, status: status ?? run.status }} subs={state.subscriptions} compact />}
           {run && <RestartMenu run={{ ...run, status: status ?? run.status }} compact />}
         </div>
@@ -517,6 +527,16 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
         {status === 'swapping' && (
           <div className="term-banner term-banner-info" role="status">
             Swapping subscription — the session resumes in a moment…
+          </div>
+        )}
+        {!fit && !exited && (
+          <div className="term-banner term-banner-info" role="status">
+            <span>Following the desktop terminal, at its size.</span>
+            <span className="term-banner-actions">
+              <button type="button" className="btn btn-sm" onClick={takeOver}>
+                <Icon name="fit" size={14} /> Fit to this screen
+              </button>
+            </span>
           </div>
         )}
         {status === 'disconnected' && (

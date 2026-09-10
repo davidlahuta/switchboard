@@ -2246,6 +2246,9 @@ a.list-main:hover {
   right: 0;
   height: 100vh;
   height: 100dvh;
+  /* A double tap on the grid is a tap, not a zoom. */
+  touch-action: manipulation;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   background: #0b0e13;
@@ -2355,6 +2358,8 @@ a.list-main:hover {
   position: relative;
   display: flex;
   flex-direction: column;
+  /* The fitted terminal is taller than this box while a keyboard is open. */
+  overflow: hidden;
 }
 .term-banner {
   flex: none;
@@ -2431,10 +2436,18 @@ a.list-main:hover {
 .term-host.fit {
   display: block;
   position: absolute;
-  inset: 0;
+  /* Pinned to the bottom at the height it was fitted at, not stretched to the box: a phone's
+     keyboard then covers the top of the frame and leaves the prompt visible, instead of resizing
+     the session every time it opens. JS sets the height and clears `top`. */
+  inset: 0 0 0 0;
   /* FitAddon measures the parent's box and subtracts padding on .xterm only */
   padding: 0;
   min-width: 0;
+}
+.term-host.fit .xterm-viewport {
+  /* No scrollback in this view, so there is nothing to scroll; say so rather than leaving an inert
+     scrollbar that detaches the reader from the frame the session is repainting. */
+  overflow-y: hidden !important;
 }
 .term-host.fit .xterm {
   padding: 4px 4px 0;
@@ -2982,6 +2995,31 @@ a.list-main:hover {
   }
   .term-tools .btn-sm span {
     display: none;
+  }
+
+  /* Every row of chrome is a row the session does not get. The name and how to leave stay; the
+     subscription label, tags and secondary status live on the sessions list. */
+  .term-head {
+    padding-top: max(4px, env(safe-area-inset-top, 0px));
+    padding-bottom: 4px;
+  }
+  .term-sub,
+  .term-meta .run-tags {
+    display: none;
+  }
+  .term-name {
+    font-size: 14px;
+  }
+  .term-meta {
+    gap: 4px;
+  }
+  .term-composer {
+    padding: 5px 6px;
+  }
+  .keybar {
+    gap: 4px;
+    padding: 5px 6px;
+    padding-bottom: calc(5px + var(--safe-b));
   }
 }
 

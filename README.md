@@ -49,7 +49,7 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
   - or proactively when a subscription crosses a threshold while the session is idle.
 - **Restart on update**: `claude update` runs on a schedule; when the version changes, sessions restart onto the new build once their agent is idle.
 - Sessions carry **one name and one model** between Switchboard and Claude Code: rename in the web UI or with `/rename` in the session, change the model with `/model`, and both sides agree either way.
-- Web terminal: full Claude Code TUI in the browser (xterm.js), with a mobile key bar, a prompt composer and a "fit to this screen" mode that hands the size back to the desktop terminal when you turn it off.
+- Web terminal: full Claude Code TUI in the browser (xterm.js), built for a phone — fitted to the screen, pinned above the keyboard, with a key bar and a prompt composer, and one button to hand the terminal back to the desk.
 - Device pairing for remote access (QR code). Local access needs no login.
 - Runs as a Task Scheduler logon task with a supervisor that brings the daemon back if it exits.
 
@@ -107,7 +107,8 @@ From there you can:
   `/model`.
 - **Hand back** the terminal when you are done with it on the phone. A pseudo-terminal has one size:
   while a browser is fitted to its own screen it owns that size, and the desktop window is parked
-  rather than shown a frame drawn for other dimensions.
+  rather than shown a frame drawn for other dimensions. The browser then follows the desktop
+  terminal until you ask it to fit again.
 - **Relaunch** it in a new terminal. A restart in place reuses the window Switchboard opened, which
   hosts part of Switchboard itself, so it keeps running the code it started with; sessions in that
   state are badged *old host*. A relaunch resumes the same session GUID, so nothing is lost.
