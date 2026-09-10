@@ -12,7 +12,7 @@ import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
 import { newestSourceMtime } from './source.ts';
 import { readCustomTitle, readSessionModel } from './transcript.ts';
-import { hooksInstalledIn, integrationStatus } from './integration.ts';
+import { hooksInstalledIn } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import { TermMirror } from './mirror.ts';
 import type { ModelCatalog } from './models.ts';
@@ -630,10 +630,22 @@ export class RunManager {
     const args: string[] = canResume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
     // Before the process exists, so it never reaches the trust dialog: the folder was chosen here.
     this.subs.trustFolder(subscriptionId, r.last_cwd ?? r.cwd);
-    if (!integrationStatus().mcpInstalled) {
-      const file = writeRuntimeJson(`mcp-${r.id}.json`, { mcpServers: { switchboard: mcpServerEntry({ SWITCHBOARD_RUN_ID: r.id }) } });
-      args.push('--mcp-config', file);
-    }
+    /*
+     * Always, rather than only when the user's own config lacks the server.
+     *
+     * That test read ~/.claude.json, but a session runs against its subscription's profile, and the
+     * profile only receives the registration when syncProfile can write it — which it refuses to do
+     * while any session on that subscription is running, to avoid racing a live claude rewriting the
+     * same file. A busy subscription therefore never got it, and every session on it was launched
+     * asking for a channel on "server:switchboard" that its profile had never heard of: no sb_ tools
+     * and nothing to push into. Only the default subscription worked, because there the profile is
+     * ~/.claude itself.
+     *
+     * Passing it per launch settles the question at the point of use, and carries the run id so the
+     * shim knows which session it belongs to, which the registered copy cannot.
+     */
+    const file = writeRuntimeJson(`mcp-${r.id}.json`, { mcpServers: { switchboard: mcpServerEntry({ SWITCHBOARD_RUN_ID: r.id }) } });
+    args.push('--mcp-config', file);
     args.push('--dangerously-load-development-channels', 'server:switchboard');
     // Auto-compact is a setting, not a flag, so it rides in the per-run settings file next to the
     // hooks (which are only needed when the profile does not already carry them).
