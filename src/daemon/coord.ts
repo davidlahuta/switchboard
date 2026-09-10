@@ -145,6 +145,11 @@ export function ago(iso: string | null): string {
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 export class Coordinator {
+  /** Exposed for tests that need to set up awkward states directly. */
+  get raw(): Db {
+    return this.db;
+  }
+
   private readonly db: Db;
   private readonly bus: Bus;
   private pushTarget: PushTarget = { push: () => false, isConnected: () => false };
@@ -343,17 +348,30 @@ export class Coordinator {
     }
   }
 
+  /**
+   * Resolve an agent reference. The session id (a GUID) is the identity; a display name is only
+   * an alias, and names can be reused once their session goes offline. A name that matches more
+   * than one live agent is therefore refused rather than guessed, and the caller is told to use
+   * the GUID.
+   */
   findAgent(repoId: string, ref: string): AgentRow | undefined {
     const r = ref.trim().replace(/^@/, '');
-    return (
-      this.db.get<AgentRow>('SELECT * FROM agents WHERE repo_id = ? AND id = ?', repoId, r) ??
-      this.db.get<AgentRow>(
-        "SELECT * FROM agents WHERE repo_id = ? AND lower(name) = lower(?) ORDER BY (status = 'offline'), last_seen DESC LIMIT 1",
-        repoId,
-        r,
-      ) ??
-      (r.length >= 4 ? this.db.get<AgentRow>('SELECT * FROM agents WHERE repo_id = ? AND id LIKE ?', repoId, `${r}%`) : undefined)
+    if (!r) return undefined;
+    const byId = this.db.get<AgentRow>('SELECT * FROM agents WHERE repo_id = ? AND id = ?', repoId, r);
+    if (byId) return byId;
+    const named = this.db.all<AgentRow>(
+      "SELECT * FROM agents WHERE repo_id = ? AND lower(name) = lower(?) ORDER BY (status = 'offline'), last_seen DESC",
+      repoId,
+      r,
     );
+    const live = named.filter((a) => a.status !== 'offline');
+    if (live.length > 1) {
+      throw new Error(`"${r}" matches ${live.length} live agents (${live.map((a) => a.id).join(', ')}). Address one by its session id.`);
+    }
+    if (named.length) return live[0] ?? named[0];
+    // Last resort: an unambiguous session-id prefix.
+    const prefix = r.length >= 8 ? this.db.all<AgentRow>('SELECT * FROM agents WHERE repo_id = ? AND id LIKE ?', repoId, `${r}%`) : [];
+    return prefix.length === 1 ? prefix[0] : undefined;
   }
 
   private liveAgents(repoId: string): AgentRow[] {

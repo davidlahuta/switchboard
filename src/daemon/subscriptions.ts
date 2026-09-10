@@ -117,6 +117,10 @@ export class SubscriptionManager {
   /** Called after each successful usage refresh. */
   onUsage: (sub: Subscription) => void = () => {};
   private readonly lastPoll = new Map<string, number>();
+  /** Set when the usage endpoint returns 429. It rate-limits per account, so back everyone off. */
+  private cooldownUntil = 0;
+  private consecutive429 = 0;
+  private lastRequestAt = 0;
   private readonly lastHistory = new Map<string, number>();
   private readonly watchers = new Map<string, NodeJS.Timeout>();
   private readonly inFlight = new Set<string>();
@@ -503,6 +507,16 @@ export class SubscriptionManager {
     });
   }
 
+  /** A usable access token from any logged-in subscription, for account-independent lookups. */
+  async anyReadyToken(): Promise<string | null> {
+    for (const r of this.rows()) {
+      if (!bool(r.enabled) || r.status !== 'ready') continue;
+      const token = await this.freshToken(r);
+      if (token) return token;
+    }
+    return null;
+  }
+
   async refreshIdentity(id: string): Promise<void> {
     const r = this.row(id);
     if (!r) return;
@@ -538,18 +552,46 @@ export class SubscriptionManager {
   // ---------------------------------------------------------------- usage
 
   private async tick(): Promise<void> {
+    if (Date.now() < this.cooldownUntil) return;
     const pollSec = getSettings(this.db).usagePollSec;
     for (const r of this.rows()) {
       if (r.status === 'pending_login') continue;
-      const interval = (this.liveRunsFor(r.id) > 0 ? pollSec : Math.max(pollSec * 5, 600)) * 1000;
-      if (Date.now() - (this.lastPoll.get(r.id) ?? 0) >= interval) await this.poll(r.id, false);
+      // Idle subscriptions are polled far less often: their numbers only move when used.
+      const interval = (this.liveRunsFor(r.id) > 0 ? pollSec : Math.max(pollSec * 5, 1800)) * 1000;
+      if (Date.now() - (this.lastPoll.get(r.id) ?? 0) < interval) continue;
+      await this.poll(r.id, false);
+      if (Date.now() < this.cooldownUntil) return; // a 429 during this pass: stop early
     }
+  }
+
+  /** Keep a floor between calls so several subscriptions never burst at once. */
+  private async spaceOutRequest(): Promise<void> {
+    const gap = 1500 - (Date.now() - this.lastRequestAt);
+    if (gap > 0) await new Promise((r) => setTimeout(r, gap));
+    this.lastRequestAt = Date.now();
+  }
+
+  private applyRateLimit(res: Response): number {
+    this.consecutive429++;
+    const header = res.headers.get('retry-after');
+    const fromHeader = header ? (/^\d+$/.test(header.trim()) ? Number(header) * 1000 : Date.parse(header) - Date.now()) : NaN;
+    // Honour Retry-After when present; otherwise back off exponentially, capped at 30 minutes.
+    const wait = Number.isFinite(fromHeader) && fromHeader > 0 ? fromHeader : Math.min(30 * 60_000, 60_000 * 2 ** (this.consecutive429 - 1));
+    this.cooldownUntil = Date.now() + wait;
+    log.warn('usage endpoint rate limited', { retryAfter: header, waitSec: Math.round(wait / 1000), strike: this.consecutive429 });
+    return wait;
   }
 
   async poll(id: string, force: boolean): Promise<Subscription | null> {
     const r = this.row(id);
     if (!r || r.status === 'pending_login' || this.inFlight.has(id)) return this.get(id);
     if (!force && Date.now() - (this.lastPoll.get(id) ?? 0) < 20_000) return this.get(id);
+    if (Date.now() < this.cooldownUntil) {
+      // Even a manual refresh waits out a 429; hammering it only extends the cooldown.
+      this.markStale(r, `Usage API rate limited; retrying ${new Date(this.cooldownUntil).toISOString().slice(11, 16)} UTC`, 'rate_limited', new Date(this.cooldownUntil).toISOString());
+      this.bus.invalidate('state');
+      return this.get(id);
+    }
     this.inFlight.add(id);
     this.lastPoll.set(id, Date.now());
     try {
@@ -560,18 +602,26 @@ export class SubscriptionManager {
       }
       const token = await this.freshToken(r);
       if (!token) {
-        this.markStale(r, 'Token expired; it refreshes when a session runs on this subscription.');
+        this.markStale(r, 'Token expired; it refreshes when a session runs on this subscription.', 'token', null);
         return this.get(id);
       }
+      await this.spaceOutRequest();
       const res = await this.oauthGet(token, '/api/oauth/usage');
+      if (res.status === 429) {
+        const wait = this.applyRateLimit(res);
+        const retryAt = new Date(Date.now() + wait).toISOString();
+        this.markStale(r, `Usage API rate limited; retrying ${retryAt.slice(11, 16)} UTC`, 'rate_limited', retryAt);
+        return this.get(id);
+      }
       if (res.status === 401) {
         this.db.run("UPDATE subscriptions SET status = 'logged_out', last_error = 'Login expired (401). Re-login.' WHERE id = ?", id);
         return this.get(id);
       }
       if (!res.ok) {
-        this.markStale(r, `Usage endpoint returned HTTP ${res.status}`);
+        this.markStale(r, `Usage endpoint returned HTTP ${res.status}`, 'network', null);
         return this.get(id);
       }
+      this.consecutive429 = 0;
       const json = (await res.json()) as Record<string, unknown>;
       const win = (w: OAuthWindow) => (w && typeof w.utilization === 'number' ? { pct: w.utilization, resetsAt: w.resets_at ?? null } : null);
       const limits = Array.isArray(json.limits) ? (json.limits as Array<Record<string, any>>) : [];
@@ -585,6 +635,8 @@ export class SubscriptionManager {
         source: 'oauth',
         stale: false,
         error: null,
+        errorKind: null,
+        retryAt: null,
       };
       this.db.run(
         "UPDATE subscriptions SET usage_json = ?, status = 'ready', last_error = CASE WHEN last_error LIKE 'Same account%' THEN last_error ELSE NULL END, plan = COALESCE(?, plan), rate_tier = COALESCE(?, rate_tier) WHERE id = ?",
@@ -607,7 +659,7 @@ export class SubscriptionManager {
       this.onUsage(sub);
       return sub;
     } catch (err) {
-      this.markStale(r, err instanceof Error ? err.message : String(err));
+      this.markStale(r, err instanceof Error ? err.message : String(err), 'network', null);
       return this.get(id);
     } finally {
       this.inFlight.delete(id);
@@ -615,7 +667,7 @@ export class SubscriptionManager {
     }
   }
 
-  private markStale(r: SubRow, error: string): void {
+  private markStale(r: SubRow, error: string, errorKind: NonNullable<Usage['errorKind']>, retryAt: string | null): void {
     let usage: Usage | null = null;
     try {
       usage = r.usage_json ? (JSON.parse(r.usage_json) as Usage) : null;
@@ -623,8 +675,8 @@ export class SubscriptionManager {
       usage = null;
     }
     const next: Usage = usage
-      ? { ...usage, stale: true, error }
-      : { fiveHour: null, sevenDay: null, scoped: [], fetchedAt: now(), source: 'oauth', stale: true, error };
+      ? { ...usage, stale: true, error, errorKind, retryAt }
+      : { fiveHour: null, sevenDay: null, scoped: [], fetchedAt: now(), source: 'oauth', stale: true, error, errorKind, retryAt };
     this.db.run('UPDATE subscriptions SET usage_json = ? WHERE id = ?', JSON.stringify(next), r.id);
   }
 }

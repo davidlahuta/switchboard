@@ -2,11 +2,19 @@ import type { Settings } from '../shared/types.ts';
 import type { Db } from './db.ts';
 
 export const DEFAULT_SETTINGS: Settings = {
+  autoUpdate: true,
+  updateCheckHours: 6,
+  restartAfterUpdate: true,
+  defaultModel: null,
+  defaultAutoCompact: true,
+  defaultAutoCompactTokens: 700_000,
   autoSwap: true,
   proactiveSwap: false,
   swapThresholdPct: 95,
   continueMessage: 'continue',
-  usagePollSec: 120,
+  // The usage endpoint is shared across all subscriptions and rate-limits aggressively; five
+  // accounts polling every two minutes was enough to draw 429s.
+  usagePollSec: 300,
   conflictWindowMin: 60,
   claudeArgs: [],
 };
@@ -31,11 +39,19 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
   const n = (v: unknown, min: number, max: number, fallback: number): number =>
     typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : fallback;
 
+  if (typeof patch.autoUpdate === 'boolean') next.autoUpdate = patch.autoUpdate;
+  if (patch.updateCheckHours !== undefined) next.updateCheckHours = n(patch.updateCheckHours, 1, 24 * 7, current.updateCheckHours);
+  if (typeof patch.restartAfterUpdate === 'boolean') next.restartAfterUpdate = patch.restartAfterUpdate;
+  if (patch.defaultModel !== undefined) next.defaultModel = typeof patch.defaultModel === 'string' && patch.defaultModel ? patch.defaultModel : null;
+  if (typeof patch.defaultAutoCompact === 'boolean') next.defaultAutoCompact = patch.defaultAutoCompact;
+  if (patch.defaultAutoCompactTokens !== undefined) {
+    next.defaultAutoCompactTokens = n(patch.defaultAutoCompactTokens, 20_000, 990_000, current.defaultAutoCompactTokens);
+  }
+  if (patch.usagePollSec !== undefined) next.usagePollSec = n(patch.usagePollSec, 60, 3600, current.usagePollSec);
   if (typeof patch.autoSwap === 'boolean') next.autoSwap = patch.autoSwap;
   if (typeof patch.proactiveSwap === 'boolean') next.proactiveSwap = patch.proactiveSwap;
   if (patch.swapThresholdPct !== undefined) next.swapThresholdPct = n(patch.swapThresholdPct, 50, 100, current.swapThresholdPct);
   if (typeof patch.continueMessage === 'string') next.continueMessage = patch.continueMessage.slice(0, 2000);
-  if (patch.usagePollSec !== undefined) next.usagePollSec = n(patch.usagePollSec, 30, 3600, current.usagePollSec);
   if (patch.conflictWindowMin !== undefined) next.conflictWindowMin = n(patch.conflictWindowMin, 5, 24 * 60, current.conflictWindowMin);
   if (Array.isArray(patch.claudeArgs)) next.claudeArgs = patch.claudeArgs.filter((a) => typeof a === 'string' && a.length > 0);
 

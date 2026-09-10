@@ -8,9 +8,11 @@ import { findClaude } from './claude.ts';
 import { Coordinator } from './coord.ts';
 import { Db } from './db.ts';
 import { Launcher } from './launcher.ts';
+import { ModelCatalog } from './models.ts';
 import { RunManager } from './runs.ts';
 import { createServer } from './server.ts';
 import { SubscriptionManager } from './subscriptions.ts';
+import { Updater } from './updater.ts';
 
 const log = logger('daemon');
 
@@ -21,20 +23,25 @@ export async function startDaemon(): Promise<void> {
   const launcher = new Launcher();
   const coord = new Coordinator(db, bus);
   const subs = new SubscriptionManager(db, bus, launcher);
-  const runs = new RunManager(db, bus, subs, coord, launcher);
+  const models = new ModelCatalog(() => subs.anyReadyToken());
+  const runs = new RunManager(db, bus, subs, coord, launcher, models);
   const hub = new AgentHub(coord, runs);
   coord.setPushTarget(hub);
   const auth = new Auth(db);
+  const updater = new Updater(db, bus, runs);
+  runs.versionProvider = () => updater.currentVersion;
 
   runs.start();
   subs.start();
+  updater.start();
+  void models.refresh();
   const sweep = setInterval(() => coord.sweep(), 60_000);
 
   // One server per bound address: loopback for the desk's own hooks/shims/runners, plus any
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
   const servers: Server[] = [];
   for (const host of BIND_HOSTS) {
-    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub });
+    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models });
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') log.error(`${host}:${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
       else if (err.code === 'EADDRNOTAVAIL') log.error(`Cannot bind ${host}: no interface has that address. Check SWITCHBOARD_BIND.`);
@@ -51,6 +58,7 @@ export async function startDaemon(): Promise<void> {
     log.info('shutting down');
     clearInterval(sweep);
     subs.stop();
+    updater.stop();
     for (const server of servers) {
       server.close();
       server.closeAllConnections();

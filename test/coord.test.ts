@@ -112,6 +112,29 @@ describe('coordinator', () => {
     assert.match(result.text, /yes, go ahead/);
   });
 
+  it('identifies sessions by GUID, treating names as reusable aliases', () => {
+    const repoId = coord.agent('aaaa1111')!.repo_id;
+    // The session id always wins, even when a display name would be ambiguous.
+    assert.equal(coord.findAgent(repoId, 'aaaa1111')?.id, 'aaaa1111');
+    assert.equal(coord.findAgent(repoId, 'bbbb2222')?.id, 'bbbb2222');
+
+    // A name freed by an offline session can be taken by a new one; the old GUID still resolves.
+    const original = coord.agent('aaaa1111')!;
+    coord.markOffline('aaaa1111', 'test');
+    const reuser = coord.registerAgent({ sessionId: 'cccc3333', cwd: dir, name: original.name });
+    assert.equal(reuser.name, original.name, 'name is reusable once the holder is offline');
+    assert.equal(coord.findAgent(repoId, original.name)?.id, 'cccc3333', 'the live agent wins the alias');
+    assert.equal(coord.findAgent(repoId, 'aaaa1111')?.id, 'aaaa1111', 'the GUID still resolves the old session');
+
+    // An ambiguous name is refused rather than guessed.
+    coord.registerAgent({ sessionId: 'aaaa1111', cwd: dir });
+    coord.raw.run('UPDATE agents SET name = ? WHERE id = ?', original.name, 'aaaa1111');
+    assert.throws(() => coord.findAgent(repoId, original.name), /matches 2 live agents/);
+
+    coord.raw.run('UPDATE agents SET name = ? WHERE id = ?', 'alpha', 'aaaa1111');
+    coord.markOffline('cccc3333', 'test');
+  });
+
   it('re-groups an agent that moves to another repo', () => {
     const other = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-other-'));
     try {

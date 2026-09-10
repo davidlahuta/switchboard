@@ -13,6 +13,7 @@ import { bool, type Db, now } from './db.ts';
 import { hooksInstalledIn, integrationStatus } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import { TermMirror } from './mirror.ts';
+import type { ModelCatalog } from './models.ts';
 import { getSettings } from './settings.ts';
 import type { SubscriptionManager } from './subscriptions.ts';
 
@@ -37,6 +38,20 @@ interface RunRow {
   created_at: string;
   ended_at: string | null;
   exit_code: number | null;
+  extra_args: string | null;
+  version: string | null;
+  model: string | null;
+  auto_compact: number | null;
+  auto_compact_tokens: number | null;
+}
+
+/** A respawn waiting for the session to finish its turn. */
+interface PendingRespawn {
+  /** subscription to come back on; equal to the current one for a plain restart */
+  target: string;
+  reason: string;
+  continueAfter: boolean;
+  kind: 'swap' | 'restart';
 }
 
 const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
@@ -46,24 +61,54 @@ const LIMIT_DEBOUNCE_MS = 90_000;
 
 const httpError = (status: number, message: string): Error => Object.assign(new Error(message), { status });
 
+function parseArgs(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const v: unknown = JSON.parse(json);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Arguments Switchboard owns. Letting a session override them would break the thing that makes it
+ * a *hosted* session: identity, coordination and the ability to resume it elsewhere.
+ */
+const RESERVED_ARGS = new Set(['--session-id', '--resume', '-r', '--continue', '-c', '--mcp-config', '--settings', '--worktree', '-w', '--from-pr', '--teleport']);
+
+export function rejectReservedArgs(args: string[]): void {
+  const bad = args.filter((a) => RESERVED_ARGS.has(a.split('=')[0]));
+  if (bad.length) {
+    throw httpError(
+      400,
+      `Switchboard manages ${[...new Set(bad)].join(', ')} for hosted sessions. Use the session and worktree fields instead of passing them as arguments.`,
+    );
+  }
+}
+
 export class RunManager {
   private readonly db: Db;
   private readonly bus: Bus;
   private readonly subs: SubscriptionManager;
   private readonly coord: Coordinator;
   private readonly launcher: Launcher;
+  private readonly models: ModelCatalog;
   private readonly conns = new Map<string, WebSocket>();
   private readonly mirrors = new Map<string, TermMirror>();
-  private readonly pendingSwap = new Map<string, { target: string; reason: string; continueAfter: boolean }>();
+  private readonly pendingRespawn = new Map<string, PendingRespawn>();
+  /** Set by the daemon once the updater knows which claude version is installed. */
+  versionProvider: () => string | null = () => null;
   private readonly pendingContinue = new Map<string, { text: string; timer: NodeJS.Timeout }>();
   private readonly lastLimit = new Map<string, number>();
 
-  constructor(db: Db, bus: Bus, subs: SubscriptionManager, coord: Coordinator, launcher: Launcher) {
+  constructor(db: Db, bus: Bus, subs: SubscriptionManager, coord: Coordinator, launcher: Launcher, models: ModelCatalog) {
     this.db = db;
     this.bus = bus;
     this.subs = subs;
     this.coord = coord;
     this.launcher = launcher;
+    this.models = models;
   }
 
   start(): void {
@@ -95,7 +140,7 @@ export class RunManager {
       r.id,
     );
     const lastSwap: Swap | null = swap ? { fromSubscriptionId: swap.from_sub, toSubscriptionId: swap.to_sub, reason: swap.reason, ts: swap.ts } : null;
-    const status: RunStatus = this.pendingSwap.has(r.id) && r.status === 'running' ? 'swapping' : r.status;
+    const status: RunStatus = this.pendingRespawn.has(r.id) && r.status === 'running' ? 'swapping' : r.status;
     return {
       id: r.id,
       name: r.name,
@@ -109,6 +154,11 @@ export class RunManager {
       autoSwap: bool(r.auto_swap),
       swapCount: r.swap_count,
       lastSwap,
+      args: parseArgs(r.extra_args),
+      version: r.version,
+      model: r.model,
+      autoCompact: r.auto_compact === null ? getSettings(this.db).defaultAutoCompact : bool(r.auto_compact),
+      autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
       pid: r.pid,
       cols: r.cols,
       rows: r.rows,
@@ -143,7 +193,18 @@ export class RunManager {
     return sub.id;
   }
 
-  private insertRun(spec: { cwd: string; subscriptionId: string; name?: string; worktree?: string; resumeSessionId?: string; autoSwap?: boolean }): RunRow {
+  private insertRun(spec: {
+    cwd: string;
+    subscriptionId: string;
+    name?: string;
+    worktree?: string;
+    resumeSessionId?: string;
+    autoSwap?: boolean;
+    args?: string[];
+    model?: string | null;
+    autoCompact?: boolean;
+    autoCompactTokens?: number;
+  }): RunRow {
     const cwd = path.resolve(spec.cwd);
     let isDir = false;
     try {
@@ -153,12 +214,19 @@ export class RunManager {
     }
     if (!isDir) throw httpError(400, `Directory not found: ${cwd}`);
     if (spec.resumeSessionId && this.bySession(spec.resumeSessionId)) throw httpError(409, 'That session is already running in Switchboard.');
+    const extraArgs = (spec.args ?? []).filter((a) => a.trim() !== '');
+    rejectReservedArgs(extraArgs);
+    const settings = getSettings(this.db);
+    const model = spec.model === undefined ? settings.defaultModel : spec.model;
+    if (model) this.models.validate(model);
+    const autoCompact = spec.autoCompact ?? settings.defaultAutoCompact;
+    const autoCompactTokens = Math.min(990_000, Math.max(20_000, Math.round(spec.autoCompactTokens ?? settings.defaultAutoCompactTokens)));
     const subscriptionId = this.resolveSubscription(spec.subscriptionId);
     const id = crypto.randomBytes(4).toString('hex');
     const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
     this.db.run(
-      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       name.slice(0, 80),
       cwd,
@@ -168,6 +236,10 @@ export class RunManager {
       spec.autoSwap === false ? 0 : 1,
       spec.worktree?.trim() || null,
       spec.resumeSessionId ? 1 : 0,
+      extraArgs.length ? JSON.stringify(extraArgs) : null,
+      model,
+      autoCompact ? 1 : 0,
+      autoCompactTokens,
       now(),
     );
     this.subs.syncProfile(subscriptionId);
@@ -194,12 +266,19 @@ export class RunManager {
       args.push('--mcp-config', file);
     }
     args.push('--dangerously-load-development-channels', 'server:switchboard');
-    if (!hooksInstalledIn(path.join(sub.config_dir, 'settings.json'))) {
-      args.push('--settings', writeRuntimeJson(`settings-${r.id}.json`, { hooks: hooksConfig() }));
-    }
+    // Auto-compact is a setting, not a flag, so it rides in the per-run settings file next to the
+    // hooks (which are only needed when the profile does not already carry them).
+    const runSettings: Record<string, unknown> = {
+      autoCompactEnabled: this.dto(r).autoCompact,
+      autoCompactWindow: this.dto(r).autoCompactTokens,
+    };
+    if (!hooksInstalledIn(path.join(sub.config_dir, 'settings.json'))) runSettings.hooks = hooksConfig();
+    args.push('--settings', writeRuntimeJson(`settings-${r.id}.json`, runSettings));
+    if (r.model) args.push('--model', r.model);
     if (!resume && r.worktree) args.push('--worktree', r.worktree);
     if (!resume) args.push('--name', r.name);
-    args.push(...getSettings(this.db).claudeArgs);
+    // Global settings first, then this session's own arguments, so a session can override.
+    args.push(...getSettings(this.db).claudeArgs, ...parseArgs(r.extra_args));
     const cmd = claudeCommand(claude, args);
     return {
       runId: r.id,
@@ -300,7 +379,14 @@ export class RunManager {
     if (!r) return;
     switch (msg.type) {
       case 'spawned':
-        this.db.run('UPDATE runs SET pid = ?, cols = ?, rows = ?, ended_at = NULL, exit_code = NULL WHERE id = ?', msg.pid, msg.cols, msg.rows, runId);
+        this.db.run(
+          'UPDATE runs SET pid = ?, cols = ?, rows = ?, version = ?, ended_at = NULL, exit_code = NULL WHERE id = ?',
+          msg.pid,
+          msg.cols,
+          msg.rows,
+          this.versionProvider(),
+          runId,
+        );
         this.mirror(r, msg.cols, msg.rows);
         this.setStatus(runId, 'running');
         break;
@@ -316,7 +402,7 @@ export class RunManager {
         this.db.run('UPDATE runs SET ended_at = ?, exit_code = ? WHERE id = ?', now(), msg.code, runId);
         this.setStatus(runId, 'exited');
         this.coord.markOffline(r.session_id, 'session exited');
-        this.pendingSwap.delete(runId);
+        this.pendingRespawn.delete(runId);
         break;
       case 'limit-detected':
         this.onLimit(r.session_id, msg.text, 'pty');
@@ -357,36 +443,81 @@ export class RunManager {
   // ----------------------------------------------------------------- swap
 
   swap(runId: string, targetRef: string, reason: string, opts: { force?: boolean; continueAfter?: boolean } = {}): Run {
+    const r = this.liveRun(runId);
+    const target = this.resolveSubscription(targetRef, r.subscription_id);
+    if (target === r.subscription_id) throw httpError(400, 'Session already runs on that subscription');
+    return this.respawn(r, { target, reason, continueAfter: opts.continueAfter ?? false, kind: 'swap' }, opts.force ?? false);
+  }
+
+  /** Restart a session on the same subscription, e.g. to pick up a new claude build. */
+  restart(runId: string, reason: string, force = false): Run {
+    const r = this.liveRun(runId);
+    return this.respawn(r, { target: r.subscription_id, reason, continueAfter: false, kind: 'restart' }, force);
+  }
+
+  /** Queue every live session for a restart; each one waits until its turn finishes. */
+  restartAll(reason: string): number {
+    let queued = 0;
+    for (const r of this.db.all<RunRow>(`SELECT * FROM runs WHERE status IN ('running', 'starting', 'swapping')`)) {
+      if (!this.conns.has(r.id)) continue;
+      try {
+        this.restart(r.id, reason);
+        queued++;
+      } catch (err) {
+        log.warn('could not queue restart', { run: r.id, error: err instanceof Error ? err.message : err });
+      }
+    }
+    return queued;
+  }
+
+  pendingRestartCount(): number {
+    let n = 0;
+    for (const p of this.pendingRespawn.values()) if (p.kind === 'restart') n++;
+    return n;
+  }
+
+  private liveRun(runId: string): RunRow {
     const r = this.row(runId);
     if (!r) throw httpError(404, 'Unknown run');
     if (r.status === 'exited') throw httpError(409, 'Session has exited');
     if (!this.conns.has(runId)) throw httpError(409, 'The runner for this session is not connected');
-    const target = this.resolveSubscription(targetRef, r.subscription_id);
-    if (target === r.subscription_id) throw httpError(400, 'Session already runs on that subscription');
-    const agent = this.coord.agent(r.session_id);
-    if (!opts.force && agent?.status === 'working') {
-      this.pendingSwap.set(runId, { target, reason, continueAfter: opts.continueAfter ?? false });
-      this.bus.toast('info', `${r.name}: will switch to ${this.subs.row(target)?.label} when the current turn ends`);
+    return r;
+  }
+
+  /** Defer until the agent is idle unless forced, so a respawn never interrupts a turn. */
+  private respawn(r: RunRow, plan: PendingRespawn, force: boolean): Run {
+    if (!force && this.coord.agent(r.session_id)?.status === 'working') {
+      this.pendingRespawn.set(r.id, plan);
+      const what = plan.kind === 'swap' ? `switch to ${this.subs.row(plan.target)?.label}` : `restart (${plan.reason})`;
+      this.bus.toast('info', `${r.name}: will ${what} when the current turn ends`);
       this.bus.invalidate('state');
       return this.dto(r);
     }
-    this.executeSwap(r, target, reason, opts.continueAfter ?? false);
-    return this.dto(this.row(runId)!);
+    this.executeRespawn(r, plan);
+    return this.dto(this.row(r.id)!);
   }
 
-  private executeSwap(r: RunRow, target: string, reason: string, continueAfter: boolean): void {
-    this.pendingSwap.delete(r.id);
-    this.subs.syncProfile(target);
+  private executeRespawn(r: RunRow, plan: PendingRespawn): void {
+    const { target, reason, continueAfter, kind } = plan;
+    this.pendingRespawn.delete(r.id);
     const from = r.subscription_id;
-    this.subs.propagateTrust(from, target, r.last_cwd ?? r.cwd);
-    this.db.run('INSERT INTO swaps (run_id, from_sub, to_sub, reason, ts) VALUES (?, ?, ?, ?, ?)', r.id, from, target, reason, now());
-    this.db.run('UPDATE runs SET subscription_id = ?, swap_count = swap_count + 1, resume = 1 WHERE id = ?', target, r.id);
-    this.coord.setSubscription(r.session_id, target);
+    let banner: string;
+    if (kind === 'swap') {
+      this.subs.syncProfile(target);
+      this.subs.propagateTrust(from, target, r.last_cwd ?? r.cwd);
+      this.db.run('INSERT INTO swaps (run_id, from_sub, to_sub, reason, ts) VALUES (?, ?, ?, ?, ?)', r.id, from, target, reason, now());
+      this.db.run('UPDATE runs SET subscription_id = ?, swap_count = swap_count + 1, resume = 1 WHERE id = ?', target, r.id);
+      this.coord.setSubscription(r.session_id, target);
+      const fromLabel = this.subs.row(from)?.label ?? from;
+      const toLabel = this.subs.row(target)?.label ?? target;
+      banner = `\x1b[1;36m[switchboard]\x1b[0m ${fromLabel} → \x1b[1m${toLabel}\x1b[0m (${reason}). Resuming session…\r\n`;
+    } else {
+      this.db.run('UPDATE runs SET resume = 1 WHERE id = ?', r.id);
+      banner = `\x1b[1;36m[switchboard]\x1b[0m Restarting on \x1b[1m${reason}\x1b[0m. Resuming session…\r\n`;
+    }
     this.setStatus(r.id, 'swapping');
     const updated = this.row(r.id)!;
     const spec = this.buildSpec(updated, target, true);
-    const fromLabel = this.subs.row(from)?.label ?? from;
-    const banner = `\x1b[1;36m[switchboard]\x1b[0m ${fromLabel} → \x1b[1m${spec.subscriptionLabel}\x1b[0m (${reason}). Resuming session…\r\n`;
     this.mirrors.get(r.id)?.reset();
     this.send(r.id, { type: 'swap', spec, banner });
     if (continueAfter) {
@@ -399,9 +530,10 @@ export class RunManager {
         this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.giveUpContinue(r.id), CONTINUE_FALLBACK_MS) });
       }
     }
-    if (r.repo_id) this.coord.event(r.repo_id, r.session_id, 'swap', `${r.name}: ${fromLabel} → ${spec.subscriptionLabel} (${reason})`);
-    this.bus.toast('info', `${r.name}: switched to ${spec.subscriptionLabel} (${reason})`);
-    log.info('swap', { run: r.id, from, to: target, reason });
+    const what = kind === 'swap' ? `switched to ${spec.subscriptionLabel}` : 'restarted';
+    if (r.repo_id) this.coord.event(r.repo_id, r.session_id, kind, `${r.name}: ${what} (${reason})`);
+    this.bus.toast('info', `${r.name}: ${what} (${reason})`);
+    log.info(kind, { run: r.id, session: r.session_id, from, to: target, reason });
   }
 
   private typeContinue(runId: string): void {
@@ -471,12 +603,13 @@ export class RunManager {
   onIdle(sessionId: string): void {
     const r = this.bySession(sessionId);
     if (!r) return;
-    const pending = this.pendingSwap.get(r.id);
+    const pending = this.pendingRespawn.get(r.id);
     if (pending) {
       try {
-        this.executeSwap(r, pending.target, pending.reason, pending.continueAfter);
+        this.executeRespawn(r, pending);
       } catch (err) {
-        this.bus.toast('error', `Swap of ${r.name} failed: ${err instanceof Error ? err.message : err}`);
+        this.pendingRespawn.delete(r.id);
+        this.bus.toast('error', `${pending.kind} of ${r.name} failed: ${err instanceof Error ? err.message : err}`);
       }
       return;
     }
@@ -527,7 +660,7 @@ export class RunManager {
     const used = Math.max(sub.usage.fiveHour?.pct ?? 0, sub.usage.sevenDay?.pct ?? 0);
     if (used < settings.swapThresholdPct) return;
     for (const r of runs) {
-      if (!bool(r.auto_swap) || this.pendingSwap.has(r.id)) continue;
+      if (!bool(r.auto_swap) || this.pendingRespawn.has(r.id)) continue;
       if (this.coord.agent(r.session_id)?.status !== 'idle') continue;
       try {
         this.swap(r.id, 'auto', `${sub.label} at ${Math.round(used)}%`);

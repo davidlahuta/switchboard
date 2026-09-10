@@ -13,6 +13,10 @@ Usage:
   switchboard mcp                    Stdio MCP server (spawned by Claude Code)
   switchboard install                Register the MCP server + hooks globally for all sessions
   switchboard uninstall              Remove the global registration
+  switchboard service install        Start the daemon automatically at logon (Windows)
+      --delay <seconds>              Wait this long after logon (default 20)
+  switchboard service uninstall      Remove the automatic start
+  switchboard service status         Show the scheduled task and whether the daemon answers
   switchboard status                 Print a short summary from the running daemon
 `;
 
@@ -115,6 +119,29 @@ async function main(): Promise<void> {
     case 'uninstall': {
       const s = await (await import('./daemon/integration.ts')).uninstallIntegration();
       console.log(`MCP server: ${s.mcpInstalled ? 'still registered' : 'removed'} · hooks: ${s.hooksInstalled ? 'still present' : 'removed'}`);
+      return;
+    }
+    case 'service': {
+      const svc = await import('./daemon/service.ts');
+      const sub = rest.find((a) => !a.startsWith('--')) ?? 'status';
+      if (sub === 'install') {
+        const s = await svc.installService(Number(str(f.delay) ?? 20));
+        await svc.startService();
+        console.log(`Scheduled task "${svc.TASK_NAME}" installed and started.`);
+        console.log(`Log: ${s.logPath}`);
+        console.log('Note: it starts at logon, because opening terminal tabs needs an interactive desktop.');
+        return;
+      }
+      if (sub === 'uninstall') {
+        await svc.uninstallService();
+        console.log('Automatic start removed.');
+        return;
+      }
+      const s = await svc.serviceStatus();
+      console.log(`installed: ${s.installed}${s.state ? ` (${s.state})` : ''}`);
+      console.log(`daemon responding: ${s.running}`);
+      if (s.lastRunTime) console.log(`last run: ${s.lastRunTime} (result ${s.lastResult})`);
+      console.log(`log: ${s.logPath}`);
       return;
     }
     case 'status':

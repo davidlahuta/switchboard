@@ -90,6 +90,11 @@ you can:
 - Open it in the browser and keep working.
 - Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default).
 
+Each session can override the model (1M-context models only, listed live from the API rather than
+hardcoded), auto-compact and its threshold, and pass extra `claude` arguments. Switchboard refuses
+arguments it manages itself (`--session-id`, `--resume`, `--settings`, …) so a session stays
+resumable and coordinated.
+
 You can also start a hosted session from any terminal:
 
 ```powershell
@@ -108,6 +113,31 @@ node src/cli.ts install     # or Settings → Claude Code integration → Instal
 This registers the `switchboard` MCP server at user scope and adds HTTP hooks to
 `~/.claude/settings.json`. `uninstall` removes both. Sessions you start yourself get messages via
 hooks and tools. Only hosted sessions receive real-time pushes, because channels need a start-up flag.
+
+## Always on
+
+Switchboard is meant to be running whenever the desk is. Register it with Task Scheduler:
+
+```powershell
+node src/cli.ts service install     # or Settings → Automatic start
+```
+
+This runs a small supervisor that keeps the daemon alive, restarting it within ~10 seconds if it
+ever exits, with output appended to `%LOCALAPPDATA%\switchboard\daemon.log`. `service status`
+reports the task state and whether the daemon answers; `service uninstall` removes it.
+
+It is a **logon** task rather than a startup one: opening terminal tabs needs an interactive
+desktop, which a session-0 service does not have. After an unattended reboot — Windows Update, a
+power cut — the daemon comes back as soon as the desk signs in. If you want that to happen without
+touching the machine, turn on *Settings → Accounts → Sign-in options → Use my sign-in info to
+automatically finish setting up after an update*, and set the BIOS to power on after AC loss.
+
+## Claude Code updates
+
+Switchboard can keep `claude` current itself (Settings → Claude Code version). It runs
+`claude update` on a schedule, and when the version changes it restarts hosted sessions onto the
+new build by resuming the same session GUID — each one waits until its agent is idle, so no turn
+is interrupted.
 
 ## Remote access (phone)
 

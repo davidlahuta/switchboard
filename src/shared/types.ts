@@ -20,6 +20,10 @@ export interface Usage {
   source: 'oauth' | 'statusline';
   stale: boolean;
   error: string | null;
+  /** Why the numbers are stale, so the UI can say "rate limited" rather than a generic failure */
+  errorKind: 'rate_limited' | 'auth' | 'network' | 'token' | null;
+  /** When polling resumes, while rate limited */
+  retryAt: string | null;
 }
 
 export interface Subscription {
@@ -194,6 +198,13 @@ export interface Run {
   autoSwap: boolean;
   swapCount: number;
   lastSwap: Swap | null;
+  /** per-session extra claude arguments */
+  args: string[];
+  model: string | null;
+  autoCompact: boolean;
+  autoCompactTokens: number;
+  /** claude version this session is currently running on, when known */
+  version: string | null;
   pid: number | null;
   cols: number;
   rows: number;
@@ -202,7 +213,50 @@ export interface Run {
   exitCode: number | null;
 }
 
+/** Whether the daemon is registered to start automatically (Windows Task Scheduler). */
+export interface ServiceStatus {
+  /** false on platforms where automatic start is not implemented */
+  supported: boolean;
+  installed: boolean;
+  /** Task Scheduler state, e.g. Ready / Running / Disabled */
+  state: string | null;
+  lastRunTime: string | null;
+  lastResult: string | null;
+  /** the daemon answered /healthz just now */
+  running: boolean;
+  logPath: string;
+}
+
+export interface Model {
+  id: string;
+  displayName: string;
+  maxInputTokens: number;
+  maxOutputTokens: number | null;
+}
+
+export interface UpdateStatus {
+  /** Version of the claude executable as of the last check */
+  currentVersion: string | null;
+  lastCheckAt: string | null;
+  /** Most recent version change Switchboard observed */
+  lastUpdate: { from: string; to: string; at: string } | null;
+  /** A check is running right now */
+  checking: boolean;
+  lastError: string | null;
+  /** Runs waiting to restart onto the new version (they restart when idle) */
+  pendingRestarts: number;
+}
+
 export interface Settings {
+  /** Periodically run `claude update` */
+  autoUpdate: boolean;
+  updateCheckHours: number;
+  /** After an update lands, restart sessions so they run the new version */
+  restartAfterUpdate: boolean;
+  /** Defaults pre-filled into the new-session dialog */
+  defaultModel: string | null;
+  defaultAutoCompact: boolean;
+  defaultAutoCompactTokens: number;
   /** Swap automatically when a session hits a usage limit */
   autoSwap: boolean;
   /** Swap idle sessions proactively once their subscription crosses swapThresholdPct */
@@ -251,6 +305,9 @@ export interface StateSnapshot {
   runs: Run[];
   settings: Settings;
   totals: Totals;
+  update: UpdateStatus;
+  /** Models offered when starting a session (1M-context only), from the API */
+  models: Model[];
 }
 
 export interface RepoDetail {
@@ -273,9 +330,16 @@ export interface CreateRunRequest {
   name?: string;
   /** create a new git worktree with this name (claude --worktree) */
   worktree?: string;
-  /** resume an existing Claude session id */
+  /** resume an existing Claude session id (a GUID; sessions are never addressed by name) */
   resumeSessionId?: string;
   autoSwap?: boolean;
+  /** extra arguments appended to the claude command line for this session only */
+  args?: string[];
+  /** model id from the catalog; omit to use the Claude Code default */
+  model?: string | null;
+  autoCompact?: boolean;
+  /** context tokens at which auto-compact triggers */
+  autoCompactTokens?: number;
 }
 
 export interface SwapRequest {

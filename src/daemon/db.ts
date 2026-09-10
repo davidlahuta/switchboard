@@ -173,6 +173,15 @@ const MIGRATIONS: string[] = [
     revoked_at TEXT
   );
   `,
+  `
+  ALTER TABLE runs ADD COLUMN extra_args TEXT;
+  ALTER TABLE runs ADD COLUMN version TEXT;
+  `,
+  `
+  ALTER TABLE runs ADD COLUMN model TEXT;
+  ALTER TABLE runs ADD COLUMN auto_compact INTEGER;
+  ALTER TABLE runs ADD COLUMN auto_compact_tokens INTEGER;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

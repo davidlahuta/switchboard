@@ -63,9 +63,28 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | GET    | `/api/runs`              |                    | `Run[]` |
 | POST   | `/api/runs`              | `CreateRunRequest` – opens a Windows Terminal tab | `Run` |
 | POST   | `/api/runs/:id/swap`     | `SwapRequest`      | `Run`   |
+| POST   | `/api/runs/:id/restart`  | `{ force? }` – same subscription, resumes the same session GUID | `Run` |
 | POST   | `/api/runs/:id/stop`     |                    | `{ ok }`|
 | DELETE | `/api/runs/:id`          | forget an exited run | `{ ok }` |
 | GET    | `/api/sessions/recent?cwd=` | recent Claude sessions for a directory (for "resume") | `{ id, title, mtime }[]` |
+
+## Claude Code version and models
+
+| Method | Path                            | Returns                                              |
+|--------|---------------------------------|------------------------------------------------------|
+| GET    | `/api/update`                   | `UpdateStatus`                                       |
+| POST   | `/api/update/check`             | runs `claude update` now → `UpdateStatus`            |
+| POST   | `/api/update/restart-sessions`  | `{ queued }` – restart live sessions when idle       |
+| GET    | `/api/models`                   | `Model[]` – 1M-context models, cached 6 h            |
+| POST   | `/api/models/refresh`           | `Model[]` – refetch now                              |
+
+## Automatic start (local only)
+
+| Method | Path                       | Body / returns                          |
+|--------|----------------------------|-----------------------------------------|
+| GET    | `/api/service`             | `ServiceStatus`                         |
+| POST   | `/api/service/install`     | `{ delaySeconds? }` → `ServiceStatus`   |
+| POST   | `/api/service/uninstall`   | `ServiceStatus`                         |
 
 ## WebSockets
 

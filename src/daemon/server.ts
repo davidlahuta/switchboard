@@ -14,9 +14,12 @@ import type { Db } from './db.ts';
 import { createHookHandler } from './hooks.ts';
 import { installIntegration, integrationStatus, uninstallIntegration } from './integration.ts';
 import type { Launcher } from './launcher.ts';
+import type { ModelCatalog } from './models.ts';
 import type { RunManager } from './runs.ts';
+import { installService, serviceStatus, startService, uninstallService } from './service.ts';
 import { getSettings, updateSettings } from './settings.ts';
 import type { SubscriptionManager } from './subscriptions.ts';
+import type { Updater } from './updater.ts';
 
 const log = logger('http');
 
@@ -29,6 +32,8 @@ export interface Services {
   auth: Auth;
   launcher: Launcher;
   hub: AgentHub;
+  updater: Updater;
+  models: ModelCatalog;
 }
 
 type Body = Record<string, any>;
@@ -116,6 +121,8 @@ export function createServer(s: Services): http.Server {
       runs: s.runs.list(),
       settings: getSettings(s.db),
       totals,
+      update: s.updater.status(),
+      models: s.models.list(),
     };
   };
 
@@ -214,14 +221,39 @@ export function createServer(s: Services): http.Server {
       worktree: typeof body.worktree === 'string' ? body.worktree : undefined,
       resumeSessionId: typeof body.resumeSessionId === 'string' && body.resumeSessionId ? body.resumeSessionId : undefined,
       autoSwap: body.autoSwap !== false,
+      args: Array.isArray(body.args) ? body.args.filter((a: unknown): a is string => typeof a === 'string') : undefined,
     });
   });
   route('POST', '/api/runs/:id/swap', ({ params, body }) =>
     s.runs.swap(params[0], typeof body.subscriptionId === 'string' ? body.subscriptionId : 'auto', 'manual switch', { force: body.force === true }),
   );
+  route('POST', '/api/runs/:id/restart', ({ params, body }) => s.runs.restart(params[0], 'manual restart', body.force === true));
   route('POST', '/api/runs/:id/stop', ({ params }) => (s.runs.stop(params[0]), { ok: true }));
   route('DELETE', '/api/runs/:id', ({ params }) => (s.runs.forget(params[0]), { ok: true }));
   route('GET', '/api/sessions/recent', ({ url }) => s.runs.recentSessions(url.searchParams.get('cwd') ?? fail(400, 'cwd is required')));
+
+  // automatic start (desk only: it registers a task for the logged-in user)
+  route('GET', '/api/service', () => serviceStatus(), 'local');
+  route('POST', '/api/service/install', async ({ body }) => {
+    const s = await installService(typeof body.delaySeconds === 'number' ? body.delaySeconds : 20);
+    await startService();
+    s.installed = true;
+    return s;
+  }, 'local');
+  route('POST', '/api/service/uninstall', () => uninstallService(), 'local');
+
+  // claude version
+  route('GET', '/api/update', () => s.updater.status());
+  route('POST', '/api/update/check', () => s.updater.check(true));
+  route('POST', '/api/update/restart-sessions', () => ({ queued: s.runs.restartAll(`claude ${s.updater.currentVersion ?? 'latest'}`) }));
+
+  // models
+  route('GET', '/api/models', () => s.models.list());
+  route('POST', '/api/models/refresh', async () => {
+    const m = await s.models.refresh();
+    s.bus.invalidate('state');
+    return m;
+  });
 
   // hooks (Claude Code → daemon, desk only)
   route(
