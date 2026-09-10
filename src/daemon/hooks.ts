@@ -33,7 +33,13 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
     const runId = runHeader && !runHeader.startsWith('$') ? runHeader : null;
     if (runId) runs.rebind(runId, sid);
 
-    if (!coord.agent(sid)) {
+    /*
+     * A session we have never heard of that is telling us it has ended has nothing to join. Claude
+     * Code runs for reasons that are not conversations — a version check, an auth probe, an update —
+     * and those fire a lone SessionEnd; registering on it put a row on the board for a session that
+     * never existed, in whatever directory the process happened to start in.
+     */
+    if (!coord.agent(sid) && event !== 'SessionEnd') {
       if (!cwd) return {};
       const run = runId ? runs.row(runId) : runs.bySession(sid);
       await coord.registerAgent({

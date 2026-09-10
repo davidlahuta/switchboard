@@ -25,6 +25,14 @@ const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), '.local
 export const DATA_DIR = process.env.SWITCHBOARD_DATA_DIR ?? path.join(localAppData, 'switchboard');
 export const PROFILES_DIR = path.join(DATA_DIR, 'profiles');
 export const RUNTIME_DIR = path.join(DATA_DIR, 'runtime');
+/*
+ * Where a `claude` we run for our own purposes — a version check, an auth probe, an update — is
+ * started. Left alone such a process inherits the daemon's own working directory, and the daemon is
+ * launched from a logon task with no working directory set, which on Windows means C:\Windows\System32.
+ * Claude Code then reports that as its cwd, and a session that only ever fires one SessionEnd hook
+ * registers itself on the board as an agent in a repository called System32.
+ */
+export const SPAWN_CWD = DATA_DIR;
 export const DB_PATH = path.join(DATA_DIR, 'switchboard.db');
 
 /** The user's regular Claude Code config dir: the "default" subscription and the shared source. */

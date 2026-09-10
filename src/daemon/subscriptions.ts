@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, IS_WINDOWS, PROFILES_DIR, VERSION } from '../config.ts';
+import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, IS_WINDOWS, PROFILES_DIR, SPAWN_CWD, VERSION } from '../config.ts';
 import { logger } from '../log.ts';
 import type { Subscription, SubscriptionKind, SubscriptionStatus, Usage, UsagePoint } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
@@ -512,7 +512,7 @@ export class SubscriptionManager {
       if (r.kind === 'default') delete env.CLAUDE_CONFIG_DIR;
       else env.CLAUDE_CONFIG_DIR = r.config_dir;
       const cmd = claudeCommand(claude, ['auth', 'status', '--json']);
-      await execFileP(cmd.file, cmd.args, { env, timeout: 30_000, windowsHide: true });
+      await execFileP(cmd.file, cmd.args, { cwd: SPAWN_CWD, env, timeout: 30_000, windowsHide: true });
     } catch (err) {
       log.debug('auth status failed', err instanceof Error ? err.message : err);
     }
