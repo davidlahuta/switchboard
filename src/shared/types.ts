@@ -226,6 +226,8 @@ export interface Run {
   skipPermissions: boolean;
   /** told to carry on when it comes back, resolved against the global setting */
   continueOnResume: boolean;
+  /** a swap or restart holding off until this session's turn ends */
+  waiting: WaitingRespawn | null;
   /** claude version this session is currently running on, when known */
   version: string | null;
   /**
@@ -421,6 +423,16 @@ export interface CreateRunRequest {
 }
 
 /** Fields the operator can change on an existing session. */
+/** A respawn queued behind a turn that is still running. */
+export interface WaitingRespawn {
+  kind: 'swap' | 'restart';
+  reason: string;
+  /** ISO timestamp it was queued */
+  since: string;
+  /** ISO timestamp it happens regardless, or null to wait for the turn however long it takes */
+  deadline: string | null;
+}
+
 export interface UpdateRunRequest {
   /**
    * Session name. Switchboard and Claude Code keep one name between them: this is pushed into the

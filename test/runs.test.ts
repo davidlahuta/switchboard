@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
+import { limitSwapPlan, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, weightFor } from '../src/daemon/subscriptions.ts';
 import type { Usage } from '../src/shared/types.ts';
@@ -33,6 +33,25 @@ describe('when a session may be swapped', () => {
     assert.ok(!safeToRespawn('starting'));
     // An hour-long turn with no tool calls looks exactly like this once the sweep gives up on it.
     assert.ok(!safeToRespawn('offline'));
+  });
+});
+
+describe('moving a session off a spent subscription', () => {
+  it('goes at once when the limit already ended the turn', () => {
+    // StopFailure means claude stopped: there is no turn left to protect.
+    const plan = limitSwapPlan('hook');
+    assert.equal(plan.force, true);
+    assert.equal(plan.deadline, null);
+  });
+
+  it('waits out the turn when the limit was only seen in the output', () => {
+    // A subagent may have hit the limit while the parent works on, so the turn is still worth
+    // something; it is given a bounded grace rather than being killed on the strength of some text.
+    const now = Date.parse('2026-01-01T00:00:00Z');
+    const plan = limitSwapPlan('pty', now);
+    assert.equal(plan.force, false);
+    assert.ok(plan.deadline! > now, 'queued behind the turn');
+    assert.ok(plan.deadline! - now <= 5 * 60_000, 'but not indefinitely: the subscription is spent');
   });
 });
 

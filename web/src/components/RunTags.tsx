@@ -21,9 +21,22 @@ export function RunTags({
   const model = modelShort(run.model, models);
   const latest = update.currentVersion;
   const outdated = !!run.version && !!latest && run.version !== latest;
-  if (!model && !run.version && !run.skipPermissions && !run.staleRunner && !run.continueOnResume) return null;
+  if (!model && !run.version && !run.skipPermissions && !run.staleRunner && !run.continueOnResume && !run.waiting) return null;
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
+      {run.waiting && (
+        <Badge
+          tone="warn"
+          title={
+            `A ${run.waiting.kind} is queued (${run.waiting.reason}), waiting since ${new Date(run.waiting.since).toLocaleTimeString()} for this turn to end. ` +
+            (run.waiting.deadline
+              ? `It happens regardless at ${new Date(run.waiting.deadline).toLocaleTimeString()}.`
+              : 'It waits however long the turn takes.')
+          }
+        >
+          {run.waiting.kind} queued
+        </Badge>
+      )}
       {model && (
         <Badge tone="neutral" title={run.model ? `Model ${run.model}` : undefined}>
           {model}

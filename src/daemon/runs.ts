@@ -57,6 +57,12 @@ interface PendingRespawn {
   reason: string;
   continueAfter: boolean;
   kind: 'swap' | 'restart';
+  queuedAt: number;
+  /**
+   * When to stop waiting for the turn to end and take the session anyway, or null to wait however
+   * long the turn takes. Only a session that cannot make progress where it is gets a deadline.
+   */
+  deadline: number | null;
 }
 
 const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
@@ -80,6 +86,13 @@ const CONTINUE_FALLBACK_MS = 25_000;
 const INTERRUPTED_MESSAGE =
   'Your previous turn was cut short mid-way by Switchboard moving this session to another subscription. Anything still running at that moment, subagents included, was killed with it. Check what actually landed on disk before you trust the last part of the transcript, then carry on.';
 const LIMIT_DEBOUNCE_MS = 90_000;
+/**
+ * How long a session that has run into its subscription's limit is left alone before it is moved
+ * regardless. It cannot get much further where it is — the next call fails the same way — but a turn
+ * is rarely only API calls, and this is enough for a build, a test run or a subagent's last write to
+ * land on disk rather than being killed halfway.
+ */
+const LIMIT_GRACE_MS = 3 * 60_000;
 
 const httpError = (status: number, message: string): Error => Object.assign(new Error(message), { status });
 
@@ -101,6 +114,20 @@ const httpError = (status: number, message: string): Error => Object.assign(new 
  * A session with no agent record ran no hooks at all, so nothing here can speak for it: it swaps.
  * 'limited' has already lost its turn to the subscription, which is what the swap is there to fix.
  */
+/**
+ * How hard to insist on moving a session that has run into its subscription's limit.
+ *
+ * A rate limit reported through StopFailure has already ended the turn: there is nothing left to
+ * interrupt, so the session moves at once. The same limit noticed in the terminal's output says
+ * nothing about the turn — a subagent may have hit it while the parent carries on, or Claude Code
+ * may be between retries — and killing that costs whatever the turn had built up. So that one is
+ * queued behind the turn, with a deadline: the session cannot get far on a spent subscription, but
+ * its build, test run or half-written file is given time to land.
+ */
+export function limitSwapPlan(source: 'hook' | 'pty', now = Date.now()): { force: boolean; deadline: number | null } {
+  return source === 'hook' ? { force: true, deadline: null } : { force: false, deadline: now + LIMIT_GRACE_MS };
+}
+
 export function safeToRespawn(status: AgentStatus | undefined): boolean {
   return status === undefined || status === 'idle' || status === 'limited';
 }
@@ -171,6 +198,7 @@ export class RunManager {
     this.coord = coord;
     this.launcher = launcher;
     this.models = models;
+    this.loadPending();
   }
 
   start(): void {
@@ -212,7 +240,8 @@ export class RunManager {
       r.id,
     );
     const lastSwap: Swap | null = swap ? { fromSubscriptionId: swap.from_sub, toSubscriptionId: swap.to_sub, reason: swap.reason, ts: swap.ts } : null;
-    const status: RunStatus = this.pendingRespawn.has(r.id) && r.status === 'running' ? 'swapping' : r.status;
+    const waiting = this.pendingRespawn.get(r.id) ?? null;
+    const status: RunStatus = waiting && r.status === 'running' ? 'swapping' : r.status;
     const agent = this.coord.agent(r.session_id);
     return {
       id: r.id,
@@ -236,6 +265,14 @@ export class RunManager {
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
       skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
       continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
+      waiting: waiting
+        ? {
+            kind: waiting.kind,
+            reason: waiting.reason,
+            since: new Date(waiting.queuedAt).toISOString(),
+            deadline: waiting.deadline === null ? null : new Date(waiting.deadline).toISOString(),
+          }
+        : null,
       pid: r.pid,
       cols: r.cols,
       rows: r.rows,
@@ -307,6 +344,52 @@ export class RunManager {
    * Names go one way only here: a rename made in Switchboard is carried into the session by a hook
    * response, and consuming that pending push would lose it. See titleDecision.
    */
+  /**
+   * Take the sessions whose queued respawn has waited long enough. Everything else stays queued
+   * until its Stop hook says the turn is over, which is where onIdle picks it up.
+   */
+  drainPending(): void {
+    for (const [runId, plan] of [...this.pendingRespawn]) {
+      if (plan.deadline === null || Date.now() < plan.deadline) continue;
+      const r = this.row(runId);
+      if (!r || r.status === 'exited') {
+        this.pendingRespawn.delete(runId);
+        this.savePending(runId, null);
+        continue;
+      }
+      log.info('respawning on deadline', { run: runId, kind: plan.kind, waitedMs: Date.now() - plan.queuedAt });
+      try {
+        this.executeRespawn(r, plan);
+      } catch (err) {
+        this.pendingRespawn.delete(runId);
+        this.savePending(runId, null);
+        this.bus.toast('error', `${r.name}: ${plan.kind} failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
+
+  /**
+   * Keep a queued respawn across a daemon restart. An update that queued behind an hour-long turn
+   * would otherwise be forgotten in the gap, and the session would carry on for days on the build
+   * it was told to leave.
+   */
+  private savePending(runId: string, plan: PendingRespawn | null): void {
+    this.db.run('UPDATE runs SET pending_respawn = ? WHERE id = ?', plan ? JSON.stringify(plan) : null, runId);
+  }
+
+  private loadPending(): void {
+    for (const r of this.db.all<{ id: string; pending_respawn: string | null }>(
+      'SELECT id, pending_respawn FROM runs WHERE pending_respawn IS NOT NULL',
+    )) {
+      try {
+        this.pendingRespawn.set(r.id, JSON.parse(r.pending_respawn!) as PendingRespawn);
+      } catch {
+        this.savePending(r.id, null);
+      }
+    }
+    if (this.pendingRespawn.size) log.info('restored queued respawns', { count: this.pendingRespawn.size });
+  }
+
   pollSessions(): void {
     for (const r of this.db.all<RunRow>("SELECT * FROM runs WHERE status <> 'exited'")) {
       const titleFile = this.sessionFile(r, 'custom-title.json');
@@ -709,17 +792,22 @@ export class RunManager {
 
   // ----------------------------------------------------------------- swap
 
-  swap(runId: string, targetRef: string, reason: string, opts: { force?: boolean; continueAfter?: boolean } = {}): Run {
+  swap(runId: string, targetRef: string, reason: string, opts: { force?: boolean; continueAfter?: boolean; deadline?: number | null } = {}): Run {
     const r = this.liveRun(runId);
     const target = this.resolveSubscription(targetRef, r.subscription_id);
     if (target === r.subscription_id) throw httpError(400, 'Session already runs on that subscription');
-    return this.respawn(r, { target, reason, continueAfter: opts.continueAfter ?? false, kind: 'swap' }, opts.force ?? false);
+    return this.respawn(
+      r,
+      { target, reason, continueAfter: opts.continueAfter ?? false, kind: 'swap', queuedAt: Date.now(), deadline: opts.deadline ?? null },
+      opts.force ?? false,
+    );
   }
 
   /** Restart a session on the same subscription, e.g. to pick up a new claude build. */
   restart(runId: string, reason: string, force = false): Run {
     const r = this.liveRun(runId);
-    return this.respawn(r, { target: r.subscription_id, reason, continueAfter: false, kind: 'restart' }, force);
+    // An update can always wait: no deadline, however long the turn runs.
+    return this.respawn(r, { target: r.subscription_id, reason, continueAfter: false, kind: 'restart', queuedAt: Date.now(), deadline: null }, force);
   }
 
   /** Queue every live session for a restart; each one waits until its turn finishes. */
@@ -727,6 +815,9 @@ export class RunManager {
     let queued = 0;
     for (const r of this.db.all<RunRow>(`SELECT * FROM runs WHERE status IN ('running', 'starting', 'swapping')`)) {
       if (!this.conns.has(r.id)) continue;
+      // A session already on its way to another subscription will come back on the new build anyway;
+      // queueing a restart behind that swap would only take the turn twice.
+      if (this.pendingRespawn.has(r.id)) continue;
       try {
         this.restart(r.id, reason);
         queued++;
@@ -759,8 +850,10 @@ export class RunManager {
   private respawn(r: RunRow, plan: PendingRespawn, force: boolean): Run {
     if (!force && this.busy(r)) {
       this.pendingRespawn.set(r.id, plan);
+      this.savePending(r.id, plan);
       const what = plan.kind === 'swap' ? `switch to ${this.subs.row(plan.target)?.label}` : `restart (${plan.reason})`;
-      this.bus.toast('info', `${r.name}: will ${what} when the current turn ends`);
+      const patience = plan.deadline ? ` (at the latest in ${Math.round((plan.deadline - Date.now()) / 60_000)} min)` : '';
+      this.bus.toast('info', `${r.name}: will ${what} when the current turn ends${patience}`);
       this.bus.invalidate('state');
       return this.dto(r);
     }
@@ -773,6 +866,7 @@ export class RunManager {
     // Read before the kill, because after it the session comes back with no memory of being cut off.
     const interrupted = this.busy(r);
     this.pendingRespawn.delete(r.id);
+    this.savePending(r.id, null);
     const from = r.subscription_id;
     let banner: string;
     if (kind === 'swap') {
@@ -1019,8 +1113,18 @@ export class RunManager {
         this.bus.toast('warn', `${r.name} hit the usage limit on ${label}`);
         return;
       }
+      /*
+       * How hard to insist depends on what the turn is still worth.
+       *
+       * A rate limit reported through StopFailure has already ended the turn: there is nothing left
+       * to interrupt, so the session moves at once. The same limit noticed in the terminal's output
+       * says nothing about the turn — a subagent may have hit it while the parent carries on, or
+       * Claude Code may be between retries — and killing that costs whatever the turn had built up.
+       * So it is queued instead, with a deadline: the session cannot get far on a spent
+       * subscription, but its build, test run or half-written file is given time to land.
+       */
       try {
-        this.swap(r.id, 'auto', `usage limit on ${label}`, { force: true, continueAfter: true });
+        this.swap(r.id, 'auto', `usage limit on ${label}`, { ...limitSwapPlan(source), continueAfter: true });
       } catch (err) {
         this.bus.toast('error', `${r.name} hit the limit on ${label} and cannot switch: ${err instanceof Error ? err.message : err}`);
       }

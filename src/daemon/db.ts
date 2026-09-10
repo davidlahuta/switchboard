@@ -211,6 +211,11 @@ const MIGRATIONS: string[] = [
   -- like the other per-session overrides.
   ALTER TABLE runs ADD COLUMN continue_on_resume INTEGER;
   `,
+  `
+  -- A respawn waiting for the session's turn to end, as JSON, so it survives a daemon restart.
+  -- See RunManager.savePending.
+  ALTER TABLE runs ADD COLUMN pending_respawn TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

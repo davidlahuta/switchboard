@@ -45,7 +45,10 @@ export async function startDaemon(): Promise<void> {
   coord.prune();
   // /rename and /model inside a session write to disk at once and fire no hook, so an idle session
   // renamed or switched there would not show up here until someone typed something into it.
-  const titles = setInterval(() => runs.pollSessions(), 4000);
+  const titles = setInterval(() => {
+    runs.pollSessions();
+    runs.drainPending();
+  }, 4000);
 
   // One server per bound address: loopback for the desk's own hooks/shims/runners, plus any
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
