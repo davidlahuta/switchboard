@@ -31,7 +31,10 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
     const transcript = typeof p.transcript_path === 'string' ? p.transcript_path : null;
     if (!sid) return {};
     const runId = runHeader && !runHeader.startsWith('$') ? runHeader : null;
-    if (runId) runs.rebind(runId, sid);
+    // A session the run disowns — a resume that came up on a conversation of its own — gets nothing
+    // here: no board row under the run's name, no status, no messages meant for the session it
+    // failed to become. RunManager has already stopped it and said so.
+    if (runId && !runs.rebind(runId, sid)) return {};
 
     /*
      * A session we have never heard of that is telling us it has ended has nothing to join. Claude

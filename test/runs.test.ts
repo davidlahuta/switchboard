@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { attentionFor, limitSwapPlan, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
+import { attentionFor, limitSwapPlan, rebindDecision, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
 import { PTY_TERM, withoutParentSession } from '../src/config.ts';
@@ -86,6 +86,35 @@ describe('moving a session off a spent subscription', () => {
     assert.equal(plan.force, false);
     assert.ok(plan.deadline! > now, 'queued behind the turn');
     assert.ok(plan.deadline! - now <= 5 * 60_000, 'but not indefinitely: the subscription is spent');
+  });
+});
+
+describe('the session id a hosted process reports for itself', () => {
+  const OLD = '62bd299f-2de0-419b-a1c3-c01f0b0e3866';
+  const NEW = '20d0c5f4-3981-43f0-af5c-d9136e85dc95';
+
+  it('says nothing about the id the run already holds', () => {
+    assert.equal(rebindDecision(OLD, OLD, null), 'ignore');
+    assert.equal(rebindDecision(OLD, OLD, OLD), 'ignore', 'and that is the resume confirming itself');
+  });
+
+  it('follows a session that started a new conversation on its own', () => {
+    // /clear in a session nobody asked to resume: the run has to follow it or it points at nothing.
+    assert.equal(rebindDecision(OLD, NEW, null), 'adopt');
+  });
+
+  it('refuses the new conversation a failed resume comes up on', () => {
+    // Claude Code answers a transcript it cannot load with a new conversation rather than an exit.
+    // Adopting that id was how a day's work stopped being reachable while its transcript sat on
+    // disk untouched, so the run keeps the id it was sent to resume and the session is stopped.
+    assert.equal(rebindDecision(OLD, NEW, OLD), 'lost');
+  });
+
+  it('still follows a /clear once the resume has been confirmed', () => {
+    // The guard is dropped the moment the process reports the id it was asked for, so the session
+    // is free to change conversations afterwards the way any other session can.
+    assert.equal(rebindDecision(NEW, NEW, NEW), 'ignore');
+    assert.equal(rebindDecision(NEW, 'later-one', null), 'adopt');
   });
 });
 

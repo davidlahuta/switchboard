@@ -124,7 +124,9 @@ From there you can:
   terminal until you ask it to fit again.
 - **Relaunch** it in a new terminal. A restart in place reuses the window Switchboard opened, which
   hosts part of Switchboard itself, so it keeps running the code it started with; sessions in that
-  state are badged *old host*. A relaunch resumes the same session GUID, so nothing is lost.
+  state are badged *old host*. A relaunch resumes the same session GUID, so nothing is lost — and if
+  Claude Code cannot pick that conversation up, the session it starts instead is stopped rather than
+  allowed to take its place, leaving the run pointed at the conversation that is still on disk.
 
 The session list is ordered by activity — live sessions first, most recently active at the top —
 and can be filtered to one repository. Each row says when its session was last active.

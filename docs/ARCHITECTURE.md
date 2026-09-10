@@ -242,6 +242,16 @@ continue message is typed into it. That is armed when the process spawns rather 
 SessionStart hook: the hook does not arrive for every way a session comes back, and when it does it
 only serves to bring the wait forward.
 
+A resume is not taken on trust. Claude Code answers a transcript it finds but cannot load with a
+"Failed to resume session" line and then a **new** conversation carrying an id of its own — it does
+not exit. Following that id would overwrite the only pointer the run holds to the conversation it
+was resuming, which is how a day's work stopped being reachable from Switchboard while its
+transcript sat untouched on disk. So the id a `--resume` was sent to fetch is written to
+`runs.resuming` at the spawn and only cleared when the session reports having it; a session that
+reports anything else is stopped, kept off the board, and the run stays pointed at the conversation
+it asked for. The failure is a toast naming the `claude --resume <id>` that still works. See
+`rebindDecision`.
+
 **Swap** = wait until the agent is idle (or it just hit a limit) → kill claude → reset the terminal →
 respawn `claude --resume <same id>` in the session's last cwd with the new `CLAUDE_CONFIG_DIR` →
 when the `SessionStart(resume)` hook arrives, optionally type the continue message. The continue

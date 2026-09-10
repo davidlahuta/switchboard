@@ -34,6 +34,7 @@ interface RunRow {
   swap_count: number;
   worktree: string | null;
   resume: number;
+  resuming: string | null;
   pid: number | null;
   cols: number;
   rows: number;
@@ -166,6 +167,24 @@ export function titleDecision(name: string, shadow: string | null, reported: str
   if (title && title !== shadow) return { adopt: title };
   if (name === shadow) return {};
   return { push: name };
+}
+
+/**
+ * What to do with the session id a hosted process reports for itself.
+ *
+ * A session may legitimately change id under us — `/clear` starts a new conversation in the same
+ * terminal — and the run has to follow it, or Switchboard is holding a pointer to a conversation
+ * nobody is in. But a process that was launched with `--resume` has one right answer, and Claude
+ * Code does not always fail loudly when it cannot give it: a transcript it finds but cannot load
+ * gets a "Failed to resume session" line and then a brand-new conversation with an id of its own.
+ * Adopting that id overwrites the only pointer the run holds to the conversation it was resuming.
+ *
+ * So `wanted` — the id this process was told to resume, until it confirms it — outranks adoption.
+ */
+export function rebindDecision(current: string, reported: string, wanted: string | null): 'ignore' | 'adopt' | 'lost' {
+  if (reported === current) return 'ignore';
+  if (wanted !== null && reported !== wanted) return 'lost';
+  return 'adopt';
 }
 
 function parseArgs(json: string | null): string[] {
@@ -339,6 +358,13 @@ export class RunManager {
 
   /** Whether the process last started for a run was picking up an existing conversation. */
   private readonly resumedSpawn = new Map<string, boolean>();
+
+  /**
+   * Runs whose resume has already been reported as failed, so one bad spawn costs one stop and one
+   * toast however many hooks the wrong session goes on to fire. Cleared when the run is spawned
+   * again, which is the next thing that could fail.
+   */
+  private readonly resumeLostReported = new Set<string>();
 
   /** Files Claude Code keeps for a session, once found: keyed by run id and file name. */
   private readonly sessionFiles = new Map<string, string>();
@@ -627,6 +653,9 @@ export class RunManager {
     // used. Start it under the same id instead, so the session keeps its identity either way.
     const canResume = resume && !!this.sessionFile(r, path.join('..', `${r.session_id}.jsonl`));
     this.resumedSpawn.set(r.id, canResume);
+    // Asking for a conversation by id is a promise the process has to keep; see rebind.
+    this.db.run('UPDATE runs SET resuming = ? WHERE id = ?', canResume ? r.session_id : null, r.id);
+    this.resumeLostReported.delete(r.id);
     const args: string[] = canResume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
     // Before the process exists, so it never reaches the trust dialog: the folder was chosen here.
     this.subs.trustFolder(subscriptionId, r.last_cwd ?? r.cwd);
@@ -1142,17 +1171,55 @@ export class RunManager {
     this.db.run('DELETE FROM swaps WHERE run_id = ?', runId);
     this.mirrors.get(runId)?.dispose();
     this.mirrors.delete(runId);
+    this.resumeLostReported.delete(runId);
     this.bus.invalidate('state');
   }
 
   // --------------------------------------------------------- hook signals
 
-  /** A hosted session got a new session id (e.g. /clear): keep the run pointed at it. */
-  rebind(runId: string, sessionId: string): void {
+  /**
+   * A hosted session reported its session id. Usually it is the one we already hold, sometimes it
+   * is a new one the run should follow (`/clear`), and sometimes it is the sign that a resume did
+   * not take — which is the one case where following it loses something. Returns false when the
+   * session reporting is not the one this run asked for, so the caller drops it on the floor
+   * rather than putting it on the board under this run's name.
+   */
+  rebind(runId: string, sessionId: string): boolean {
     const r = this.row(runId);
-    if (!r || r.session_id === sessionId) return;
-    this.db.run('UPDATE runs SET session_id = ?, resume = 1 WHERE id = ?', sessionId, runId);
-    this.bus.invalidate('state');
+    if (!r) return true;
+    const decision = rebindDecision(r.session_id, sessionId, r.resuming);
+    if (decision === 'lost') {
+      // The promise outlives the failure: whatever that session says next is still not this run's.
+      if (!this.resumeLostReported.has(runId)) {
+        this.resumeLostReported.add(runId);
+        this.resumeLost(r, sessionId);
+      }
+      return false;
+    }
+    // The process is where it was told to be, so nothing is owed on the next id it reports.
+    if (r.resuming) this.db.run('UPDATE runs SET resuming = NULL WHERE id = ?', runId);
+    if (decision === 'adopt') {
+      this.db.run('UPDATE runs SET session_id = ?, resume = 1 WHERE id = ?', sessionId, runId);
+      this.bus.invalidate('state');
+    }
+    return true;
+  }
+
+  /**
+   * The process came up on a conversation nobody asked for. Stop it and leave the run pointed at
+   * the conversation it was sent to resume: that id is the only way back to a transcript that is
+   * still sitting on disk, and a session that carries on here would take its place — its name, its
+   * terminal, its row on the board — while the work it was supposed to continue quietly stopped
+   * being reachable.
+   */
+  private resumeLost(r: RunRow, got: string): void {
+    log.error('resume did not take: claude came up on a new conversation', { run: r.id, wanted: r.session_id, got });
+    this.stop(r.id);
+    this.bus.toast(
+      'error',
+      `${r.name}: Claude Code could not resume this conversation and started a new one, so it was stopped before it took the session's place. ` +
+        `Nothing is lost — relaunch to try again, or pick it up yourself with: claude --resume ${r.session_id}`,
+    );
   }
 
   onSessionStart(sessionId: string, cwd: string | null): void {

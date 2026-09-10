@@ -223,6 +223,12 @@ const MIGRATIONS: string[] = [
   -- Counting what the operator has not read, by the session that sent it, on every state snapshot.
   CREATE INDEX messages_human ON messages (to_id, human_read_at);
   `,
+  `
+  -- The conversation this session's process was told to resume, until it reports having it. Held
+  -- here rather than in memory so a daemon restart between the spawn and the session's first hook
+  -- cannot leave a failed resume looking like an ordinary /clear. See RunManager.rebind.
+  ALTER TABLE runs ADD COLUMN resuming TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;
