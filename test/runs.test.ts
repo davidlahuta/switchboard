@@ -3,11 +3,11 @@ import { describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { attentionFor, limitSwapPlan, rebindDecision, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
+import { attentionFor, limitSwapPlan, rebindDecision, rejectReservedArgs, safeToRespawn, tabMark, titleDecision } from '../src/daemon/runs.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
 import { PTY_TERM, withoutParentSession } from '../src/config.ts';
-import type { Usage } from '../src/shared/types.ts';
+import type { Run, Usage } from '../src/shared/types.ts';
 
 const usage = (five: number | null, seven: number | null): Usage => ({
   fiveHour: five === null ? null : { pct: five, resetsAt: null },
@@ -290,5 +290,38 @@ describe('per-session claude arguments', () => {
     for (const bad of [['--resume', 'x'], ['--session-id', 'x'], ['--settings=foo.json'], ['--mcp-config', 'x'], ['-w', 'name'], ['--continue']]) {
       assert.throws(() => rejectReservedArgs(bad), /Switchboard manages/, `expected ${bad[0]} to be refused`);
     }
+  });
+});
+
+describe('what a terminal tab says it wants', () => {
+  const base: Pick<Run, 'status' | 'agentStatus' | 'attention'> = {
+    status: 'running',
+    agentStatus: 'idle',
+    attention: { waiting: false, unread: 0, unseen: false },
+  };
+  const mark = (over: Partial<typeof base>): string => tabMark({ ...base, ...over } as Run);
+
+  it('marks nothing on a session that is idle and has been read', () => {
+    // A mark on every tab is a mark worth nothing; the empty ones are what make the others carry.
+    assert.equal(mark({}), '');
+  });
+
+  it('puts being stopped on a prompt above everything else', () => {
+    assert.equal(mark({ agentStatus: 'waiting', attention: { waiting: true, unread: 3, unseen: true } }), '❗');
+  });
+
+  it('shows that it has spoken to the operator before that it is busy', () => {
+    assert.equal(mark({ agentStatus: 'working', attention: { waiting: false, unread: 1, unseen: false } }), '✉');
+  });
+
+  it('shows work in progress, and a finished turn nobody has looked at', () => {
+    assert.equal(mark({ agentStatus: 'working' }), '●');
+    assert.equal(mark({ agentStatus: 'starting' }), '●');
+    assert.equal(mark({ agentStatus: 'limited' }), '⏳');
+    assert.equal(mark({ attention: { waiting: false, unread: 0, unseen: true } }), '✓');
+  });
+
+  it('says nothing about a session that has ended', () => {
+    assert.equal(mark({ status: 'exited', attention: { waiting: false, unread: 2, unseen: true } }), '');
   });
 });

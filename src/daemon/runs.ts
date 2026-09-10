@@ -160,6 +160,30 @@ export function safeToRespawn(status: AgentStatus | undefined): boolean {
   return status === undefined || status === 'idle' || status === 'limited';
 }
 
+/**
+ * The mark a session's terminal tab carries, so a wall of tabs answers "which of these wants me?"
+ * the way the web list does.
+ *
+ * Claude Code puts its own state in the title, and the runner strips that: the tab carries the
+ * session's name, which the operator can rename, and letting the session write the title would put
+ * the old name back a moment after every rename. Dropping it also dropped the one glance-able
+ * signal the tab strip had, so Switchboard puts back what it knows — which is more than the session
+ * does, since it also knows what has been said to the operator and what they have not looked at yet.
+ *
+ * Ordered by how much it wants a person: stopped on a prompt beats having spoken to them, which
+ * beats still working, which beats having finished something nobody has read. A session that is
+ * idle and has been read carries nothing, so a mark in the tab strip always means something.
+ */
+export function tabMark(run: Run): string {
+  if (run.status === 'exited') return '';
+  if (run.attention.waiting) return '❗';
+  if (run.attention.unread > 0) return '✉';
+  if (run.agentStatus === 'limited') return '⏳';
+  if (run.agentStatus === 'working' || run.agentStatus === 'starting') return '●';
+  if (run.attention.unseen) return '✓';
+  return '';
+}
+
 export function titleDecision(name: string, shadow: string | null, reported: string | null): { adopt?: string; push?: string } {
   const title = reported?.trim() || null;
   // Adopting a title that already matches the name is a no-op rename that records the shadow, so
@@ -479,13 +503,16 @@ export class RunManager {
       // Adopting a title that already matches the name is a no-op rename that records the shadow.
       if (title && title !== r.claude_title) {
         this.db.run('UPDATE runs SET name = ?, claude_title = ? WHERE id = ?', title, title, r.id);
-        this.send(r.id, { type: 'title', text: title });
+        this.pushTitle(this.row(r.id)!);
         this.coord.renameAgent(r.session_id, title);
         this.bus.invalidate('state');
         log.info('session renamed in claude', { run: r.id, name: title });
       }
       const transcript = this.sessionFile(r, path.join('..', `${r.session_id}.jsonl`));
       if (transcript && this.transcriptChanged(r.id, transcript)) this.syncModel(r.session_id, transcript);
+      // What the tab says it wants follows the session's state, which changes under hooks rather
+      // than under anything here; this poll is where the two are brought back together.
+      this.pushTitle(this.row(r.id) ?? r);
     }
   }
 
@@ -512,7 +539,7 @@ export class RunManager {
     const { adopt, push } = titleDecision(r.name, r.claude_title, reported);
     if (adopt) {
       this.db.run('UPDATE runs SET name = ?, claude_title = ? WHERE id = ?', adopt, adopt, r.id);
-      this.send(r.id, { type: 'title', text: adopt });
+      this.pushTitle(this.row(r.id)!);
       this.coord.renameAgent(sessionId, adopt);
       this.bus.invalidate('state');
       log.info('session renamed in claude', { run: r.id, name: adopt });
@@ -553,7 +580,7 @@ export class RunManager {
     if (!clean) throw httpError(400, 'Name cannot be empty');
     if (clean.length > 120) throw httpError(400, 'Name is too long');
     this.db.run('UPDATE runs SET name = ? WHERE id = ?', clean, r.id);
-    this.send(r.id, { type: 'title', text: clean });
+    this.pushTitle(this.row(r.id)!);
     this.coord.renameAgent(r.session_id, clean);
     this.bus.invalidate('state');
     // The session hears about it on its next hook: a prompt, or the next time it starts.
@@ -735,6 +762,22 @@ export class RunManager {
       m.resize(cols, rows);
     }
     return m;
+  }
+
+  /** The tab title last accepted by each runner, so an unchanged one is not resent every sweep. */
+  private readonly tabTitles = new Map<string, string>();
+
+  /**
+   * Put the session's name and what it wants on its terminal tab. Called on a rename and from the
+   * poll, which is what carries a change of state: the status a mark reflects is set by hooks
+   * arriving at the coordinator, and asking here costs one query against rows already in memory.
+   */
+  private pushTitle(r: RunRow): void {
+    const mark = tabMark(this.dto(r));
+    const text = mark ? `${mark} ${r.name}` : r.name;
+    if (this.tabTitles.get(r.id) === text) return;
+    // Only remembered once a runner has taken it; one that is not attached yet gets it next time.
+    if (this.send(r.id, { type: 'title', text })) this.tabTitles.set(r.id, text);
   }
 
   private setStatus(id: string, status: RunStatus, extra = ''): void {

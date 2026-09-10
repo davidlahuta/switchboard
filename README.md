@@ -117,7 +117,10 @@ From there you can:
   sits above the threshold has to carry one whole turn, so lower it if your turns run long.
 - **Rename** it from the pencil next to its name, or with `/rename` inside the session — there is one
   name, and whichever side you change it on the other follows, tab title included. The same goes for
-  `/model`.
+  `/model`. The tab carries a mark for what the session wants, so a strip of terminals reads the way
+  the session list does: `❗` stopped on a prompt only you can answer, `✉` it has said something to
+  you, `●` working, `⏳` waiting out a limit, `✓` finished something you have not looked at, and
+  nothing at all when it is idle and read.
 - **Hand back** the terminal when you are done with it on the phone. A pseudo-terminal has one size:
   while a browser is fitted to its own screen it owns that size, and the desktop window is parked
   rather than shown a frame drawn for other dimensions. The browser then follows the desktop
