@@ -329,6 +329,28 @@ of each other cannot pass a session back and forth. And a session already runnin
 a clear improvement: a swap costs a turn, which is a bad trade for a few points of headroom, twice
 over once the numbers cross back.
 
+**A session that has already stopped** is judged differently, because the question is no longer
+whether somewhere else is better than where it is: it has nowhere. The proactive threshold is what
+keeps a working session from moving for a small gain, and applying it to a stopped one is how a
+session sat out a reset that had already happened — every subscription was above the bar, so
+nothing moved, and it waited for its own window instead. So a swap made at a limit will take any
+subscription that is not itself spent, and every usage refresh revisits the sessions the board
+still shows as `limited` (`rescueLimited`, at most once a minute per session, and never on numbers
+already marked stale). If their own subscription has come back they are not moved at all — that
+would cost a resume to arrive where they already are — only typed the continue message; otherwise
+they move to whatever has room, and are told to carry on there. Which of the three it is, is
+`rescueDecision`.
+
+**An out-of-date terminal is replaced rather than reused.** Half of Switchboard lives in the
+process hosting the session's terminal, and that process keeps the code it started with, so
+respawning claude inside it brings the session back on a new build of claude and an old build of
+everything around it — the *old host* badge, worn for the rest of the session's life, and the
+reason a fix to the runner never reached the sessions that most needed it. Coming back is the one
+moment when a fresh terminal costs nothing a respawn does not already cost, so `executeRespawn`
+relaunches instead whenever `runnerStale` says so. That covers every way a session comes back —
+swap, restart, update-restart — because they all funnel through there; if the relaunch cannot
+happen (the folder is gone) the respawn in place still goes ahead.
+
 ## Web terminal
 
 The runner streams PTY output to the daemon, which feeds a headless xterm per run
