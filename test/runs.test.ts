@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { limitSwapPlan, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
+import { attentionFor, limitSwapPlan, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, weightFor } from '../src/daemon/subscriptions.ts';
 import type { Usage } from '../src/shared/types.ts';
@@ -33,6 +33,39 @@ describe('when a session may be swapped', () => {
     assert.ok(!safeToRespawn('starting'));
     // An hour-long turn with no tool calls looks exactly like this once the sweep gives up on it.
     assert.ok(!safeToRespawn('offline'));
+  });
+});
+
+describe('which sessions are asking to be looked at', () => {
+  const t = (iso: string): string => new Date(iso).toISOString();
+  const base = { agentStatus: 'idle' as const, lastActivity: t('2026-01-01T10:00:00Z'), lastViewedAt: t('2026-01-01T10:00:00Z'), unread: 0 };
+
+  it('says nothing about a session that has done nothing since it was read', () => {
+    const a = attentionFor(base);
+    assert.deepEqual(a, { waiting: false, unread: 0, unseen: false });
+  });
+
+  it('marks a session stopped on a prompt only a person can clear', () => {
+    assert.equal(attentionFor({ ...base, agentStatus: 'waiting' }).waiting, true);
+  });
+
+  it('marks a session that finished something after it was last read', () => {
+    assert.equal(attentionFor({ ...base, lastActivity: t('2026-01-01T10:05:00Z') }).unseen, true);
+  });
+
+  it('leaves a session that is still working alone', () => {
+    // It will finish on its own. A dot on everything busy is a dot worth nothing.
+    const busy = attentionFor({ ...base, agentStatus: 'working', lastActivity: t('2026-01-01T10:05:00Z') });
+    assert.equal(busy.unseen, false);
+    assert.equal(busy.waiting, false);
+  });
+
+  it('marks a session that has never been opened', () => {
+    assert.equal(attentionFor({ ...base, lastViewedAt: null }).unseen, true);
+  });
+
+  it('counts what a session addressed to the operator, whatever else it is doing', () => {
+    assert.equal(attentionFor({ ...base, agentStatus: 'working', unread: 2 }).unread, 2);
   });
 });
 

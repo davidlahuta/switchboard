@@ -216,6 +216,13 @@ const MIGRATIONS: string[] = [
   -- See RunManager.savePending.
   ALTER TABLE runs ADD COLUMN pending_respawn TEXT;
   `,
+  `
+  -- When this session's terminal was last open in the web UI, which is how the sessions list knows
+  -- whether what the session has done since is something the operator has already seen.
+  ALTER TABLE runs ADD COLUMN last_viewed_at TEXT;
+  -- Counting what the operator has not read, by the session that sent it, on every state snapshot.
+  CREATE INDEX messages_human ON messages (to_id, human_read_at);
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

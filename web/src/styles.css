@@ -713,6 +713,46 @@ select.input {
   align-items: flex-start;
   min-height: 0;
 }
+/*
+ * The dot on a session that wants looking at. Colour carries the reason and the title says it in
+ * words, but the dot is doing the work: it has to be findable down a column of a dozen rows at
+ * arm's length on a phone, so it sits on the text baseline and does not reflow the name beside it.
+ */
+.attention {
+  display: inline-block;
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin-right: 7px;
+  border-radius: 50%;
+  vertical-align: baseline;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+}
+.attention-blocked {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px var(--warn-soft);
+}
+.attention-message {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* Something merely unread is the quietest of the three: present, not insistent. */
+.attention-unseen {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .attention-blocked {
+    animation: attention-pulse 2s ease-in-out infinite;
+  }
+}
+@keyframes attention-pulse {
+  50% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
 .check-inline {
   align-items: center;
   min-height: 38px;

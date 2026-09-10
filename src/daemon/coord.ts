@@ -1115,6 +1115,25 @@ export class Coordinator {
     });
   }
 
+  /**
+   * Unread messages for the operator, counted by the session that sent them. One grouped query
+   * rather than one per session: the sessions list asks on every snapshot.
+   */
+  humanUnreadBySession(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const row of this.db.all<{ from_id: string; n: number }>(
+      "SELECT from_id, COUNT(*) AS n FROM messages WHERE to_id = 'human' AND human_read_at IS NULL GROUP BY from_id",
+    )) {
+      out.set(row.from_id, row.n);
+    }
+    return out;
+  }
+
+  /** Mark what one session told the operator as read, when its terminal has been opened. */
+  markHumanReadFrom(sessionId: string): void {
+    this.db.run("UPDATE messages SET human_read_at = ? WHERE from_id = ? AND to_id = 'human' AND human_read_at IS NULL", now(), sessionId);
+  }
+
   markHumanRead(repoId: string): void {
     this.db.run("UPDATE messages SET human_read_at = ? WHERE repo_id = ? AND to_id = 'human' AND human_read_at IS NULL", now(), repoId);
     this.bus.invalidate('state', `repo:${repoId}`);

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Run, StateSnapshot } from '@shared/types.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { HandoffButton } from '../components/HandoffButton.tsx';
+import { AttentionDot } from '../components/AttentionDot.tsx';
 import { SessionName } from '../components/SessionName.tsx';
 import { PageHead } from '../components/PageHead.tsx';
 import { RestartMenu } from '../components/RestartMenu.tsx';
@@ -106,6 +107,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                 return (
                   <tr key={r.id} className={exited ? 'row-muted' : undefined}>
                     <td data-label="Session" className="cell-title">
+                      <AttentionDot run={r} />
                       <SessionName run={r} href={href.terminal(r.id)} />
                       {r.autoSwap && (
                         <span className="auto-swap" title="Auto-swap on limits is on" aria-label="Auto-swap on">

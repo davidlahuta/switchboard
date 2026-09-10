@@ -5,7 +5,7 @@ import type { WebSocket } from 'ws';
 import { DAEMON_URL, HOME_CLAUDE_DIR } from '../config.ts';
 import { logger } from '../log.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
-import type { AgentStatus, CreateRunRequest, Run, RunStatus, Subscription, Swap, TermClientFrame } from '../shared/types.ts';
+import type { AgentStatus, Attention, CreateRunRequest, Run, RunStatus, Subscription, Swap, TermClientFrame } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, writeRuntimeJson } from './claude.ts';
 import type { Coordinator } from './coord.ts';
@@ -48,6 +48,7 @@ interface RunRow {
   skip_permissions: number | null;
   claude_title: string | null;
   continue_on_resume: number | null;
+  last_viewed_at: string | null;
 }
 
 /** A respawn waiting for the session to finish its turn. */
@@ -128,6 +129,32 @@ export function limitSwapPlan(source: 'hook' | 'pty', now = Date.now()): { force
   return source === 'hook' ? { force: true, deadline: null } : { force: false, deadline: now + LIMIT_GRACE_MS };
 }
 
+/**
+ * Whether a session is asking to be looked at.
+ *
+ * Three separable things, because they answer differently. `waiting` is Claude Code stopped on a
+ * prompt only a person can clear, and nothing else moves until it is. `unread` is the session
+ * having deliberately addressed the operator with sb_send. `unseen` is softer: it has done
+ * something, it is not still going, and its terminal has not been open since — a finished turn
+ * nobody has read.
+ *
+ * A session mid-turn is deliberately not unseen. It will finish, and a dot on everything that is
+ * merely busy is a dot that stops being worth looking at.
+ */
+export function attentionFor(input: {
+  agentStatus: AgentStatus | null;
+  lastActivity: string;
+  lastViewedAt: string | null;
+  unread: number;
+}): Attention {
+  const busy = input.agentStatus === 'working' || input.agentStatus === 'starting';
+  return {
+    waiting: input.agentStatus === 'waiting',
+    unread: input.unread,
+    unseen: !busy && (!input.lastViewedAt || input.lastActivity > input.lastViewedAt),
+  };
+}
+
 export function safeToRespawn(status: AgentStatus | undefined): boolean {
   return status === undefined || status === 'idle' || status === 'limited';
 }
@@ -186,6 +213,11 @@ export class RunManager {
   private readonly conns = new Map<string, WebSocket>();
   private readonly mirrors = new Map<string, TermMirror>();
   private readonly pendingRespawn = new Map<string, PendingRespawn>();
+  /**
+   * Unread counts for the whole board, refreshed at most once a second. A state snapshot renders
+   * every session at once, and one grouped query for all of them beats one query each.
+   */
+  private operatorUnread: { at: number; by: Map<string, number> } | null = null;
   /** Set by the daemon once the updater knows which claude version is installed. */
   versionProvider: () => string | null = () => null;
   private readonly pendingContinue = new Map<string, { text: string; timer: NodeJS.Timeout }>();
@@ -243,6 +275,7 @@ export class RunManager {
     const waiting = this.pendingRespawn.get(r.id) ?? null;
     const status: RunStatus = waiting && r.status === 'running' ? 'swapping' : r.status;
     const agent = this.coord.agent(r.session_id);
+    const lastActivity = agent?.last_seen ?? r.ended_at ?? r.created_at;
     return {
       id: r.id,
       name: r.name,
@@ -277,7 +310,13 @@ export class RunManager {
       cols: r.cols,
       rows: r.rows,
       createdAt: r.created_at,
-      lastActivity: agent?.last_seen ?? r.ended_at ?? r.created_at,
+      lastActivity,
+      attention: attentionFor({
+        agentStatus: agent?.status ?? null,
+        lastActivity,
+        lastViewedAt: r.last_viewed_at,
+        unread: this.unreadForOperator(r.session_id),
+      }),
       endedAt: r.ended_at,
       exitCode: r.exit_code,
     };
@@ -539,8 +578,8 @@ export class RunManager {
     const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
     const repoId = await this.coord.repoForDir(cwd);
     this.db.run(
-      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, continue_on_resume, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, continue_on_resume, last_viewed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       name.slice(0, 80),
       cwd,
@@ -556,6 +595,7 @@ export class RunManager {
       autoCompactTokens,
       skipPermissions ? 1 : 0,
       spec.continueOnResume === undefined ? null : spec.continueOnResume ? 1 : 0,
+      now(),
       now(),
     );
     this.subs.syncProfile(subscriptionId);
@@ -756,12 +796,25 @@ export class RunManager {
 
   // ------------------------------------------------------------- viewers
 
+  /**
+   * Note that the operator has this session's terminal in front of them. Called when a browser
+   * opens it and again when it closes, so a long read leaves the mark at the end rather than the
+   * beginning and whatever arrived while it was open counts as seen.
+   */
+  markViewed(runId: string): void {
+    this.db.run('UPDATE runs SET last_viewed_at = ? WHERE id = ?', now(), runId);
+    const r = this.row(runId);
+    if (r?.repo_id) this.coord.markHumanReadFrom(r.session_id);
+    this.bus.invalidate('state');
+  }
+
   attachViewer(runId: string, ws: WebSocket): void {
     const r = this.row(runId);
     if (!r) {
       ws.close(4404, 'unknown run');
       return;
     }
+    this.markViewed(runId);
     const mirror = this.mirror(r);
     const detach = mirror.attach((frame) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame));
@@ -784,6 +837,7 @@ export class RunManager {
     });
     ws.on('close', () => {
       detach();
+      this.markViewed(runId);
       // Last browser viewer gone: give the size back to the terminal window the session lives in,
       // otherwise it stays at whatever a phone asked for until someone resizes that window.
       if (mirror.viewers === 0) this.send(runId, { type: 'restore-size' });
@@ -840,6 +894,13 @@ export class RunManager {
     if (r.status === 'exited') throw httpError(409, 'Session has exited');
     if (!this.conns.has(runId)) throw httpError(409, 'The runner for this session is not connected');
     return r;
+  }
+
+  private unreadForOperator(sessionId: string): number {
+    if (!this.operatorUnread || Date.now() - this.operatorUnread.at > 1000) {
+      this.operatorUnread = { at: Date.now(), by: this.coord.humanUnreadBySession() };
+    }
+    return this.operatorUnread.by.get(sessionId) ?? 0;
   }
 
   private busy(r: RunRow): boolean {

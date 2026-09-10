@@ -228,6 +228,8 @@ export interface Run {
   continueOnResume: boolean;
   /** a swap or restart holding off until this session's turn ends */
   waiting: WaitingRespawn | null;
+  /** why this session wants looking at; all false when it does not */
+  attention: Attention;
   /** claude version this session is currently running on, when known */
   version: string | null;
   /**
@@ -423,6 +425,21 @@ export interface CreateRunRequest {
 }
 
 /** Fields the operator can change on an existing session. */
+/**
+ * Why a session wants the operator's eye, so the sessions list can say so before it is opened.
+ *
+ * "Seen" means seen in the web UI: watching the native terminal window tells Switchboard nothing,
+ * so a session being read at the desk still counts as unseen here.
+ */
+export interface Attention {
+  /** stopped on something only a person can answer: a permission prompt, a dialog, an elicitation */
+  waiting: boolean;
+  /** messages this session addressed to the operator that have not been read */
+  unread: number;
+  /** it has done something since its terminal was last open, and is not still going */
+  unseen: boolean;
+}
+
 /** A respawn queued behind a turn that is still running. */
 export interface WaitingRespawn {
   kind: 'swap' | 'restart';
