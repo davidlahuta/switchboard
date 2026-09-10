@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 import { DAEMON_URL, HOME_CLAUDE_DIR } from '../config.ts';
 import { logger } from '../log.ts';
+import { tabTitle } from '../shared/marks.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
 import type { AgentStatus, Attention, CreateRunRequest, Run, RunStatus, Subscription, Swap, TermClientFrame } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
@@ -158,30 +159,6 @@ export function attentionFor(input: {
 
 export function safeToRespawn(status: AgentStatus | undefined): boolean {
   return status === undefined || status === 'idle' || status === 'limited';
-}
-
-/**
- * The mark a session's terminal tab carries, so a wall of tabs answers "which of these wants me?"
- * the way the web list does.
- *
- * Claude Code puts its own state in the title, and the runner strips that: the tab carries the
- * session's name, which the operator can rename, and letting the session write the title would put
- * the old name back a moment after every rename. Dropping it also dropped the one glance-able
- * signal the tab strip had, so Switchboard puts back what it knows — which is more than the session
- * does, since it also knows what has been said to the operator and what they have not looked at yet.
- *
- * Ordered by how much it wants a person: stopped on a prompt beats having spoken to them, which
- * beats still working, which beats having finished something nobody has read. A session that is
- * idle and has been read carries nothing, so a mark in the tab strip always means something.
- */
-export function tabMark(run: Run): string {
-  if (run.status === 'exited') return '';
-  if (run.attention.waiting) return '❗';
-  if (run.attention.unread > 0) return '✉';
-  if (run.agentStatus === 'limited') return '⏳';
-  if (run.agentStatus === 'working' || run.agentStatus === 'starting') return '●';
-  if (run.attention.unseen) return '✓';
-  return '';
 }
 
 export function titleDecision(name: string, shadow: string | null, reported: string | null): { adopt?: string; push?: string } {
@@ -773,8 +750,7 @@ export class RunManager {
    * arriving at the coordinator, and asking here costs one query against rows already in memory.
    */
   private pushTitle(r: RunRow): void {
-    const mark = tabMark(this.dto(r));
-    const text = mark ? `${mark} ${r.name}` : r.name;
+    const text = tabTitle(this.dto(r), r.name);
     if (this.tabTitles.get(r.id) === text) return;
     // Only remembered once a runner has taken it; one that is not attached yet gets it next time.
     if (this.send(r.id, { type: 'title', text })) this.tabTitles.set(r.id, text);
