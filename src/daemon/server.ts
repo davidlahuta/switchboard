@@ -151,6 +151,7 @@ export function createServer(s: Services): http.Server {
       runs: s.runs.list(),
       settings: getSettings(s.db),
       totals,
+      burn: s.subs.burn(),
       update: s.updater.status(),
       models: s.models.list(),
     };

@@ -426,6 +426,32 @@ export interface DaemonInfo {
   local: boolean;
 }
 
+/**
+ * When the desk stops, at the rate it is spending now — the pooled question the per-subscription
+ * numbers cannot answer. Everything is in units of plan weight rather than percent, because percent
+ * does not add up across plans.
+ */
+export interface BurnWindow {
+  /** sum of the weights of enabled, ready subscriptions */
+  capacity: number;
+  /** how much of that is left in this window */
+  remaining: number;
+  /** units per hour, measured from stored samples; zero when nothing is being spent */
+  rate: number;
+  /** ISO time the pool is projected to hit zero, or null for "never at this rate" */
+  exhaustedAt: string | null;
+  /** ISO time the first spent window turns over, or null when none will */
+  nextResetAt: string | null;
+  /** how long the samples the rate was measured over span, in hours */
+  spanHours: number;
+  samples: number;
+}
+
+export interface BurnForecast {
+  fiveHour: BurnWindow;
+  sevenDay: BurnWindow;
+}
+
 export interface Totals {
   /** Sum of weights of enabled, ready subscriptions */
   capacity: number;
@@ -443,6 +469,8 @@ export interface StateSnapshot {
   runs: Run[];
   settings: Settings;
   totals: Totals;
+  /** when the desk runs out, at the rate it is spending now */
+  burn: BurnForecast;
   update: UpdateStatus;
   /** Models offered when starting a session (1M-context only), from the API */
   models: Model[];

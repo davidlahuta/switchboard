@@ -78,6 +78,10 @@ all three behave the same way about timing: a request that lands mid-turn is **q
 refused, and taken the moment the turn ends. `force` takes it now and loses whatever the turn had in
 flight. A queued respawn survives a daemon restart.
 
+`/api/state` also carries `burn`: the pooled forecast for both usage windows — capacity and
+headroom in plan-weight units, the measured rate, when the pool is projected to empty (`null` means
+never at this rate) and when the first spent window turns over. See `src/daemon/burn.ts`.
+
 `work` lists what the session still has running that its own turn does not cover — subagents,
 background shells, monitors — each with the id Claude Code gave it, a label, and when it started. A
 swap, restart or relaunch waits for subagents; shells and monitors are reported but not waited for.

@@ -6,9 +6,10 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, IS_WINDOWS, PROFILES_DIR, SPAWN_CWD, VERSION, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
-import type { Subscription, SubscriptionKind, SubscriptionStatus, Usage, UsagePoint } from '../shared/types.ts';
+import type { BurnForecast, Subscription, SubscriptionKind, SubscriptionStatus, Usage, UsagePoint } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, mcpServerEntry, readJson, writeJson } from './claude.ts';
+import { forecast, pointsFor } from './burn.ts';
 import { bool, type Db, now } from './db.ts';
 import type { Launcher } from './launcher.ts';
 import { getSettings } from './settings.ts';
@@ -47,6 +48,10 @@ const CLAUDE_JSON_KEYS = [
 
 const OAUTH_API = process.env.SWITCHBOARD_OAUTH_API ?? 'https://api.anthropic.com';
 const HISTORY_EVERY_MS = 5 * 60_000;
+/** How long a pooled forecast is reused. Shorter than the usage poll, so it never lags the numbers. */
+const BURN_CACHE_MS = 30_000;
+/** How much history the forecast reads. It measures a shorter window than this; the rest is slack. */
+const BURN_LOOKBACK_H = 6;
 const LOGIN_WATCH_MS = 20 * 60_000;
 
 interface SubRow {
@@ -177,6 +182,7 @@ export class SubscriptionManager {
   /** Called after each successful usage refresh. */
   onUsage: (sub: Subscription) => void = () => {};
   private readonly lastPoll = new Map<string, number>();
+  private burnCache: { at: number; value: BurnForecast } | null = null;
   /** Set when the usage endpoint returns 429. It rate-limits per account, so back everyone off. */
   private cooldownUntil = 0;
   private consecutive429 = 0;
@@ -255,6 +261,49 @@ export class SubscriptionManager {
   get(id: string): Subscription | null {
     const r = this.row(id);
     return r ? this.dto(r) : null;
+  }
+
+  /**
+   * When the desk runs out, pooled across every subscription that could take a session.
+   *
+   * Cached because a state snapshot is rendered far more often than the numbers move: usage is
+   * polled in minutes and sampled every five, so recomputing per request would read the whole
+   * history table for a picture that cannot have changed.
+   */
+  burn(): BurnForecast {
+    if (this.burnCache && Date.now() - this.burnCache.at < BURN_CACHE_MS) return this.burnCache.value;
+    const subs = [];
+    for (const r of this.rows()) {
+      const dto = this.dto(r);
+      if (!dto.enabled || dto.status !== 'ready') continue;
+      const history = this.history(r.id, BURN_LOOKBACK_H);
+      subs.push({
+        id: r.id,
+        weight: dto.weight,
+        fiveHour: dto.usage?.fiveHour ?? null,
+        sevenDay: dto.usage?.sevenDay ?? null,
+        history,
+      });
+    }
+    const value = forecast(
+      subs.map((x) => ({
+        id: x.id,
+        weight: x.weight,
+        pct: x.fiveHour?.pct ?? null,
+        resetsAt: x.fiveHour?.resetsAt ?? null,
+        history: pointsFor(x.history, 'fiveHour'),
+      })),
+      subs.map((x) => ({
+        id: x.id,
+        weight: x.weight,
+        pct: x.sevenDay?.pct ?? null,
+        resetsAt: x.sevenDay?.resetsAt ?? null,
+        history: pointsFor(x.history, 'sevenDay'),
+      })),
+      Date.now(),
+    );
+    this.burnCache = { at: Date.now(), value };
+    return value;
   }
 
   history(id: string, hours: number): UsagePoint[] {

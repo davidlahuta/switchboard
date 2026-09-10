@@ -150,6 +150,13 @@ From there you can:
   Claude Code cannot pick that conversation up, the session it starts instead is stopped rather than
   allowed to take its place, leaving the run pointed at the conversation that is still on disk.
 
+**Overview → Usage burn rate** answers the question the four percentages do not: at what the desk is
+spending right now, does a ceiling arrive before the window under it resets? It pools every ready
+subscription — weighted by plan, since a point of a 20x is worth twenty of a Pro — measures the rate
+from the usage history, and walks it forward through each subscription's own reset. The answer is a
+time, or *never*, which is what it usually is when the windows turn over faster than the desk spends
+them.
+
 The session list is ordered by activity — live sessions first, most recently active at the top —
 and can be filtered to one repository. Each row says when its session was last active.
 
