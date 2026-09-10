@@ -1,0 +1,39 @@
+{
+  "name": "switchboard",
+  "version": "0.1.0",
+  "description": "Local coordination hub for Claude Code agents plus multi-subscription session management.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "switchboard": "bin/switchboard.cmd"
+  },
+  "workspaces": [
+    "web"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "aspire run",
+    "daemon": "node src/cli.ts daemon",
+    "dev:daemon": "node --watch-path=src src/cli.ts daemon",
+    "dev:web": "npm run dev --workspace web",
+    "build": "npm run build --workspace web",
+    "start": "npm run build && node src/cli.ts daemon",
+    "typecheck": "tsc -p tsconfig.json && npm run typecheck --workspace web",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@lydell/node-pty": "1.2.0-beta.15",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@xterm/addon-serialize": "^0.13.0",
+    "@xterm/headless": "^5.5.0",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.0"
+  }
+}

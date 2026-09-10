@@ -1,0 +1,21 @@
+node_modules/
+dist/
+web/dist/
+*.log
+.env
+.env.*
+.data/
+
+# Aspire / .NET
+bin/*
+!bin/switchboard.cmd
+obj/
+.aspire/
+*.user
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/

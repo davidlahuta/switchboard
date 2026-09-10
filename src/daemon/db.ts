@@ -1,0 +1,232 @@
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { DB_PATH, ensureDirs } from '../config.ts';
+
+// Each entry upgrades the schema by one version (PRAGMA user_version).
+const MIGRATIONS: string[] = [
+  `
+  CREATE TABLE subscriptions (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    config_dir TEXT NOT NULL,
+    email TEXT,
+    display_name TEXT,
+    plan TEXT,
+    rate_tier TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    priority INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    last_error TEXT,
+    usage_json TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE usage_history (
+    id INTEGER PRIMARY KEY,
+    subscription_id TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    five_hour_pct REAL,
+    seven_day_pct REAL
+  );
+  CREATE INDEX usage_history_sub_ts ON usage_history (subscription_id, ts);
+
+  CREATE TABLE repos (
+    id TEXT PRIMARY KEY,
+    root TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_activity TEXT
+  );
+  CREATE TABLE agents (
+    id TEXT PRIMARY KEY,
+    repo_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    worktree TEXT,
+    branch TEXT,
+    cwd TEXT,
+    pid INTEGER,
+    status TEXT NOT NULL,
+    intent TEXT,
+    subscription_id TEXT,
+    run_id TEXT,
+    has_channel INTEGER NOT NULL DEFAULT 0,
+    last_tool TEXT,
+    started_at TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    ended_at TEXT,
+    last_piggyback_at TEXT
+  );
+  CREATE INDEX agents_repo ON agents (repo_id);
+  CREATE TABLE claims (
+    id INTEGER PRIMARY KEY,
+    repo_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    exclusive INTEGER NOT NULL DEFAULT 0,
+    reason TEXT,
+    source TEXT NOT NULL DEFAULT 'claim',
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    released_at TEXT
+  );
+  CREATE INDEX claims_repo ON claims (repo_id, released_at);
+  CREATE TABLE file_touches (
+    id INTEGER PRIMARY KEY,
+    repo_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    path TEXT NOT NULL COLLATE NOCASE,
+    worktree TEXT,
+    tool TEXT,
+    ts TEXT NOT NULL
+  );
+  CREATE INDEX file_touches_repo_path ON file_touches (repo_id, path, ts);
+  CREATE TABLE messages (
+    id INTEGER PRIMARY KEY,
+    repo_id TEXT NOT NULL,
+    from_id TEXT NOT NULL,
+    to_id TEXT,
+    kind TEXT NOT NULL,
+    body TEXT NOT NULL,
+    urgent INTEGER NOT NULL DEFAULT 0,
+    reply_to INTEGER,
+    human_read_at TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX messages_repo ON messages (repo_id, id);
+  CREATE TABLE deliveries (
+    message_id INTEGER NOT NULL,
+    agent_id TEXT NOT NULL,
+    via TEXT NOT NULL,
+    delivered_at TEXT NOT NULL,
+    PRIMARY KEY (message_id, agent_id)
+  );
+  CREATE TABLE notes (
+    id INTEGER PRIMARY KEY,
+    repo_id TEXT NOT NULL,
+    agent_id TEXT,
+    kind TEXT NOT NULL,
+    body TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    archived_at TEXT
+  );
+  CREATE TABLE conflicts (
+    id INTEGER PRIMARY KEY,
+    repo_id TEXT NOT NULL,
+    path TEXT NOT NULL COLLATE NOCASE,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    agent_a TEXT NOT NULL,
+    agent_b TEXT NOT NULL,
+    detail TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+  );
+  CREATE INDEX conflicts_repo ON conflicts (repo_id, status);
+  CREATE TABLE events (
+    id INTEGER PRIMARY KEY,
+    repo_id TEXT NOT NULL,
+    agent_id TEXT,
+    type TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    ts TEXT NOT NULL
+  );
+  CREATE INDEX events_repo ON events (repo_id, id);
+
+  CREATE TABLE runs (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    last_cwd TEXT,
+    repo_id TEXT,
+    session_id TEXT NOT NULL,
+    subscription_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    auto_swap INTEGER NOT NULL DEFAULT 1,
+    swap_count INTEGER NOT NULL DEFAULT 0,
+    worktree TEXT,
+    resume INTEGER NOT NULL DEFAULT 0,
+    pid INTEGER,
+    cols INTEGER NOT NULL DEFAULT 120,
+    rows INTEGER NOT NULL DEFAULT 30,
+    created_at TEXT NOT NULL,
+    ended_at TEXT,
+    exit_code INTEGER
+  );
+  CREATE TABLE swaps (
+    id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    from_sub TEXT,
+    to_sub TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    ts TEXT NOT NULL
+  );
+  CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  CREATE TABLE devices (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    last_seen TEXT,
+    revoked_at TEXT
+  );
+  `,
+];
+
+export type Row = Record<string, SQLInputValue>;
+
+export class Db {
+  readonly raw: DatabaseSync;
+
+  constructor(file = DB_PATH) {
+    if (file !== ':memory:') ensureDirs();
+    this.raw = new DatabaseSync(file);
+    this.raw.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;');
+    this.migrate();
+  }
+
+  private migrate(): void {
+    const current = (this.raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+    for (let v = current; v < MIGRATIONS.length; v++) {
+      this.raw.exec('BEGIN');
+      try {
+        this.raw.exec(MIGRATIONS[v]);
+        this.raw.exec(`PRAGMA user_version = ${v + 1}`);
+        this.raw.exec('COMMIT');
+      } catch (err) {
+        this.raw.exec('ROLLBACK');
+        throw err;
+      }
+    }
+  }
+
+  all<T>(sql: string, ...params: SQLInputValue[]): T[] {
+    return this.raw.prepare(sql).all(...params) as T[];
+  }
+
+  get<T>(sql: string, ...params: SQLInputValue[]): T | undefined {
+    return this.raw.prepare(sql).get(...params) as T | undefined;
+  }
+
+  run(sql: string, ...params: SQLInputValue[]): { changes: number; lastInsertRowid: number } {
+    const r = this.raw.prepare(sql).run(...params);
+    return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) };
+  }
+
+  tx<T>(fn: () => T): T {
+    this.raw.exec('BEGIN');
+    try {
+      const out = fn();
+      this.raw.exec('COMMIT');
+      return out;
+    } catch (err) {
+      this.raw.exec('ROLLBACK');
+      throw err;
+    }
+  }
+}
+
+export const now = (): string => new Date().toISOString();
+export const bool = (v: unknown): boolean => v === 1 || v === true;

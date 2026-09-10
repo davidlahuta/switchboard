@@ -1,0 +1,587 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import type { WebSocket } from 'ws';
+import { DAEMON_URL, HOME_CLAUDE_DIR } from '../config.ts';
+import { logger } from '../log.ts';
+import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
+import type { CreateRunRequest, Run, RunStatus, Subscription, Swap, TermClientFrame } from '../shared/types.ts';
+import type { Bus } from './bus.ts';
+import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, writeRuntimeJson } from './claude.ts';
+import type { Coordinator } from './coord.ts';
+import { bool, type Db, now } from './db.ts';
+import { hooksInstalledIn, integrationStatus } from './integration.ts';
+import type { Launcher } from './launcher.ts';
+import { TermMirror } from './mirror.ts';
+import { getSettings } from './settings.ts';
+import type { SubscriptionManager } from './subscriptions.ts';
+
+const log = logger('runs');
+
+interface RunRow {
+  id: string;
+  name: string;
+  cwd: string;
+  last_cwd: string | null;
+  repo_id: string | null;
+  session_id: string;
+  subscription_id: string;
+  status: RunStatus;
+  auto_swap: number;
+  swap_count: number;
+  worktree: string | null;
+  resume: number;
+  pid: number | null;
+  cols: number;
+  rows: number;
+  created_at: string;
+  ended_at: string | null;
+  exit_code: number | null;
+}
+
+const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
+const CONTINUE_DELAY_MS = 2500;
+const CONTINUE_FALLBACK_MS = 25_000;
+const LIMIT_DEBOUNCE_MS = 90_000;
+
+const httpError = (status: number, message: string): Error => Object.assign(new Error(message), { status });
+
+export class RunManager {
+  private readonly db: Db;
+  private readonly bus: Bus;
+  private readonly subs: SubscriptionManager;
+  private readonly coord: Coordinator;
+  private readonly launcher: Launcher;
+  private readonly conns = new Map<string, WebSocket>();
+  private readonly mirrors = new Map<string, TermMirror>();
+  private readonly pendingSwap = new Map<string, { target: string; reason: string; continueAfter: boolean }>();
+  private readonly pendingContinue = new Map<string, { text: string; timer: NodeJS.Timeout }>();
+  private readonly lastLimit = new Map<string, number>();
+
+  constructor(db: Db, bus: Bus, subs: SubscriptionManager, coord: Coordinator, launcher: Launcher) {
+    this.db = db;
+    this.bus = bus;
+    this.subs = subs;
+    this.coord = coord;
+    this.launcher = launcher;
+  }
+
+  start(): void {
+    this.db.run("UPDATE runs SET status = 'disconnected' WHERE status IN ('starting', 'running', 'swapping')");
+    this.subs.liveRunsFor = (id) => this.liveCount(id);
+    this.subs.onUsage = (s) => this.onUsage(s);
+  }
+
+  // ---------------------------------------------------------------- reads
+
+  row(id: string): RunRow | undefined {
+    return this.db.get<RunRow>('SELECT * FROM runs WHERE id = ?', id);
+  }
+
+  bySession(sessionId: string): RunRow | undefined {
+    return this.db.get<RunRow>("SELECT * FROM runs WHERE session_id = ? AND status <> 'exited' ORDER BY created_at DESC LIMIT 1", sessionId);
+  }
+
+  liveCount(subscriptionId?: string): number {
+    const placeholders = LIVE.map(() => '?').join(', ');
+    const sql = `SELECT COUNT(*) AS n FROM runs WHERE status IN (${placeholders})${subscriptionId ? ' AND subscription_id = ?' : ''}`;
+    const params = subscriptionId ? [...LIVE, subscriptionId] : LIVE;
+    return this.db.get<{ n: number }>(sql, ...params)?.n ?? 0;
+  }
+
+  private dto(r: RunRow): Run {
+    const swap = this.db.get<{ from_sub: string | null; to_sub: string; reason: string; ts: string }>(
+      'SELECT from_sub, to_sub, reason, ts FROM swaps WHERE run_id = ? ORDER BY id DESC LIMIT 1',
+      r.id,
+    );
+    const lastSwap: Swap | null = swap ? { fromSubscriptionId: swap.from_sub, toSubscriptionId: swap.to_sub, reason: swap.reason, ts: swap.ts } : null;
+    const status: RunStatus = this.pendingSwap.has(r.id) && r.status === 'running' ? 'swapping' : r.status;
+    return {
+      id: r.id,
+      name: r.name,
+      cwd: r.last_cwd ?? r.cwd,
+      repoId: r.repo_id,
+      sessionId: r.session_id,
+      subscriptionId: r.subscription_id,
+      subscriptionLabel: this.subs.row(r.subscription_id)?.label ?? r.subscription_id,
+      status,
+      agentStatus: this.coord.agent(r.session_id)?.status ?? null,
+      autoSwap: bool(r.auto_swap),
+      swapCount: r.swap_count,
+      lastSwap,
+      pid: r.pid,
+      cols: r.cols,
+      rows: r.rows,
+      createdAt: r.created_at,
+      endedAt: r.ended_at,
+      exitCode: r.exit_code,
+    };
+  }
+
+  list(): Run[] {
+    return this.db
+      .all<RunRow>("SELECT * FROM runs ORDER BY (status = 'exited'), created_at DESC LIMIT 200")
+      .map((r) => this.dto(r));
+  }
+
+  get(id: string): Run | null {
+    const r = this.row(id);
+    return r ? this.dto(r) : null;
+  }
+
+  // --------------------------------------------------------------- create
+
+  private resolveSubscription(ref: string, exclude?: string | null): string {
+    if (ref === 'auto') {
+      const best = this.subs.pickBest(exclude);
+      if (!best) throw httpError(409, 'No enabled, logged-in subscription with headroom is available.');
+      return best.id;
+    }
+    const sub = this.subs.row(ref);
+    if (!sub) throw httpError(404, `Unknown subscription ${ref}`);
+    if (sub.status !== 'ready') throw httpError(409, `${sub.label} is not logged in.`);
+    return sub.id;
+  }
+
+  private insertRun(spec: { cwd: string; subscriptionId: string; name?: string; worktree?: string; resumeSessionId?: string; autoSwap?: boolean }): RunRow {
+    const cwd = path.resolve(spec.cwd);
+    let isDir = false;
+    try {
+      isDir = fs.statSync(cwd).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) throw httpError(400, `Directory not found: ${cwd}`);
+    if (spec.resumeSessionId && this.bySession(spec.resumeSessionId)) throw httpError(409, 'That session is already running in Switchboard.');
+    const subscriptionId = this.resolveSubscription(spec.subscriptionId);
+    const id = crypto.randomBytes(4).toString('hex');
+    const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
+    this.db.run(
+      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?)`,
+      id,
+      name.slice(0, 80),
+      cwd,
+      this.coord.repoForDir(cwd),
+      spec.resumeSessionId ?? crypto.randomUUID(),
+      subscriptionId,
+      spec.autoSwap === false ? 0 : 1,
+      spec.worktree?.trim() || null,
+      spec.resumeSessionId ? 1 : 0,
+      now(),
+    );
+    this.subs.syncProfile(subscriptionId);
+    this.bus.invalidate('state');
+    return this.row(id)!;
+  }
+
+  create(req: CreateRunRequest): Run {
+    if (!findClaude()) throw httpError(500, 'claude executable not found on PATH');
+    const r = this.insertRun(req);
+    this.launcher.openTerminal({ title: r.name, cwd: r.cwd, args: ['run', '--run-id', r.id] });
+    log.info('run created', { id: r.id, name: r.name, subscription: r.subscription_id });
+    return this.dto(r);
+  }
+
+  private buildSpec(r: RunRow, subscriptionId: string, resume: boolean): SpawnSpec {
+    const claude = findClaude();
+    if (!claude) throw new Error('claude executable not found on PATH');
+    const sub = this.subs.row(subscriptionId);
+    if (!sub) throw new Error(`unknown subscription ${subscriptionId}`);
+    const args: string[] = resume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
+    if (!integrationStatus().mcpInstalled) {
+      const file = writeRuntimeJson(`mcp-${r.id}.json`, { mcpServers: { switchboard: mcpServerEntry({ SWITCHBOARD_RUN_ID: r.id }) } });
+      args.push('--mcp-config', file);
+    }
+    args.push('--dangerously-load-development-channels', 'server:switchboard');
+    if (!hooksInstalledIn(path.join(sub.config_dir, 'settings.json'))) {
+      args.push('--settings', writeRuntimeJson(`settings-${r.id}.json`, { hooks: hooksConfig() }));
+    }
+    if (!resume && r.worktree) args.push('--worktree', r.worktree);
+    if (!resume) args.push('--name', r.name);
+    args.push(...getSettings(this.db).claudeArgs);
+    const cmd = claudeCommand(claude, args);
+    return {
+      runId: r.id,
+      sessionId: r.session_id,
+      resume,
+      cwd: resume ? (r.last_cwd ?? r.cwd) : r.cwd,
+      file: cmd.file,
+      args: cmd.args,
+      env: { ...this.subs.envFor(subscriptionId), SWITCHBOARD_RUN_ID: r.id, SWITCHBOARD_URL: DAEMON_URL },
+      title: r.name,
+      subscriptionLabel: sub.label,
+    };
+  }
+
+  // -------------------------------------------------------------- runners
+
+  private send(runId: string, msg: DaemonToRunner): boolean {
+    const ws = this.conns.get(runId);
+    if (!ws || ws.readyState !== ws.OPEN) return false;
+    ws.send(JSON.stringify(msg));
+    return true;
+  }
+
+  private mirror(r: RunRow, cols?: number, rows?: number): TermMirror {
+    let m = this.mirrors.get(r.id);
+    if (!m) {
+      m = new TermMirror(cols ?? r.cols, rows ?? r.rows);
+      this.mirrors.set(r.id, m);
+    } else if (cols && rows) {
+      m.resize(cols, rows);
+    }
+    return m;
+  }
+
+  private setStatus(id: string, status: RunStatus, extra = ''): void {
+    this.db.run(`UPDATE runs SET status = ?${extra} WHERE id = ?`, status, id);
+    const r = this.row(id);
+    if (r) this.mirrors.get(id)?.broadcast({ type: 'status', status, subscriptionLabel: this.subs.row(r.subscription_id)?.label ?? '' });
+    this.bus.invalidate('state');
+  }
+
+  attachRunner(ws: WebSocket): void {
+    let runId: string | null = null;
+    ws.on('message', (raw) => {
+      let msg: RunnerToDaemon;
+      try {
+        msg = JSON.parse(String(raw)) as RunnerToDaemon;
+      } catch {
+        return;
+      }
+      try {
+        if (msg.type === 'hello') runId = this.onHello(ws, msg);
+        else if (runId) this.onRunnerMessage(runId, msg);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.error('runner message failed', message);
+        ws.send(JSON.stringify({ type: 'error', message } satisfies DaemonToRunner));
+      }
+    });
+    ws.on('close', () => {
+      if (!runId || this.conns.get(runId) !== ws) return;
+      this.conns.delete(runId);
+      const r = this.row(runId);
+      if (r && r.status !== 'exited') this.setStatus(runId, 'disconnected');
+    });
+  }
+
+  private onHello(ws: WebSocket, msg: Extract<RunnerToDaemon, { type: 'hello' }>): string {
+    let r: RunRow | undefined;
+    if (msg.runId) {
+      r = this.row(msg.runId);
+      if (!r) throw new Error(`Unknown run ${msg.runId}`);
+    } else if (msg.manual) {
+      r = this.insertRun(msg.manual satisfies ManualRunSpec);
+    } else {
+      throw new Error('hello without run');
+    }
+    const previous = this.conns.get(r.id);
+    if (previous && previous !== ws) previous.close();
+    this.conns.set(r.id, ws);
+    const mirror = this.mirror(r, msg.cols, msg.rows);
+    if (msg.alive) {
+      // Daemon restarted while the runner kept claude alive: just reattach and repaint.
+      this.db.run('UPDATE runs SET pid = ?, cols = ?, rows = ? WHERE id = ?', msg.pid, msg.cols, msg.rows, r.id);
+      this.setStatus(r.id, 'running');
+      mirror.reset();
+      this.send(r.id, { type: 'redraw' });
+    } else {
+      const spec = this.buildSpec(r, r.subscription_id, bool(r.resume));
+      this.db.run('UPDATE runs SET resume = 1 WHERE id = ?', r.id);
+      this.send(r.id, { type: 'spawn', spec });
+    }
+    return r.id;
+  }
+
+  private onRunnerMessage(runId: string, msg: RunnerToDaemon): void {
+    const r = this.row(runId);
+    if (!r) return;
+    switch (msg.type) {
+      case 'spawned':
+        this.db.run('UPDATE runs SET pid = ?, cols = ?, rows = ?, ended_at = NULL, exit_code = NULL WHERE id = ?', msg.pid, msg.cols, msg.rows, runId);
+        this.mirror(r, msg.cols, msg.rows);
+        this.setStatus(runId, 'running');
+        break;
+      case 'data':
+        this.mirror(r).write(msg.data);
+        break;
+      case 'resize':
+        this.db.run('UPDATE runs SET cols = ?, rows = ? WHERE id = ?', msg.cols, msg.rows, runId);
+        this.mirror(r).resize(msg.cols, msg.rows);
+        break;
+      case 'exit':
+        if (msg.intentional && r.status === 'swapping') break;
+        this.db.run('UPDATE runs SET ended_at = ?, exit_code = ? WHERE id = ?', now(), msg.code, runId);
+        this.setStatus(runId, 'exited');
+        this.coord.markOffline(r.session_id, 'session exited');
+        this.pendingSwap.delete(runId);
+        break;
+      case 'limit-detected':
+        this.onLimit(r.session_id, msg.text, 'pty');
+        break;
+      default:
+        break;
+    }
+  }
+
+  // ------------------------------------------------------------- viewers
+
+  attachViewer(runId: string, ws: WebSocket): void {
+    const r = this.row(runId);
+    if (!r) {
+      ws.close(4404, 'unknown run');
+      return;
+    }
+    const mirror = this.mirror(r);
+    const detach = mirror.attach((frame) => {
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame));
+    });
+    ws.send(JSON.stringify({ type: 'status', status: this.dto(r).status, subscriptionLabel: this.subs.row(r.subscription_id)?.label ?? '' }));
+    ws.on('message', (raw) => {
+      let frame: TermClientFrame;
+      try {
+        frame = JSON.parse(String(raw)) as TermClientFrame;
+      } catch {
+        return;
+      }
+      if (frame.type === 'input' && typeof frame.data === 'string') this.send(runId, { type: 'input', data: frame.data });
+      if (frame.type === 'resize' && frame.cols >= 20 && frame.rows >= 5 && frame.cols <= 500 && frame.rows <= 200) {
+        this.send(runId, { type: 'resize', cols: Math.floor(frame.cols), rows: Math.floor(frame.rows) });
+      }
+    });
+    ws.on('close', detach);
+  }
+
+  // ----------------------------------------------------------------- swap
+
+  swap(runId: string, targetRef: string, reason: string, opts: { force?: boolean; continueAfter?: boolean } = {}): Run {
+    const r = this.row(runId);
+    if (!r) throw httpError(404, 'Unknown run');
+    if (r.status === 'exited') throw httpError(409, 'Session has exited');
+    if (!this.conns.has(runId)) throw httpError(409, 'The runner for this session is not connected');
+    const target = this.resolveSubscription(targetRef, r.subscription_id);
+    if (target === r.subscription_id) throw httpError(400, 'Session already runs on that subscription');
+    const agent = this.coord.agent(r.session_id);
+    if (!opts.force && agent?.status === 'working') {
+      this.pendingSwap.set(runId, { target, reason, continueAfter: opts.continueAfter ?? false });
+      this.bus.toast('info', `${r.name}: will switch to ${this.subs.row(target)?.label} when the current turn ends`);
+      this.bus.invalidate('state');
+      return this.dto(r);
+    }
+    this.executeSwap(r, target, reason, opts.continueAfter ?? false);
+    return this.dto(this.row(runId)!);
+  }
+
+  private executeSwap(r: RunRow, target: string, reason: string, continueAfter: boolean): void {
+    this.pendingSwap.delete(r.id);
+    this.subs.syncProfile(target);
+    const from = r.subscription_id;
+    this.subs.propagateTrust(from, target, r.last_cwd ?? r.cwd);
+    this.db.run('INSERT INTO swaps (run_id, from_sub, to_sub, reason, ts) VALUES (?, ?, ?, ?, ?)', r.id, from, target, reason, now());
+    this.db.run('UPDATE runs SET subscription_id = ?, swap_count = swap_count + 1, resume = 1 WHERE id = ?', target, r.id);
+    this.coord.setSubscription(r.session_id, target);
+    this.setStatus(r.id, 'swapping');
+    const updated = this.row(r.id)!;
+    const spec = this.buildSpec(updated, target, true);
+    const fromLabel = this.subs.row(from)?.label ?? from;
+    const banner = `\x1b[1;36m[switchboard]\x1b[0m ${fromLabel} → \x1b[1m${spec.subscriptionLabel}\x1b[0m (${reason}). Resuming session…\r\n`;
+    this.mirrors.get(r.id)?.reset();
+    this.send(r.id, { type: 'swap', spec, banner });
+    if (continueAfter) {
+      const text = getSettings(this.db).continueMessage.trim();
+      if (text) {
+        const old = this.pendingContinue.get(r.id);
+        if (old) clearTimeout(old.timer);
+        // Armed here, but only sent once the SessionStart hook confirms a live prompt. Typing
+        // blindly could answer a dialog (folder trust, permissions) instead.
+        this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.giveUpContinue(r.id), CONTINUE_FALLBACK_MS) });
+      }
+    }
+    if (r.repo_id) this.coord.event(r.repo_id, r.session_id, 'swap', `${r.name}: ${fromLabel} → ${spec.subscriptionLabel} (${reason})`);
+    this.bus.toast('info', `${r.name}: switched to ${spec.subscriptionLabel} (${reason})`);
+    log.info('swap', { run: r.id, from, to: target, reason });
+  }
+
+  private typeContinue(runId: string): void {
+    const pending = this.pendingContinue.get(runId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingContinue.delete(runId);
+    this.send(runId, { type: 'type', text: pending.text });
+  }
+
+  /** The resumed session never reported a prompt: leave the terminal alone and say so. */
+  private giveUpContinue(runId: string): void {
+    const pending = this.pendingContinue.get(runId);
+    if (!pending) return;
+    this.pendingContinue.delete(runId);
+    const r = this.row(runId);
+    this.bus.toast('warn', `${r?.name ?? runId}: resumed on the new subscription but never reached a prompt — check the terminal (it may be waiting on a dialog).`);
+  }
+
+  stop(runId: string): void {
+    const r = this.row(runId);
+    if (!r) throw httpError(404, 'Unknown run');
+    if (!this.send(runId, { type: 'stop' })) {
+      this.db.run('UPDATE runs SET ended_at = ? WHERE id = ?', now(), runId);
+      this.setStatus(runId, 'exited');
+    }
+  }
+
+  forget(runId: string): void {
+    const r = this.row(runId);
+    if (!r) return;
+    if (this.conns.has(runId)) throw httpError(409, 'Session is still connected; stop it first');
+    this.db.run('DELETE FROM runs WHERE id = ?', runId);
+    this.db.run('DELETE FROM swaps WHERE run_id = ?', runId);
+    this.mirrors.get(runId)?.dispose();
+    this.mirrors.delete(runId);
+    this.bus.invalidate('state');
+  }
+
+  // --------------------------------------------------------- hook signals
+
+  /** A hosted session got a new session id (e.g. /clear): keep the run pointed at it. */
+  rebind(runId: string, sessionId: string): void {
+    const r = this.row(runId);
+    if (!r || r.session_id === sessionId) return;
+    this.db.run('UPDATE runs SET session_id = ?, resume = 1 WHERE id = ?', sessionId, runId);
+    this.bus.invalidate('state');
+  }
+
+  onSessionStart(sessionId: string, cwd: string | null): void {
+    const r = this.bySession(sessionId);
+    if (!r) return;
+    if (cwd) this.db.run('UPDATE runs SET last_cwd = ? WHERE id = ?', cwd, r.id);
+    if (r.status !== 'running') this.setStatus(r.id, 'running');
+    const pending = this.pendingContinue.get(r.id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pending.timer = setTimeout(() => this.typeContinue(r.id), CONTINUE_DELAY_MS);
+    }
+  }
+
+  onCwd(sessionId: string, cwd: string): void {
+    const r = this.bySession(sessionId);
+    if (r) this.db.run('UPDATE runs SET last_cwd = ? WHERE id = ?', cwd, r.id);
+  }
+
+  onIdle(sessionId: string): void {
+    const r = this.bySession(sessionId);
+    if (!r) return;
+    const pending = this.pendingSwap.get(r.id);
+    if (pending) {
+      try {
+        this.executeSwap(r, pending.target, pending.reason, pending.continueAfter);
+      } catch (err) {
+        this.bus.toast('error', `Swap of ${r.name} failed: ${err instanceof Error ? err.message : err}`);
+      }
+      return;
+    }
+    const sub = this.subs.get(r.subscription_id);
+    if (sub) this.maybeProactive(sub, [r]);
+  }
+
+  onLimit(sessionId: string, detail: string, source: 'hook' | 'pty'): void {
+    const r = this.bySession(sessionId);
+    if (!r || r.status === 'exited') return;
+    if (Date.now() - (this.lastLimit.get(r.id) ?? 0) < LIMIT_DEBOUNCE_MS) return;
+    this.lastLimit.set(r.id, Date.now());
+    this.coord.setStatus(sessionId, 'limited');
+    const label = this.subs.row(r.subscription_id)?.label ?? r.subscription_id;
+    log.warn('usage limit', { run: r.id, subscription: r.subscription_id, source, detail });
+    void (async () => {
+      const sub = await this.subs.poll(r.subscription_id, true);
+      if (source === 'pty') {
+        // Text detection is a fallback; make sure the subscription really is at its limit.
+        const u = sub?.usage;
+        const used = Math.max(u?.fiveHour?.pct ?? 0, u?.sevenDay?.pct ?? 0);
+        if (u && !u.stale && used < 90) {
+          this.lastLimit.delete(r.id);
+          return;
+        }
+      }
+      const settings = getSettings(this.db);
+      if (!settings.autoSwap || !bool(r.auto_swap)) {
+        this.bus.toast('warn', `${r.name} hit the usage limit on ${label}`);
+        return;
+      }
+      try {
+        this.swap(r.id, 'auto', `usage limit on ${label}`, { force: true, continueAfter: true });
+      } catch (err) {
+        this.bus.toast('error', `${r.name} hit the limit on ${label} and cannot switch: ${err instanceof Error ? err.message : err}`);
+      }
+    })();
+  }
+
+  private onUsage(sub: Subscription): void {
+    const runs = this.db.all<RunRow>("SELECT * FROM runs WHERE subscription_id = ? AND status = 'running'", sub.id);
+    if (runs.length) this.maybeProactive(sub, runs);
+  }
+
+  private maybeProactive(sub: Subscription, runs: RunRow[]): void {
+    const settings = getSettings(this.db);
+    if (!settings.proactiveSwap || !sub.usage || sub.usage.stale) return;
+    const used = Math.max(sub.usage.fiveHour?.pct ?? 0, sub.usage.sevenDay?.pct ?? 0);
+    if (used < settings.swapThresholdPct) return;
+    for (const r of runs) {
+      if (!bool(r.auto_swap) || this.pendingSwap.has(r.id)) continue;
+      if (this.coord.agent(r.session_id)?.status !== 'idle') continue;
+      try {
+        this.swap(r.id, 'auto', `${sub.label} at ${Math.round(used)}%`);
+      } catch {
+        // nothing better available; stay put
+      }
+    }
+  }
+
+  // ------------------------------------------------------------ transcripts
+
+  recentSessions(cwd: string): Array<{ id: string; title: string; mtime: string }> {
+    const dir = path.join(HOME_CLAUDE_DIR, 'projects', projectSlug(cwd));
+    let files: Array<{ file: string; mtime: number }> = [];
+    try {
+      files = fs
+        .readdirSync(dir)
+        .filter((f) => f.endsWith('.jsonl'))
+        .map((f) => ({ file: f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, 20);
+    } catch {
+      return [];
+    }
+    return files.map(({ file, mtime }) => ({ id: file.slice(0, -6), title: this.transcriptTitle(path.join(dir, file)), mtime: new Date(mtime).toISOString() }));
+  }
+
+  private transcriptTitle(file: string): string {
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(file, 'r');
+      const buf = Buffer.alloc(256 * 1024);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      let firstPrompt: string | null = null;
+      for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
+        if (!line.trim()) continue;
+        let j: Record<string, any>;
+        try {
+          j = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if ((j.type === 'custom-title' || j.type === 'summary') && typeof (j.customTitle ?? j.summary) === 'string') return j.customTitle ?? j.summary;
+        if (!firstPrompt && j.type === 'user') {
+          const c = j.message?.content;
+          const text = typeof c === 'string' ? c : Array.isArray(c) ? c.find((p: any) => p?.type === 'text')?.text : null;
+          if (typeof text === 'string' && !text.startsWith('<')) firstPrompt = text.replace(/\s+/g, ' ').slice(0, 100);
+        }
+      }
+      return firstPrompt ?? '(no prompt)';
+    } catch {
+      return '(unreadable)';
+    } finally {
+      if (fd !== null) fs.closeSync(fd);
+    }
+  }
+}

@@ -1,0 +1,216 @@
+import { useState } from 'react';
+import type { Run, StateSnapshot, Subscription } from '@shared/types.ts';
+import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
+import { PageHead } from '../components/PageHead.tsx';
+import { SwapMenu } from '../components/SwapMenu.tsx';
+import { Badge, Empty, Icon, Section, StatusPill, UsageBar } from '../components/ui.tsx';
+import { planLabel, shortPath, subStatusLabel, usageLevel } from '../lib/format.ts';
+import { href } from '../lib/router.ts';
+import { timeAgo, useNow } from '../lib/time.ts';
+
+export function Overview({ state }: { state: StateSnapshot }) {
+  const now = useNow(1000);
+  const [newOpen, setNewOpen] = useState(false);
+  const { totals } = state;
+  const liveRuns = state.runs.filter((r) => r.status !== 'exited');
+  const subs = [...state.subscriptions].sort((a, b) => a.priority - b.priority);
+
+  return (
+    <div className="page">
+      <PageHead
+        title="Overview"
+        subtitle={`${state.repos.length} repos · ${state.subscriptions.length} subscriptions`}
+        actions={
+          <button type="button" className="btn btn-primary" onClick={() => setNewOpen(true)}>
+            <Icon name="plus" size={16} />
+            New session
+          </button>
+        }
+      />
+
+      <div className="totals">
+        <HeadroomTile label="5h headroom" remaining={totals.fiveHourRemaining} capacity={totals.capacity} />
+        <HeadroomTile label="7d headroom" remaining={totals.sevenDayRemaining} capacity={totals.capacity} />
+        <a className="tile tile-link" href={href.sessions()}>
+          <span className="tile-label">Live sessions</span>
+          <span className="tile-value">{totals.liveRuns}</span>
+          <span className="tile-sub">{state.runs.length - liveRuns.length} exited</span>
+        </a>
+        <div className="tile">
+          <span className="tile-label">Agents online</span>
+          <span className="tile-value">{totals.agentsOnline}</span>
+          <span className="tile-sub">across {state.repos.filter((r) => r.agentsOnline > 0).length} repos</span>
+        </div>
+      </div>
+
+      <Section
+        title="Subscriptions"
+        count={subs.length}
+        actions={
+          <a className="btn btn-sm btn-ghost" href={href.subscriptions()}>
+            Manage
+          </a>
+        }
+      >
+        {subs.length === 0 ? (
+          <Empty icon="card">
+            No subscriptions yet. <a href={href.subscriptions()}>Add one</a>.
+          </Empty>
+        ) : (
+          <div className="sub-grid">
+            {subs.map((s) => (
+              <SubUsageCard key={s.id} sub={s} now={now} />
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <div className="two-col">
+        <Section title="Repos" count={state.repos.length}>
+          {state.repos.length === 0 ? (
+            <Empty icon="repo">No repos yet. They appear as soon as a Claude Code session with Switchboard starts in one.</Empty>
+          ) : (
+            <ul className="list">
+              {[...state.repos]
+                .sort((a, b) => b.agentsOnline - a.agentsOnline || (b.lastActivity ?? '').localeCompare(a.lastActivity ?? ''))
+                .map((r) => (
+                  <li key={r.id}>
+                    <a className="list-row" href={href.repo(r.id)}>
+                      <span className={r.agentsOnline > 0 ? 'repo-dot on' : 'repo-dot'} aria-hidden="true" />
+                      <span className="list-main">
+                        <span className="list-title">{r.name}</span>
+                        <span className="list-sub mono" title={r.root}>
+                          {shortPath(r.root, 3)}
+                        </span>
+                      </span>
+                      <span className="list-badges">
+                        {r.openConflicts > 0 && (
+                          <Badge tone="crit" title="Open conflicts">
+                            {r.openConflicts} conflict{r.openConflicts > 1 ? 's' : ''}
+                          </Badge>
+                        )}
+                        {r.unreadForHuman > 0 && (
+                          <Badge tone="accent" title="Unread messages for you">
+                            {r.unreadForHuman} unread
+                          </Badge>
+                        )}
+                        <Badge tone={r.agentsOnline > 0 ? 'ok' : 'muted'} title="Agents online / total">
+                          {r.agentsOnline}/{r.agentsTotal} agents
+                        </Badge>
+                        <span className="list-time">{timeAgo(r.lastActivity, now)}</span>
+                      </span>
+                    </a>
+                  </li>
+                ))}
+            </ul>
+          )}
+        </Section>
+
+        <Section
+          title="Live sessions"
+          count={liveRuns.length}
+          actions={
+            <a className="btn btn-sm btn-ghost" href={href.sessions()}>
+              All
+            </a>
+          }
+        >
+          {liveRuns.length === 0 ? (
+            <Empty icon="terminal">
+              No live sessions.{' '}
+              <button type="button" className="link-btn" onClick={() => setNewOpen(true)}>
+                Start one
+              </button>
+              .
+            </Empty>
+          ) : (
+            <ul className="list">
+              {liveRuns.map((r) => (
+                <LiveRunRow key={r.id} run={r} state={state} />
+              ))}
+            </ul>
+          )}
+        </Section>
+      </div>
+
+      <NewSessionDialog open={newOpen} onClose={() => setNewOpen(false)} state={state} />
+    </div>
+  );
+}
+
+function HeadroomTile({ label, remaining, capacity }: { label: string; remaining: number; capacity: number }) {
+  const pct = capacity > 0 ? Math.max(0, Math.min(100, (remaining / capacity) * 100)) : 0;
+  // Headroom is the inverse of utilisation: low headroom = critical.
+  const level = usageLevel(100 - pct);
+  return (
+    <div className="tile">
+      <span className="tile-label">{label}</span>
+      <span className={`tile-value lvl-${capacity > 0 ? level : 'ok'}`}>{capacity > 0 ? `${Math.round(pct)}%` : '—'}</span>
+      <div className="usage-track" role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
+        <div className={`usage-fill fill-${level}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="tile-sub" title="Weighted by plan size (Pro = 1, Max 5× = 5, Max 20× = 20)">
+        {capacity > 0 ? `${fmtUnits(remaining)} of ${fmtUnits(capacity)} capacity units` : 'no ready subscriptions'}
+      </span>
+    </div>
+  );
+}
+
+function fmtUnits(n: number): string {
+  return n >= 10 ? n.toFixed(0) : n.toFixed(1).replace(/\.0$/, '');
+}
+
+function SubUsageCard({ sub, now }: { sub: Subscription; now: number }) {
+  const u = sub.usage;
+  return (
+    <a className={sub.enabled ? 'card sub-card' : 'card sub-card disabled'} href={href.subscriptions()}>
+      <div className="card-head">
+        <span className="card-title">{sub.label}</span>
+        <Badge tone="neutral">{planLabel(sub)}</Badge>
+      </div>
+      <div className="card-meta">
+        {sub.status !== 'ready' ? (
+          <Badge tone={sub.status === 'error' ? 'crit' : 'warn'}>{subStatusLabel(sub.status)}</Badge>
+        ) : !sub.enabled ? (
+          <Badge tone="muted">disabled</Badge>
+        ) : u?.stale ? (
+          <Badge tone="warn" title={u.error ?? undefined}>
+            stale
+          </Badge>
+        ) : null}
+        <span className="muted">{sub.liveRuns} live</span>
+      </div>
+      <UsageBar label="5h" window={u?.fiveHour} now={now} />
+      <UsageBar label="7d" window={u?.sevenDay} now={now} />
+    </a>
+  );
+}
+
+function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
+  const repo = run.repoId ? state.repos.find((r) => r.id === run.repoId) : undefined;
+  return (
+    <li className="list-row run-row">
+      <a className="list-main" href={href.terminal(run.id)}>
+        <span className="list-title">
+          {run.name}
+          {run.autoSwap && (
+            <span className="auto-swap" title="Auto-swap on limits">
+              <Icon name="bolt" size={12} />
+            </span>
+          )}
+        </span>
+        <span className="list-sub">
+          <span className="mono">{repo?.name ?? shortPath(run.cwd)}</span> · {run.subscriptionLabel}
+        </span>
+      </a>
+      <span className="list-badges">
+        <StatusPill status={run.agentStatus ?? run.status} title={`run: ${run.status}`} />
+        <a className="btn btn-sm" href={href.terminal(run.id)} aria-label={`Open terminal for ${run.name}`}>
+          <Icon name="terminal" size={16} />
+          <span className="hide-sm">Open</span>
+        </a>
+        <SwapMenu run={run} subs={state.subscriptions} compact />
+      </span>
+    </li>
+  );
+}

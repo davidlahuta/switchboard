@@ -1,0 +1,196 @@
+# Switchboard
+
+**A local control room for Claude Code.** Switchboard runs on your machine and does two jobs:
+
+1. **Keeps parallel agents from stepping on each other.** Every Claude Code session working on the
+   same repository (across all its worktrees) joins one group. Agents can see who is working on
+   what, claim files, message each other and the operator, and they get warned the moment two of
+   them touch the same file.
+2. **Juggles multiple Claude subscriptions.** Add all your Pro/Max logins, watch their 5‑hour and
+   weekly limits in one dashboard, start a session on any of them with one click, and let
+   Switchboard **move a running session to another subscription** when one runs dry. The terminal
+   stays open and the conversation continues.
+
+Each hosted session is also mirrored to the web UI as the real Claude Code terminal, so you can
+keep driving your agents from your phone (for example over Tailscale).
+
+> Status: early, Windows-first (Windows Terminal + ConPTY). The coordination server works anywhere
+> Claude Code runs; session hosting also has a macOS Terminal launcher.
+
+---
+
+## Features
+
+**Coordination (MCP + hooks)**
+
+- Repo groups keyed by the main worktree: `git worktree` and `claude --worktree` sessions share one group.
+- Presence: working / idle / waiting for permission / rate-limited / offline, plus each agent's declared intent.
+- Automatic file-touch tracking. Overlapping edits open a conflict, warn the editing agent inline and notify the other one.
+- Soft and exclusive claims with TTLs. Exclusive claims block other agents' edits through a `PreToolUse` hook, with a clear reason telling them who to talk to.
+- Messages (direct, broadcast, or to the human) with a token-aware delivery strategy:
+  urgent messages and questions are **pushed** into the session through Claude Code channels, while FYIs
+  ride along on the next hook call so idle agents aren't woken up for nothing.
+- `sb_send` can wait for a reply, so agents can ask each other a question and continue.
+- Shared pinned notes (decisions, gotchas) injected into every new session's start-up context.
+
+**Subscriptions and sessions**
+
+- Each subscription gets its own isolated `CLAUDE_CONFIG_DIR` profile. Transcripts, plugins, skills and settings are shared with `~/.claude`.
+- Live usage per subscription (5‑hour, weekly, per-model weekly) with reset countdowns and 48 h history, plus aggregate capacity across all plans.
+- One-click launch into a Windows Terminal tab, optionally in a fresh worktree or resuming an older session.
+- **Hot swap**: `kill` + `claude --resume <same session>` under another subscription, in the same tab. It triggers:
+  - manually,
+  - automatically when a session hits a usage limit (then it types `continue` for you),
+  - or proactively when a subscription crosses a threshold while the session is idle.
+- Web terminal: full Claude Code TUI in the browser (xterm.js), with a mobile key bar, a prompt composer and a "fit to this screen" mode.
+- Device pairing for remote access (QR code). Local access needs no login.
+
+---
+
+## Requirements
+
+- Windows 10/11 with [Windows Terminal](https://aka.ms/terminal) (for one-click sessions)
+- [Node.js](https://nodejs.org) 24 or newer (uses the built-in `node:sqlite` and native TypeScript type stripping)
+- [Claude Code](https://code.claude.com) 2.1.x on `PATH`
+- For development orchestration: [.NET 10 SDK](https://dotnet.microsoft.com) + [Aspire CLI](https://aspire.dev)
+
+## Quick start
+
+```powershell
+git clone https://github.com/<you>/switchboard
+cd switchboard
+npm install
+aspire run
+```
+
+`aspire run` starts the daemon on **http://127.0.0.1:4477** and the web UI dev server. The Aspire
+dashboard shows logs, health and restarts for both. Open the `web` endpoint from the dashboard.
+
+Without Aspire:
+
+```powershell
+npm run build   # build the web UI once
+npm run daemon  # daemon + UI on http://127.0.0.1:4477
+```
+
+### 1. Subscriptions
+
+Your existing `~/.claude` login is imported automatically as **Default**. To add another:
+**Subscriptions → Add subscription**. A terminal opens with `claude auth login` running inside the
+new profile. Sign in with the account you want (a private browser window helps if you are
+already signed in to claude.ai with another account). The card turns *ready* once the login lands.
+
+### 2. Sessions
+
+**Sessions → New session**: pick a directory and a subscription (or *Auto*, which picks the one
+with the most headroom). A tab opens in a Windows Terminal window named `switchboard`. From there
+you can:
+
+- **Swap** it to another subscription at any time. If the agent is mid-turn, the swap waits for the turn to finish.
+- Open it in the browser and keep working.
+- Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default).
+
+You can also start a hosted session from any terminal:
+
+```powershell
+node src/cli.ts run --sub auto --name "api refactor"
+```
+
+### 3. Coordination for sessions you start yourself
+
+Hosted sessions get the MCP server, hooks and push channel automatically. To make every other
+Claude Code session join as well:
+
+```powershell
+node src/cli.ts install     # or Settings → Claude Code integration → Install
+```
+
+This registers the `switchboard` MCP server at user scope and adds HTTP hooks to
+`~/.claude/settings.json`. `uninstall` removes both. Sessions you start yourself get messages via
+hooks and tools. Only hosted sessions receive real-time pushes, because channels need a start-up flag.
+
+## Remote access (phone)
+
+The daemon only listens on `127.0.0.1`. To reach it from your phone, put it on your tailnet:
+
+```powershell
+tailscale serve --bg 4477
+```
+
+Then, on the desk: **Settings → Remote access → Pair a device**. Scan the QR code with your phone
+(or type the code on `https://<desk>.<tailnet>.ts.net`). Paired devices can be revoked at any time.
+Anything that doesn't come straight from the desk needs a paired device, including requests proxied
+by `tailscale serve`.
+
+## How agents use it
+
+The MCP server exposes eight tools, with deliberately short descriptions to keep context cost low:
+
+| Tool             | Purpose                                                                 |
+|------------------|-------------------------------------------------------------------------|
+| `sb_status`      | Who else is here, their intents and claims, open conflicts, pinned notes |
+| `sb_intent`      | Announce the current task and the files it will touch                   |
+| `sb_claim`       | Reserve paths (soft or exclusive, with TTL)                             |
+| `sb_release`     | Release claims                                                          |
+| `sb_send`        | Message an agent, everyone, or the human; optionally wait for the reply |
+| `sb_inbox`       | Read unseen messages                                                    |
+| `sb_note`        | Record a shared decision / fact / warning / todo                        |
+| `sb_who_touches` | Who recently edited or claimed these paths                              |
+
+Hooks do the rest without the agent asking: start-up digest, inline overlap warnings, blocked
+edits inside exclusive claims, and lazy delivery of FYIs.
+
+## Architecture
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the [API reference](docs/API.md).
+
+```
+src/
+  cli.ts            entry point: daemon | run | mcp | install | uninstall | status
+  daemon/           HTTP + WebSocket server, coordination, subscriptions, runs, auth
+  mcp/shim.ts       stdio MCP server + channel, one per Claude Code session
+  runner/runner.ts  PTY host that keeps the terminal alive across swaps
+  shared/           API types, MCP tool definitions, internal protocol
+web/                React UI (Vite)
+apphost.cs          Aspire AppHost for development
+```
+
+## Configuration
+
+| Variable                  | Default                           | Meaning                                   |
+|---------------------------|-----------------------------------|-------------------------------------------|
+| `SWITCHBOARD_PORT`        | `4477`                            | Daemon port                               |
+| `SWITCHBOARD_DATA_DIR`    | `%LOCALAPPDATA%\switchboard`      | Database, profiles, runtime files         |
+| `SWITCHBOARD_CLAUDE_PATH` | `claude` on `PATH`                | Claude Code executable                    |
+| `SWITCHBOARD_WT_WINDOW`   | `switchboard`                     | Windows Terminal window for hosted tabs   |
+| `SWITCHBOARD_LOG_LEVEL`   | `info`                            | `debug` / `info` / `warn` / `error`       |
+
+Runtime settings (auto-swap, thresholds, continue message, extra `claude` arguments, conflict
+window, polling interval) live in the UI under **Settings**.
+
+## Caveats
+
+- **Usage numbers come from the same OAuth endpoint Claude Code's `/usage` uses.** It is not a
+  documented public API and may change. When it fails, cards show *stale*, and limit detection
+  still works through the `StopFailure` hook.
+- **Push delivery uses Claude Code channels** (research preview). Hosted sessions start with
+  `--dangerously-load-development-channels server:switchboard`, because custom channels are not on
+  Anthropic's allowlist. Team/Enterprise orgs must enable channels.
+- Messages between agents are relayed text. The MCP instructions tell agents to treat them as
+  peer input, not as instructions that override their user.
+- Credentials never leave your machine. Switchboard reads each profile's `.credentials.json` only
+  to query that account's usage and profile from `api.anthropic.com`, and never refreshes tokens
+  itself (the `claude` CLI does).
+- Make sure your use of multiple subscriptions complies with Anthropic's terms for your plans.
+
+## Development
+
+```powershell
+npm run typecheck   # daemon + web
+npm test            # node:test suite
+aspire run          # daemon with --watch + Vite HMR
+```
+
+## License
+
+[MIT](LICENSE)
