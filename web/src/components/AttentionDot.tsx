@@ -1,7 +1,13 @@
 import type { Run } from '@shared/types.ts';
-import { attentionMark } from '@shared/marks.ts';
+import { attentionMark, sessionMark } from '@shared/marks.ts';
 
-/** Whether this session is asking for the operator — the same test the mark itself makes. */
+/**
+ * Whether this session is asking for the operator.
+ *
+ * Not every mark: a session that is merely working carries one, and it does not want anything —
+ * it will finish on its own. Sorting on that would put every busy session above the one that has
+ * stopped and is waiting to be told what to do, which is the opposite of what the order is for.
+ */
 export function wantsAttention(run: Run): boolean {
   return attentionMark(run) !== null;
 }
@@ -27,15 +33,15 @@ export function byAttention(a: Run, b: Run): number {
 }
 
 /**
- * The mark next to a session that wants looking at, so the list answers "which of these needs me?"
- * without opening any of them.
+ * The mark next to a session, so the list answers "which of these needs me, and which are still
+ * going?" without opening any of them.
  *
- * The same character its terminal tab carries, so a wall of tabs and this list read the same way;
- * see shared/marks.ts for what earns one and why being busy does not. The colour is what this
- * surface can add and a tab title cannot.
+ * The same character its terminal tab carries, down to the last state, so a wall of tabs and this
+ * list read as one thing; see shared/marks.ts for what earns one. The colour is what this surface
+ * can add and a tab title cannot.
  */
 export function AttentionDot({ run }: { run: Run }) {
-  const mark = attentionMark(run);
+  const mark = sessionMark(run);
   if (!mark) return null;
 
   return (

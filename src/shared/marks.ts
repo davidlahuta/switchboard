@@ -6,7 +6,8 @@ import type { Run } from './types.ts';
  * A session appears in two places that cannot share a stylesheet: the web lists, and the title of
  * the terminal tab it lives in. They used to say different things — a coloured dot on one, nothing
  * at all on the other — so a wall of tabs and the session list could not be read the same way, and
- * the operator had to learn both. One definition, so they cannot drift again.
+ * the operator had to learn both. One definition, and both surfaces draw all of it, so they cannot
+ * drift again; only the colour is particular to the one that can show colour.
  */
 export type MarkTone = 'blocked' | 'message' | 'unseen' | 'busy' | 'limited';
 
@@ -36,13 +37,14 @@ export function attentionMark(run: Run): SessionMark | null {
 }
 
 /**
- * The same mark for a terminal tab, which also carries what the session is doing.
+ * The whole mark: what it is asking of the operator, and failing that, what it is doing.
  *
- * The web lists say that in words, in a status pill an inch from the name, so a busy mark there
- * would only repeat it. A tab has room for one line and nothing else, and "is this one still
- * working or has it stopped?" is exactly what a strip of terminals is scanned for.
+ * "Still working, or has it stopped?" is the other thing a list of sessions is scanned for, and a
+ * terminal tab has one line to answer it in. The web lists also say it in a status pill, but the
+ * mark is what the eye goes to first, and one that meant something different in the two places
+ * would be worse than one that repeats a pill.
  */
-export function tabMark(run: Run): SessionMark | null {
+export function sessionMark(run: Run): SessionMark | null {
   const attention = attentionMark(run);
   if (attention) return attention;
   if (run.status === 'exited') return null;
@@ -53,6 +55,6 @@ export function tabMark(run: Run): SessionMark | null {
 
 /** A session's terminal tab title: its name, and what it wants. */
 export function tabTitle(run: Run, name: string): string {
-  const mark = tabMark(run);
+  const mark = sessionMark(run);
   return mark ? `${mark.glyph} ${name}` : name;
 }

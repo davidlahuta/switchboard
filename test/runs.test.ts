@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { attentionFor, limitSwapPlan, rebindDecision, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
-import { attentionMark, tabMark, tabTitle } from '../src/shared/marks.ts';
+import { attentionMark, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
 import { PTY_TERM, withoutParentSession } from '../src/config.ts';
@@ -300,7 +300,7 @@ describe('what a terminal tab says it wants', () => {
     agentStatus: 'idle',
     attention: { waiting: false, unread: 0, unseen: false },
   };
-  const mark = (over: Partial<typeof base>): string => tabMark({ ...base, ...over } as Run)?.glyph ?? '';
+  const mark = (over: Partial<typeof base>): string => sessionMark({ ...base, ...over } as Run)?.glyph ?? '';
 
   it('marks nothing on a session that is idle and has been read', () => {
     // A mark on every tab is a mark worth nothing; the empty ones are what make the others carry.
@@ -333,20 +333,33 @@ describe('one mark, wherever a session is shown', () => {
 
   it('says the same thing in a tab as in the web list', () => {
     const waiting = run({ agentStatus: 'waiting', attention: { waiting: true, unread: 0, unseen: false } });
-    assert.equal(attentionMark(waiting)?.glyph, tabMark(waiting)?.glyph);
+    assert.equal(attentionMark(waiting)?.glyph, sessionMark(waiting)?.glyph);
     assert.equal(tabTitle(waiting, 'apex'), '❗ apex');
   });
 
-  it('keeps being busy to the tab, where nothing else says it', () => {
-    // The web lists put the agent's status in a pill an inch from the name; a tab has one line.
+  it('marks a busy session in both, and asks nothing of anyone for it', () => {
     const busy = run({ agentStatus: 'working' });
+    assert.equal(sessionMark(busy)?.glyph, '●', 'the same character the tab carries');
+    assert.equal(tabTitle(busy, 'apex'), '● apex');
+    // It will finish on its own, so it is not what the lists sort to the top.
     assert.equal(attentionMark(busy), null);
-    assert.equal(tabMark(busy)?.glyph, '●');
   });
 
   it('leaves an idle, read session unmarked in both', () => {
     assert.equal(attentionMark(run({})), null);
-    assert.equal(tabMark(run({})), null);
+    assert.equal(sessionMark(run({})), null);
     assert.equal(tabTitle(run({}), 'apex'), 'apex');
+  });
+
+  it('gives every state the tab shows a tone the web can colour', () => {
+    const states: Array<Partial<Run>> = [
+      { agentStatus: 'waiting', attention: { waiting: true, unread: 0, unseen: false } },
+      { attention: { waiting: false, unread: 1, unseen: false } },
+      { attention: { waiting: false, unread: 0, unseen: true } },
+      { agentStatus: 'working' },
+      { agentStatus: 'limited' },
+    ];
+    const tones = states.map((s) => sessionMark(run(s))!.tone);
+    assert.equal(new Set(tones).size, states.length, 'each state is its own tone, or two would look alike');
   });
 });

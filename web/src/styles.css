@@ -740,6 +740,14 @@ select.input {
 .attention-unseen {
   color: var(--ok);
 }
+/* Working and rate-limited want nothing from anybody, so they carry no colour of their own —
+   the shape is there to be counted, not to be answered. */
+.attention-busy {
+  color: var(--muted);
+}
+.attention-limited {
+  color: var(--warn);
+}
 @media (prefers-reduced-motion: no-preference) {
   .attention-blocked {
     animation: attention-pulse 2s ease-in-out infinite;
