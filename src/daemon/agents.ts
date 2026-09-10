@@ -42,7 +42,12 @@ export class AgentHub implements PushTarget {
       });
     });
     ws.on('close', () => {
-      if (sessionId && this.conns.get(sessionId)?.ws === ws) this.conns.delete(sessionId);
+      if (!sessionId || this.conns.get(sessionId)?.ws !== ws) return;
+      this.conns.delete(sessionId);
+      // The shim is a child of claude, so this is usually the session ending. Usually is not always
+      // — a daemon restart closes every one of these — so the coordinator weighs it rather than
+      // acting on it. See Coordinator.shimClosed.
+      this.coord.shimClosed(sessionId);
     });
   }
 

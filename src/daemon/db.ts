@@ -229,6 +229,25 @@ const MIGRATIONS: string[] = [
   -- cannot leave a failed resume looking like an ordinary /clear. See RunManager.rebind.
   ALTER TABLE runs ADD COLUMN resuming TEXT;
   `,
+  `
+  -- One agent held up by another's exclusive claim. Written when an edit is denied, so waiting is
+  -- a fact on the board rather than something only the blocked agent knows: it is what lets a
+  -- claim nobody is using be broken, and what makes a cycle of agents waiting on each other
+  -- something the daemon can see. See Coordinator.noteBlock.
+  CREATE TABLE blocks (
+    id INTEGER PRIMARY KEY,
+    repo_id TEXT NOT NULL,
+    waiter_id TEXT NOT NULL,
+    holder_id TEXT NOT NULL,
+    claim_id INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    since TEXT NOT NULL,
+    last_try TEXT NOT NULL,
+    cleared_at TEXT
+  );
+  CREATE UNIQUE INDEX blocks_open ON blocks (waiter_id, claim_id);
+  CREATE INDEX blocks_repo ON blocks (repo_id, cleared_at);
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

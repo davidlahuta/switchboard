@@ -94,6 +94,32 @@ At 40 agents with 50k messages, 250k events and 400k touches, one repo view is ~
   message from `switchboard`, so it rides the existing channel/piggyback/stop-block machinery, and
   each is said at most once every 45 minutes.
 
+### Keeping the board true
+
+Everything above is advisory: an agent deep in its own task can read all of it and carry on. Three
+things are not, because each of them is a way for one agent to leave another stuck indefinitely.
+
+**A session that has gone is off the board in about a minute.** Presence used to be inferred from
+silence, and an idle session at a prompt is silent — so the fallback had to be hours, and an agent
+that died holding an exclusive claim blocked everyone until its claim expired. Two witnesses settle
+it sooner: the run is over (`RunManager.sessionOver`, which watched the process end), or the
+session's MCP shim socket closed and no hook arrived within the grace. Going offline releases the
+agent's claims, so nothing dead holds a lock.
+
+**Waiting is written down, and a lock nobody is using can be taken away.** A denied edit records a
+row in `blocks` — who is waiting, on whose claim, for which path, since when. After ten minutes of
+waiting, if the holder has touched nothing inside its own claim since the wait began, the claim is
+released, both sides are told and the operator sees it happen; if the holder *is* working in there,
+it keeps it and is told somebody is standing in front of it. A ring of agents each waiting on the
+next one's claim (`findWaitCycle`) never resolves on its own however patient everyone is, so it is
+opened as a `deadlock` conflict and broken at the claim whose holder has been quiet longest.
+
+**A turn does not end owing the repo something.** The `Stop` hook is held once — and only once per
+agent per ten minutes — when the agent has read a question and not answered it, or holds an
+exclusive claim somebody is currently blocked on, or has push-worthy messages it has never been
+shown. Nothing else qualifies: intent and tidy bookkeeping are nudged where they happen, because a
+block that fires for everything is one an agent learns to sit through.
+
 ### MCP tools (kept to eight, terse descriptions to save context)
 
 `sb_status`, `sb_intent`, `sb_claim`, `sb_release`, `sb_send` (optionally waits for a reply),
@@ -111,6 +137,16 @@ shared folders to `~/.claude` (`projects`, `file-history`, `todos`, `plans`, `pl
 
 Adding a subscription opens a terminal running `claude auth login` inside the new profile; the
 daemon watches for credentials and reads the account (email, plan) from the OAuth profile endpoint.
+
+**Tokens are renewed before they die.** A Claude Code token lasts about eight hours and the CLI
+renews it on the next API call it makes — which a session sitting at a prompt never makes, and a
+subscription with nothing running on it certainly never makes, so one would simply expire and every
+reading Switchboard takes for it go stale until somebody logged in again. Fifteen minutes before
+expiry the daemon runs `claude doctor` in that profile: it renews an expired token through the
+CLI's own locked refresh path and leaves a healthy one untouched, at no cost in tokens and with no
+conversation. (`claude auth status`, which this used to run, only reports what is already on disk —
+the renewal never happened.) One attempt per subscription per minute, backing off to five when the
+refresh token itself is dead, which is the case that needs a person.
 
 Usage (5-hour and weekly utilisation + reset times) is polled from the OAuth usage endpoint that
 Claude Code's own `/usage` uses. It is undocumented and may change; failures are shown as *stale*

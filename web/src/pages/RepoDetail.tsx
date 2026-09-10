@@ -91,10 +91,25 @@ export function RepoDetailPage({ repoId, state }: { repoId: string; state: State
           </span>
         }
         actions={
-          <button type="button" className="btn btn-primary" onClick={() => setNewOpen(true)}>
-            <Icon name="plus" size={16} />
-            New session here
-          </button>
+          <>
+            {online.length === 0 && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                title="Remove this repository from Switchboard. Nothing on disk is touched, and it comes back if a session works here again."
+                onClick={async () => {
+                  if (!confirm(`Forget ${repo.name}? Its board, messages and history in Switchboard are deleted. Nothing on disk is touched.`)) return;
+                  if (await api.del(`/api/repos/${encodeURIComponent(repo.id)}`)) location.hash = href.overview();
+                }}
+              >
+                Forget repo
+              </button>
+            )}
+            <button type="button" className="btn btn-primary" onClick={() => setNewOpen(true)}>
+              <Icon name="plus" size={16} />
+              New session here
+            </button>
+          </>
         }
       />
 
@@ -246,7 +261,8 @@ function ConflictsSection({ conflicts, now }: { conflicts: Conflict[]; now: numb
             <span className="list-main">
               <span className="list-title mono">{c.path}</span>
               <span className="list-sub">
-                {c.kind === 'claim' ? 'claim violated' : 'overlapping edits'}: <strong>{c.agentAName}</strong> ↔ <strong>{c.agentBName}</strong>
+                {c.kind === 'claim' ? 'claim violated' : c.kind === 'deadlock' ? 'waiting in a ring' : 'overlapping edits'}:{' '}
+                <strong>{c.agentAName}</strong> ↔ <strong>{c.agentBName}</strong>
                 {c.detail ? ` — ${c.detail}` : ''} · {timeAgo(c.createdAt, now)}
               </span>
             </span>
@@ -282,6 +298,11 @@ function ClaimsSection({ claims, now }: { claims: Claim[]; now: number }) {
                 {c.reason ? ` — ${c.reason}` : ''} · {timeAgo(c.createdAt, now)}
                 {c.expiresAt ? ` · expires ${clockTime(c.expiresAt)}` : ''}
               </span>
+              {c.waiting.length > 0 && (
+                <span className="list-sub lvl-warn">
+                  blocking {c.waiting.map((w) => `${w.agentName} (${w.path}, waiting ${timeAgo(w.since, now)})`).join(', ')}
+                </span>
+              )}
             </span>
             <button type="button" className="btn btn-sm" onClick={() => void api.del(`/api/claims/${c.id}`)}>
               Release

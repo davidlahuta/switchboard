@@ -220,6 +220,9 @@ export function createServer(s: Services): http.Server {
   // Must precede /api/repos/:id, which would otherwise capture "discovered".
   route('GET', '/api/repos/discovered', ({ url }) => s.scanner.list(url.searchParams.get('refresh') === '1'));
   route('GET', '/api/repos/:id', ({ params }) => s.coord.repoDetail(params[0]) ?? fail(404, 'Unknown repo'));
+  route('DELETE', '/api/repos/:id', ({ params }) =>
+    s.coord.forgetRepo(params[0]) ? { ok: true } : fail(409, 'Unknown repo, or agents are still working in it.'),
+  );
   route('POST', '/api/repos/:id/messages', ({ params, body }) => {
     const text = String(body.body ?? '').trim();
     if (!text) fail(400, 'body is required');

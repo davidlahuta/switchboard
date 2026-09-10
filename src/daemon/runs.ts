@@ -274,6 +274,17 @@ export class RunManager {
     return this.db.get<RunRow>("SELECT * FROM runs WHERE session_id = ? AND status <> 'exited' ORDER BY created_at DESC LIMIT 1", sessionId);
   }
 
+  /**
+   * Whether a session Switchboard hosts is over. The board otherwise has to infer death from
+   * silence, and silence is exactly what an idle session at a prompt produces — so a session that
+   * really ended can sit on the board holding an exclusive claim long after there is anyone behind
+   * it. A session with no run here is not Switchboard's to speak for, and answers false.
+   */
+  sessionOver(sessionId: string): boolean {
+    const rows = this.db.all<{ status: RunStatus }>('SELECT status FROM runs WHERE session_id = ?', sessionId);
+    return rows.length > 0 && rows.every((r) => r.status === 'exited');
+  }
+
   liveCount(subscriptionId?: string): number {
     const placeholders = LIVE.map(() => '?').join(', ');
     const sql = `SELECT COUNT(*) AS n FROM runs WHERE status IN (${placeholders})${subscriptionId ? ' AND subscription_id = ?' : ''}`;

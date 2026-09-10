@@ -271,6 +271,22 @@ delivery of FYIs — and a sweep every minute chases the two silences that leave
 written as steps rather than as state. Announcing an intent and releasing an exclusive claim are
 broadcast to the live agents, so a claim that lifts does not go on shaping everybody else's work.
 
+All of that can be read and ignored, so the three ways one agent can leave another stuck for good
+are handled rather than mentioned:
+
+* **Nobody waits on a dead session.** A session whose run has ended, or whose tools have
+  disconnected without a hook since, is off the board in about a minute rather than after hours of
+  silence — and going offline releases its claims.
+* **Nobody waits forever on a live one.** A blocked edit records who is waiting on whom. Ten
+  minutes later, a claim its holder has not touched since the wait began is released for the agent
+  that is waiting; a holder still working in there keeps it and is told somebody is queued. Agents
+  waiting on each other in a ring — which no amount of patience unpicks — are shown to the operator
+  as a deadlock and broken at the quietest link.
+* **A turn does not end owing something.** Stopping is held once, briefly, when the agent has read
+  a question and not answered it or holds a lock somebody is standing in front of. Once: an agent
+  that has been told and stops anyway has decided, and being asked every turn would only cost
+  turns.
+
 ## Architecture
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the [API reference](docs/API.md).

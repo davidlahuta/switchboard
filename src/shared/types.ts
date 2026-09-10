@@ -124,6 +124,17 @@ export interface Claim {
   reason: string | null;
   createdAt: string;
   expiresAt: string | null;
+  /** Agents currently held up by this claim, oldest wait first. */
+  waiting: Waiting[];
+}
+
+/** One agent standing in front of another's exclusive claim. */
+export interface Waiting {
+  agentId: string;
+  agentName: string;
+  /** The path it last tried to edit. */
+  path: string;
+  since: string;
 }
 
 export type MessageKind = 'info' | 'question' | 'request' | 'handoff' | 'warning' | 'conflict';
@@ -159,7 +170,7 @@ export interface Note {
   createdAt: string;
 }
 
-export type ConflictKind = 'overlap' | 'claim';
+export type ConflictKind = 'overlap' | 'claim' | 'deadlock';
 export type ConflictStatus = 'open' | 'resolved' | 'dismissed';
 
 export interface Conflict {

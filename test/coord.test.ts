@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { Bus } from '../src/daemon/bus.ts';
-import { Coordinator, type PushTarget } from '../src/daemon/coord.ts';
+import { Coordinator, findWaitCycle, type PushTarget } from '../src/daemon/coord.ts';
 import { Db } from '../src/daemon/db.ts';
 import { matchesPattern, patternsOverlap, relPath } from '../src/git.ts';
 import { UNREAD_CAP } from '../src/shared/types.ts';
@@ -41,7 +42,10 @@ describe('coordinator', () => {
   const channelAgents = new Set<string>();
 
   before(async () => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-test-'));
+    dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sb-test-')));
+    // A real repository, because that is what the agents in it are: a session only moves between
+    // boards when it moves between repositories, so a bare directory cannot stand in for one.
+    execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
     db = new Db(':memory:');
     coord = new Coordinator(db, new Bus());
     const target: PushTarget = {
@@ -136,8 +140,29 @@ describe('coordinator', () => {
     coord.markOffline('cccc3333', 'test');
   });
 
+  it('leaves an agent where it is when it steps outside version control', async () => {
+    // A command run in a temp directory, or a look under ~/.claude: not a change of project. Taking
+    // it for one put a board on the nav for every such directory and took the session's intent and
+    // claims off the repository it was actually working in.
+    const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sb-scratch-')));
+    try {
+      const before = coord.agent('aaaa1111')!;
+      coord.setIntent('aaaa1111', 'still working here', ['src/**']);
+      await coord.setCwd('aaaa1111', scratch);
+      const after = coord.agent('aaaa1111')!;
+      assert.equal(after.repo_id, before.repo_id);
+      assert.equal(after.intent, 'still working here', 'and it keeps what it announced');
+      assert.equal(after.cwd, scratch, 'though where it is is still recorded');
+      assert.ok(!coord.listRepos().some((r) => r.root === scratch), 'no board for a directory that is not a repository');
+      coord.release('aaaa1111');
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
   it('re-groups an agent that moves to another repo', async () => {
-    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-other-'));
+    const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sb-other-')));
+    execFileSync('git', ['init'], { cwd: other, stdio: 'ignore' });
     try {
       const before = coord.agent('aaaa1111')!;
       coord.claim('aaaa1111', ['src/**'], false, null, 30);
@@ -294,5 +319,182 @@ describe('pushing agents to use the board', () => {
     const status = coord.statusText('n1111111');
     assert.match(status, /Owed by you/);
     assert.match(status, /sb_intent/, 'it never announced a task');
+  });
+});
+
+describe('waiting on another agent', () => {
+  it('tells a queue from a ring', () => {
+    // Three agents all waiting on one: it clears the moment that one finishes.
+    assert.equal(findWaitCycle([{ waiter: 'a', holder: 'd' }, { waiter: 'b', holder: 'd' }, { waiter: 'c', holder: 'd' }]), null);
+    // A chain is still a queue, however long.
+    assert.equal(findWaitCycle([{ waiter: 'a', holder: 'b' }, { waiter: 'b', holder: 'c' }]), null);
+
+    const pair = findWaitCycle([{ waiter: 'a', holder: 'b' }, { waiter: 'b', holder: 'a' }]);
+    assert.deepEqual([...(pair ?? [])].sort(), ['a', 'b']);
+
+    const ring = findWaitCycle([
+      { waiter: 'a', holder: 'b' },
+      { waiter: 'b', holder: 'c' },
+      { waiter: 'c', holder: 'a' },
+      { waiter: 'z', holder: 'a' },
+    ]);
+    assert.deepEqual([...(ring ?? [])].sort(), ['a', 'b', 'c'], 'the ring, not the agent queued behind it');
+  });
+
+  it('ignores an agent listed as waiting on itself', () => {
+    assert.equal(findWaitCycle([{ waiter: 'a', holder: 'a' }]), null);
+  });
+});
+
+describe('a board that keeps itself honest', () => {
+  let dir: string;
+  let db: Db;
+  let coord: Coordinator;
+  let repoId: string;
+  const ended = new Set<string>();
+  const back = (ms: number): string => new Date(Date.now() - ms).toISOString();
+  const file = (...parts: string[]): string => path.join(dir, ...parts);
+  const backdateBlocks = (ms: number): void => {
+    coord.raw.run('UPDATE blocks SET since = ?', back(ms));
+  };
+
+  before(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-honest-'));
+    db = new Db(':memory:');
+    coord = new Coordinator(db, new Bus());
+    coord.setPushTarget({ push: () => false, isConnected: () => false });
+    coord.setSessionGone((id) => ended.has(id));
+    repoId = (await coord.registerAgent({ sessionId: 'h1111111', cwd: dir, name: 'hilda' })).repo_id;
+    await coord.registerAgent({ sessionId: 'h2222222', cwd: dir, name: 'igor' });
+  });
+
+  after(() => {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('records who is waiting on a claim, and shows it to the operator', async () => {
+    coord.claim('h1111111', ['src/api/**'], true, 'rewriting the client', 240);
+    assert.match((await coord.preEdit('h2222222', file('src', 'api', 'client.ts'))).deny ?? '', /exclusively claimed/);
+
+    const claim = coord.repoDetail(repoId)!.claims.find((c) => c.pattern === 'src/api/**')!;
+    assert.equal(claim.waiting.length, 1, 'the wait is on the board, not only inside the blocked agent');
+    assert.equal(claim.waiting[0].agentName, 'igor');
+    assert.equal(claim.waiting[0].path, 'src/api/client.ts');
+  });
+
+  it('leaves a claim alone while its holder is still working in it', async () => {
+    await coord.recordEdit('h1111111', file('src', 'api', 'server.ts'), 'Edit');
+    backdateBlocks(30 * 60_000);
+    coord.sweep();
+
+    assert.ok((await coord.preEdit('h2222222', file('src', 'api', 'client.ts'))).deny, 'still held');
+    assert.match(coord.piggyback('h1111111') ?? '', /blocked on your exclusive claim/, 'but the holder is told somebody is there');
+  });
+
+  it('breaks a claim its holder has stopped using rather than leaving anyone stuck', async () => {
+    backdateBlocks(30 * 60_000);
+    // Nothing touched inside the claim since the wait began.
+    coord.raw.run('UPDATE file_touches SET ts = ? WHERE agent_id = ?', back(60 * 60_000), 'h1111111');
+    coord.sweep();
+
+    assert.equal((await coord.preEdit('h2222222', file('src', 'api', 'client.ts'))).deny, undefined, 'the wait is over');
+    assert.match(coord.piggyback('h1111111') ?? '', /was released/, 'the holder hears it from Switchboard rather than from a silence');
+    assert.match(coord.piggyback('h2222222') ?? '', /is free/, 'and so does whoever was waiting');
+    assert.ok(
+      coord.repoDetail(repoId)!.events.some((e) => /Switchboard released .*src\/api/.test(e.summary)),
+      'the operator can see it happened',
+    );
+  });
+
+  it('breaks a ring of agents waiting on each other', async () => {
+    coord.release('h1111111');
+    coord.release('h2222222');
+    coord.claim('h1111111', ['src/left/**'], true, 'left half', 240);
+    coord.claim('h2222222', ['src/right/**'], true, 'right half', 240);
+    // Each wants what the other holds, and each is busy with its own half, so nothing frees itself.
+    await coord.preEdit('h1111111', file('src', 'right', 'a.ts'));
+    await coord.preEdit('h2222222', file('src', 'left', 'b.ts'));
+    await coord.recordEdit('h1111111', file('src', 'left', 'own.ts'), 'Edit');
+    await coord.recordEdit('h2222222', file('src', 'right', 'own.ts'), 'Edit');
+
+    backdateBlocks(3 * 60_000);
+    coord.sweep();
+
+    const detail = coord.repoDetail(repoId)!;
+    assert.equal(detail.claims.filter((c) => c.exclusive).length, 1, 'one side of the ring is released — the least that unsticks it');
+    const conflict = detail.conflicts.find((c) => c.kind === 'deadlock');
+    assert.ok(conflict, 'and the operator is shown a deadlock rather than another overlap');
+    assert.match(conflict!.detail ?? '', /hilda|igor/);
+    assert.match(coord.piggyback('h1111111') ?? '', /Deadlock/);
+  });
+
+  it('warns before a second agent writes a file the first one just wrote', async () => {
+    coord.release('h1111111');
+    coord.release('h2222222');
+    await coord.recordEdit('h1111111', file('src', 'shared', 'both.ts'), 'Edit');
+    const verdict = await coord.preEdit('h2222222', file('src', 'shared', 'both.ts'));
+    assert.equal(verdict.deny, undefined, 'nobody claimed it, so nothing is refused');
+    assert.match(verdict.context ?? '', /edited just now by hilda/);
+    assert.equal((await coord.preEdit('h2222222', file('src', 'shared', 'both.ts'))).context, undefined, 'said once, not on every edit');
+  });
+
+  it('holds a turn open for a question the agent has read and not answered', () => {
+    const asked = coord.send('h1111111', repoId, 'igor', 'question', 'are you rewriting the client or am I?');
+    coord.raw.run('INSERT INTO deliveries (message_id, agent_id, via, delivered_at) VALUES (?, ?, ?, ?)', asked.id, 'h2222222', 'test', back(60_000));
+
+    const reason = coord.stopBlockReason('h2222222') ?? '';
+    assert.match(reason, /have not answered/);
+    assert.match(reason, new RegExp(`reply_to=${asked.id}`), 'and it is told exactly how');
+    assert.equal(coord.stopBlockReason('h2222222'), null, 'asked once: an agent that stops anyway has decided');
+
+    coord.send('h2222222', repoId, 'hilda', 'info', 'you are, I am on the server', false, asked.id);
+    assert.equal(coord.stopBlockReason('h2222222'), null);
+  });
+
+  it('holds a turn open for a lock somebody is standing in front of', async () => {
+    coord.claim('h1111111', ['src/db/**'], true, 'schema change', 240);
+    await coord.preEdit('h2222222', file('src', 'db', 'schema.ts'));
+
+    const reason = coord.stopBlockReason('h1111111') ?? '';
+    assert.match(reason, /igor wants src\/db\/schema\.ts/);
+    assert.match(reason, /sb_release/);
+    coord.release('h1111111');
+    assert.equal(coord.stopBlockReason('h1111111'), null, 'nothing owed once the lock is gone');
+  });
+
+  it('says nothing to an agent that owes nothing', () => {
+    assert.equal(coord.stopBlockReason('h2222222'), null);
+  });
+
+  it('takes a session off the board when its tools disconnect for good', async () => {
+    await coord.registerAgent({ sessionId: 'h3333333', cwd: dir, name: 'jo' });
+    coord.claim('h3333333', ['src/gone/**'], true, 'work in progress', 240);
+    coord.shimClosed('h3333333', Date.now() - 5 * 60_000);
+
+    coord.raw.run('UPDATE agents SET last_seen = ? WHERE id = ?', back(5 * 60_000), 'h3333333');
+    coord.sweep();
+
+    assert.equal(coord.agent('h3333333')!.status, 'offline');
+    assert.equal((await coord.preEdit('h1111111', file('src', 'gone', 'x.ts'))).deny, undefined, 'a dead agent holds nothing');
+  });
+
+  it('believes a hook over a shim that dropped', () => {
+    coord.raw.run("INSERT INTO agents (id, repo_id, name, status, has_channel, started_at, last_seen, read_through_id) VALUES ('h4444444', ?, 'kit', 'working', 0, ?, ?, 0)", repoId, back(60 * 60_000), back(60 * 60_000));
+    coord.shimClosed('h4444444');
+    coord.setStatus('h4444444', 'working');
+    coord.sweep();
+    assert.equal(coord.agent('h4444444')!.status, 'working', 'the session is plainly alive; only its MCP server went');
+  });
+
+  it('takes a session off the board the moment its run is over', async () => {
+    await coord.registerAgent({ sessionId: 'h5555555', cwd: dir, name: 'lou' });
+    coord.raw.run('UPDATE agents SET last_seen = ? WHERE id = ?', back(5 * 60_000), 'h5555555');
+    coord.sweep();
+    assert.notEqual(coord.agent('h5555555')!.status, 'offline', 'silence alone means nothing: an idle session makes plenty of it');
+
+    ended.add('h5555555');
+    coord.sweep();
+    assert.equal(coord.agent('h5555555')!.status, 'offline');
   });
 });

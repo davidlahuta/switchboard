@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { forgetRepoCache, matchesPattern, patternsOverlap, relPath, repoIdFor, resolveRepo } from '../git.ts';
 import { logger } from '../log.ts';
@@ -6,6 +7,7 @@ import type {
   AgentStatus,
   Claim,
   Conflict,
+  ConflictKind,
   FeedEvent,
   FileTouch,
   Message,
@@ -14,6 +16,7 @@ import type {
   NoteKind,
   Repo,
   RepoDetail,
+  Waiting,
 } from '../shared/types.ts';
 import { UNREAD_CAP } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
@@ -90,7 +93,7 @@ interface ConflictRow {
   id: number;
   repo_id: string;
   path: string;
-  kind: 'overlap' | 'claim';
+  kind: ConflictKind;
   status: 'open' | 'resolved' | 'dismissed';
   agent_a: string;
   agent_b: string;
@@ -103,6 +106,18 @@ interface ConflictRow {
 export interface PushTarget {
   push(agentId: string, content: string, meta: Record<string, string>): boolean;
   isConnected(agentId: string): boolean;
+}
+
+interface BlockRow {
+  id: number;
+  repo_id: string;
+  waiter_id: string;
+  holder_id: string;
+  claim_id: number;
+  path: string;
+  since: string;
+  last_try: string;
+  cleared_at: string | null;
 }
 
 export interface RegisterInput {
@@ -136,6 +151,30 @@ const CLAIM_IDLE_MS = 25 * 60_000;
 /** How long a question may go unanswered before the agent it was put to is reminded. */
 const UNANSWERED_MS = 6 * 60_000;
 /**
+ * How long one agent waits on another's exclusive claim before the claim is broken for it — when
+ * the holder has not touched the claimed paths in all that time. A lock nobody can take away is a
+ * lock that eventually strands somebody, and a holder that has moved on to something else is not
+ * using what it is holding. Long enough that an agent between tool calls is never robbed.
+ */
+const BLOCK_PATIENCE_MS = 10 * 60_000;
+/** How long a recorded block stands for a waiter that has stopped retrying and said nothing. */
+const BLOCK_ACTIVE_MS = 30 * 60_000;
+/**
+ * How long every wait in a ring has to have stood before it counts as a deadlock. One agent that
+ * tried a claimed file once and got on with something else leaves an edge behind for a while; two
+ * of those pointing at each other look exactly like a deadlock and are not one.
+ */
+const DEADLOCK_MIN_MS = 2 * 60_000;
+/** How long a shim socket may stay closed before the session behind it is taken as gone. */
+const SHIM_GRACE_MS = 90_000;
+/**
+ * How long the same unfinished business is left alone after a turn was once held open for it. The
+ * block exists to make an agent settle up, not to trap one that has decided not to.
+ */
+const SETTLE_TTL_MS = 10 * 60_000;
+/** A message has to have been in front of the agent this long before not answering it is a debt. */
+const OWED_ANSWER_MS = 20_000;
+/**
  * How recently a hook has to have arrived for the session to count as answering for itself. A
  * process that really died stops hooking at once, so anything inside this window is alive.
  */
@@ -146,6 +185,44 @@ export function editedPath(toolName: unknown, toolInput: unknown): string | null
   const input = (toolInput ?? {}) as Record<string, unknown>;
   const p = input.file_path ?? input.notebook_path;
   return typeof p === 'string' ? p : null;
+}
+
+/**
+ * A ring of agents each waiting on the next one's claim, or null if the waiting is only a queue.
+ *
+ * An edge is "waiter is blocked by holder". A queue — three agents all waiting on one — resolves
+ * itself the moment the holder finishes; a ring never does, because every agent in it is waiting
+ * for one that is waiting for it. Returned as the ring itself, so what is said about it can name
+ * the agents in the order they wait.
+ */
+export function findWaitCycle(edges: Array<{ waiter: string; holder: string }>): string[] | null {
+  const out = new Map<string, string[]>();
+  for (const e of edges) {
+    if (e.waiter === e.holder) continue;
+    out.set(e.waiter, [...(out.get(e.waiter) ?? []), e.holder]);
+  }
+  const state = new Map<string, 'open' | 'done'>();
+  const stack: string[] = [];
+  const walk = (node: string): string[] | null => {
+    state.set(node, 'open');
+    stack.push(node);
+    for (const next of out.get(node) ?? []) {
+      if (state.get(next) === 'open') return stack.slice(stack.indexOf(next));
+      if (!state.has(next)) {
+        const found = walk(next);
+        if (found) return found;
+      }
+    }
+    stack.pop();
+    state.set(node, 'done');
+    return null;
+  };
+  for (const node of out.keys()) {
+    if (state.has(node)) continue;
+    const found = walk(node);
+    if (found) return found;
+  }
+  return null;
 }
 
 export function ago(iso: string | null): string {
@@ -185,6 +262,10 @@ export class Coordinator {
   private pushTarget: PushTarget = { push: () => false, isConnected: () => false };
   private readonly warned = new Map<string, number>();
   private readonly waiters = new Map<number, Array<(m: Message) => void>>();
+  /** When each session's tools last went away, for the sweep. */
+  private readonly shimGone = new Map<string, number>();
+  /** Whether a session Switchboard hosts has ended. Unhosted sessions answer false: not "alive". */
+  private sessionGone: (sessionId: string) => boolean = () => false;
 
   constructor(db: Db, bus: Bus) {
     this.db = db;
@@ -193,6 +274,24 @@ export class Coordinator {
 
   setPushTarget(target: PushTarget): void {
     this.pushTarget = target;
+  }
+
+  /**
+   * Teach the sweep to ask RunManager whether a session it hosts is over. Silence is weak evidence
+   * — an idle session at a prompt makes none of it — so the board needs a witness that speaks up.
+   */
+  setSessionGone(fn: (sessionId: string) => boolean): void {
+    this.sessionGone = fn;
+  }
+
+  /**
+   * The session's MCP server disconnected. That server is a child of claude, so its socket closing
+   * usually means the process is gone — but not always: the daemon restarting closes every one of
+   * them, and a session can outlive a crashed shim. So it is recorded as evidence for the sweep to
+   * weigh against a hook, never acted on here.
+   */
+  shimClosed(agentId: string, at = Date.now()): void {
+    if (!this.shimGone.has(agentId)) this.shimGone.set(agentId, at);
   }
 
   // ---------------------------------------------------------------- repos
@@ -297,6 +396,8 @@ export class Coordinator {
       this.event(repo.id, input.sessionId, 'joined', `${name} joined${info.branch ? ` on ${info.branch}` : ''}`);
       log.info('agent joined', { name, repo: repo.name });
     }
+    // Whatever its tools did before, they are here now.
+    this.shimGone.delete(input.sessionId);
     this.repoTouched(repo.id);
     this.bus.invalidate('state', `repo:${repo.id}`);
     return this.agent(input.sessionId)!;
@@ -326,6 +427,18 @@ export class Coordinator {
     if (!a) return;
     const info = await resolveRepo(cwd);
     const ts = now();
+    /*
+     * A session that steps outside version control has not changed projects. It has run a command
+     * in a temp directory, or gone to read something under ~/.claude — and taking that for a move
+     * put a board on the nav for every such directory, and worse, took the session's intent and
+     * claims away from the repository it was actually working in, because a move is supposed to
+     * drop those. Only another repository is another project; anywhere else, its cwd is noted and
+     * it stays where it belongs.
+     */
+    if (!info.isGit) {
+      this.db.run('UPDATE agents SET cwd = ?, last_seen = ? WHERE id = ?', cwd, ts, id);
+      return;
+    }
     const repo = this.ensureRepo(info.root);
     if (repo.id === a.repo_id) {
       this.db.run('UPDATE agents SET cwd = ?, worktree = ?, branch = ?, last_seen = ? WHERE id = ?', cwd, info.worktree, info.branch, ts, id);
@@ -381,7 +494,8 @@ export class Coordinator {
     const touchCutoff = new Date(Date.now() - TOUCH_RETENTION_DAYS * 86400_000).toISOString();
     const removed =
       this.db.run('DELETE FROM events WHERE ts < ?', eventCutoff).changes +
-      this.db.run('DELETE FROM file_touches WHERE ts < ?', touchCutoff).changes;
+      this.db.run('DELETE FROM file_touches WHERE ts < ?', touchCutoff).changes +
+      this.db.run('DELETE FROM blocks WHERE last_try < ?', touchCutoff).changes;
     let capped = 0;
     for (const r of this.db.all<{ id: string }>('SELECT id FROM repos')) {
       capped += this.db.run(
@@ -394,6 +508,39 @@ export class Coordinator {
     }
     // Deliveries outlive their message only if a message is ever deleted; messages are kept.
     if (removed + capped > 0) log.info('pruned history', { aged: removed, overCap: capped });
+    this.forgetVanishedRepos();
+  }
+
+  /**
+   * Drop boards whose repository is no longer on disk. A temporary checkout, a probe, a scratch
+   * directory: each one registered a repository the first time a session spoke from inside it, and
+   * each one stayed on the nav for good once the directory was deleted. Nothing that still exists
+   * is touched, and neither is a board with anyone on it.
+   */
+  private forgetVanishedRepos(): void {
+    const idle = new Date(Date.now() - 60 * 60_000).toISOString();
+    for (const r of this.db.all<RepoRow>('SELECT * FROM repos')) {
+      if (fs.existsSync(r.root)) continue;
+      if ((r.last_activity ?? r.created_at) > idle) continue;
+      if (this.liveAgents(r.id).length) continue;
+      this.forgetRepo(r.id);
+      log.info('forgot a repository that is no longer on disk', { name: r.name, root: r.root });
+    }
+  }
+
+  /** Erase a board and everything filed under it. Refused while anyone is still working there. */
+  forgetRepo(repoId: string): boolean {
+    const r = this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', repoId);
+    if (!r || this.liveAgents(repoId).length) return false;
+    this.db.tx(() => {
+      this.db.run('DELETE FROM deliveries WHERE message_id IN (SELECT id FROM messages WHERE repo_id = ?)', repoId);
+      for (const table of ['blocks', 'claims', 'file_touches', 'messages', 'notes', 'conflicts', 'events', 'agents']) {
+        this.db.run(`DELETE FROM ${table} WHERE repo_id = ?`, repoId);
+      }
+      this.db.run('DELETE FROM repos WHERE id = ?', repoId);
+    });
+    this.bus.invalidate('state', `repo:${repoId}`);
+    return true;
   }
 
   /** Periodic liveness sweep: dead pids and long-silent hook-only agents go offline. */
@@ -424,13 +571,27 @@ export class Coordinator {
         }
       }
       if (silentMs < RECENTLY_SEEN_MS) continue;
-      if (dead || silentMs > 3 * 3600_000 || (!a.pid && silentMs > 30 * 60_000 && a.status === 'starting')) {
-        this.markOffline(a.id, dead ? 'process exited' : 'no activity');
+      /*
+       * Two witnesses that do not depend on waiting three hours for silence to mean something.
+       *
+       * A hosted session's run is the strongest: RunManager watched the process end. Its tools
+       * disconnecting is nearly as good, once the grace has passed without a hook — that socket is
+       * a child of claude. Both matter because the case they cover is the expensive one: an agent
+       * that died holding an exclusive claim blocks everyone else until it is taken off the board.
+       */
+      const goneMs = this.shimGone.get(a.id);
+      const shimGone = goneMs !== undefined && Date.now() - goneMs > SHIM_GRACE_MS;
+      if (this.sessionGone(a.id)) {
+        this.markOffline(a.id, 'its session ended');
+      } else if (dead || shimGone || silentMs > 3 * 3600_000 || (!a.pid && silentMs > 30 * 60_000 && a.status === 'starting')) {
+        this.markOffline(a.id, dead ? 'process exited' : shimGone ? 'its tools disconnected' : 'no activity');
       }
     }
     for (const repo of this.db.all<{ id: string }>('SELECT id FROM repos')) {
       this.nudgeStaleClaims(repo.id);
       this.nudgeUnanswered(repo.id);
+      this.breakStaleBlocks(repo.id);
+      this.breakDeadlocks(repo.id);
     }
   }
 
@@ -496,6 +657,145 @@ export class Coordinator {
       }
       this.send(SYSTEM, repoId, target.id, 'request', `You have not answered #${m.id} from ${asker} (${ago(m.created_at)}): "${clip(m.body, 200)}". Reply now with sb_send (reply_to=${m.id}), even if the answer is that you have not got to it — ${asker} is waiting on you.`);
     }
+  }
+
+  // ---------------------------------------------------------------- blocks
+
+  /**
+   * Record that one agent is held up by another's exclusive claim.
+   *
+   * Waiting is otherwise the one thing on this board nobody can see: the blocked agent is told to
+   * go and ask, the holder hears nothing, and the operator has a conflict row that says an edit was
+   * refused but not that someone is still standing there. Written down, it becomes the thing that
+   * lets an unused claim be broken and a cycle of agents waiting on each other be recognised.
+   */
+  private noteBlock(repoId: string, waiterId: string, claim: ClaimRow, rel: string): void {
+    const ts = now();
+    const existing = this.db.get<BlockRow>('SELECT * FROM blocks WHERE waiter_id = ? AND claim_id = ?', waiterId, claim.id);
+    if (!existing) {
+      this.db.run(
+        'INSERT INTO blocks (repo_id, waiter_id, holder_id, claim_id, path, since, last_try) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        repoId,
+        waiterId,
+        claim.agent_id,
+        claim.id,
+        rel,
+        ts,
+        ts,
+      );
+      return;
+    }
+    // A wait that was settled and has started again is a new wait, and its patience starts over.
+    if (existing.cleared_at) this.db.run('UPDATE blocks SET path = ?, since = ?, last_try = ?, cleared_at = NULL WHERE id = ?', rel, ts, ts, existing.id);
+    else this.db.run('UPDATE blocks SET path = ?, last_try = ? WHERE id = ?', rel, ts, existing.id);
+  }
+
+  /**
+   * Waits that still stand. A block outlives neither its claim nor its waiter: a claim that has
+   * been released or expired blocks nobody, and an agent that has gone away — or has stopped
+   * retrying and said nothing for half an hour — is no longer standing there.
+   */
+  private openBlocks(repoId: string): Array<BlockRow & { claim: ClaimRow; waiterName: string }> {
+    const claims = new Map(this.activeClaims(repoId).map((c) => [c.id, c]));
+    if (!claims.size) return [];
+    const live = new Map(this.liveAgents(repoId).map((a) => [a.id, a]));
+    const fresh = new Date(Date.now() - BLOCK_ACTIVE_MS).toISOString();
+    const out: Array<BlockRow & { claim: ClaimRow; waiterName: string }> = [];
+    for (const b of this.db.all<BlockRow>('SELECT * FROM blocks WHERE repo_id = ? AND cleared_at IS NULL AND last_try >= ? ORDER BY id', repoId, fresh)) {
+      const claim = claims.get(b.claim_id);
+      const waiter = live.get(b.waiter_id);
+      if (!claim || !bool(claim.exclusive) || !waiter) continue;
+      out.push({ ...b, claim, waiterName: waiter.name });
+    }
+    return out;
+  }
+
+  /** Whether the holder has done anything inside its own claim since the wait started. */
+  private claimUsedSince(repoId: string, holderId: string, pattern: string, since: string): boolean {
+    return this.db
+      .all<{ path: string }>('SELECT DISTINCT path FROM file_touches WHERE repo_id = ? AND agent_id = ? AND ts >= ?', repoId, holderId, since)
+      .some((t) => matchesPattern(t.path, pattern));
+  }
+
+  /**
+   * Take a claim off an agent that is not using it. The claim is a reservation, not property: it is
+   * released, both sides are told in the same breath, and the operator sees it happen. Nothing the
+   * holder wrote is touched, and it is free to claim the paths again — this only ends the waiting.
+   */
+  private breakClaim(claim: ClaimRow, why: string): void {
+    const ts = now();
+    if (!this.db.run('UPDATE claims SET released_at = ? WHERE id = ? AND released_at IS NULL', ts, claim.id).changes) return;
+    const waiters = this.db.all<BlockRow>('SELECT * FROM blocks WHERE claim_id = ? AND cleared_at IS NULL', claim.id);
+    this.db.run('UPDATE blocks SET cleared_at = ? WHERE claim_id = ? AND cleared_at IS NULL', ts, claim.id);
+    this.event(claim.repo_id, claim.agent_id, 'release', `Switchboard released ${claim.agent_name}'s claim "${claim.pattern}" — ${why}`);
+    this.send(
+      SYSTEM,
+      claim.repo_id,
+      claim.agent_id,
+      'warning',
+      `Your ${bool(claim.exclusive) ? 'exclusive ' : ''}claim "${claim.pattern}" was released: ${why}. Nothing you wrote was touched, and you can take it again with sb_claim — but say what you are doing there with sb_send first, because somebody has been waiting on it.`,
+    );
+    for (const w of waiters) {
+      this.send(SYSTEM, claim.repo_id, w.waiter_id, 'request', `"${claim.pattern}" is free: ${claim.agent_name}'s claim was released (${why}). ${w.path} is yours to edit — check it has not changed under you first.`);
+    }
+    this.bus.toast('warn', `${claim.agent_name}'s claim "${claim.pattern}" was released — ${why}`);
+    log.info('claim broken', { repo: claim.repo_id, holder: claim.agent_name, pattern: claim.pattern, why });
+    this.bus.invalidate('state', `repo:${claim.repo_id}`);
+  }
+
+  /**
+   * A claim that is holding somebody up and is not being used. The holder gets the patience window
+   * to touch it; after that the wait costs more than the reservation is worth. A holder that *is*
+   * working in there keeps it, and is told that it is standing on somebody's foot.
+   */
+  private breakStaleBlocks(repoId: string): void {
+    for (const b of this.openBlocks(repoId)) {
+      if (Date.now() - Date.parse(b.since) < BLOCK_PATIENCE_MS) continue;
+      if (!this.claimUsedSince(repoId, b.holder_id, b.claim.pattern, b.since)) {
+        this.breakClaim(b.claim, `${b.waiterName} was blocked on it for ${ago(b.since).replace(' ago', '')} and it had not been touched since`);
+        continue;
+      }
+      if (!this.shouldWarn(`blocked-holder|${b.claim_id}|${b.waiter_id}`, NUDGE_TTL_MS)) continue;
+      this.send(
+        SYSTEM,
+        repoId,
+        b.holder_id,
+        'request',
+        `${b.waiterName} has been blocked on your exclusive claim "${b.claim.pattern}" since ${ago(b.since)} (it wants ${b.path}). You are still working in there, so it has been left with you — tell ${b.waiterName} how long you need with sb_send, or narrow the claim with sb_release.`,
+      );
+    }
+  }
+
+  /**
+   * Agents waiting on each other in a ring. Neither the patience window nor a nudge helps here:
+   * every holder is busy, every holder is blocked, and each is waiting for a claim that will not be
+   * released until the one behind it moves. So the ring is broken at its weakest link — the claim
+   * whose holder has been quiet longest — and everyone in it is told what happened and why.
+   */
+  private breakDeadlocks(repoId: string): void {
+    const settled = new Date(Date.now() - DEADLOCK_MIN_MS).toISOString();
+    const blocks = this.openBlocks(repoId).filter((b) => b.since <= settled);
+    const cycle = findWaitCycle(blocks.map((b) => ({ waiter: b.waiter_id, holder: b.holder_id })));
+    if (!cycle) return;
+    const inCycle = new Set(cycle);
+    const involved = blocks.filter((b) => inCycle.has(b.waiter_id) && inCycle.has(b.holder_id));
+    if (!involved.length) return;
+    // The link least likely to be missed: whoever has been silent longest is the least likely to be
+    // mid-edit, and last_seen is the only measure of that which every agent keeps up to date.
+    const victim = involved
+      .map((b) => ({ block: b, seen: this.agent(b.holder_id)?.last_seen ?? '' }))
+      .sort((x, y) => x.seen.localeCompare(y.seen) || x.block.claim_id - y.block.claim_id)[0];
+    const names = cycle.map((id) => this.nameOf(id));
+    const detail = `${names.join(' → ')} → ${names[0]}`;
+    if (this.shouldWarn(`deadlock|${[...cycle].sort().join('|')}`, NUDGE_TTL_MS)) {
+      this.openConflict(repoId, victim.block.claim.pattern, 'deadlock', victim.block.waiter_id, victim.block.holder_id, `waiting in a ring: ${detail}`);
+      for (const id of cycle) {
+        this.send(SYSTEM, repoId, id, 'warning', `Deadlock on this repo: ${detail} — each of you is blocked on the next one's exclusive claim. Switchboard is releasing ${this.nameOf(victim.block.holder_id)}'s "${victim.block.claim.pattern}" to break it. Agree who takes what with sb_send before claiming again.`);
+      }
+      this.bus.toast('error', `Deadlock in ${this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', repoId)?.name ?? repoId}: ${detail}`);
+      log.warn('deadlock broken', { repo: repoId, ring: detail, released: victim.block.claim.pattern });
+    }
+    this.breakClaim(victim.block.claim, `it was part of a deadlock (${detail})`);
   }
 
   /**
@@ -737,7 +1037,7 @@ export class Coordinator {
     return true;
   }
 
-  private openConflict(repoId: string, rel: string, kind: 'overlap' | 'claim', a: string, b: string, detail: string): boolean {
+  private openConflict(repoId: string, rel: string, kind: ConflictKind, a: string, b: string, detail: string): boolean {
     const existing = this.db.get<{ id: number }>(
       "SELECT id FROM conflicts WHERE repo_id = ? AND path = ? AND status = 'open' AND ((agent_a = ? AND agent_b = ?) OR (agent_a = ? AND agent_b = ?))",
       repoId,
@@ -792,6 +1092,8 @@ export class Coordinator {
     const hits = this.activeClaims(a.repo_id).filter((c) => c.agent_id !== agentId && matchesPattern(rel, c.pattern));
     const hard = hits.find((c) => bool(c.exclusive));
     if (hard) {
+      // Every attempt, not only the ones worth a message: this is what says somebody is still here.
+      this.noteBlock(a.repo_id, agentId, hard, rel);
       if (this.shouldWarn(`deny|${agentId}|${rel}`)) {
         this.openConflict(a.repo_id, rel, 'claim', agentId, hard.agent_id, `blocked edit inside exclusive claim "${hard.pattern}"`);
         this.send(SYSTEM, a.repo_id, hard.agent_id, 'info', `${a.name} tried to edit ${rel}, which you hold exclusively ("${hard.pattern}"). Release it with sb_release when you can.`);
@@ -807,7 +1109,35 @@ export class Coordinator {
     if (soft && this.shouldWarn(`soft|${agentId}|${rel}|${soft.agent_id}`)) {
       notes.push(`Switchboard: ${rel} is inside ${soft.agent_name}'s claim "${soft.pattern}"${soft.reason ? ` (${soft.reason})` : ''}. Coordinate with them before larger changes.`);
     }
+    const recent = this.recentlyEditedBy(a, rel);
+    if (recent) notes.push(recent);
     return notes.length ? { context: notes.join('\n') } : {};
+  }
+
+  /**
+   * Somebody else has this file open, in effect. Nobody claimed it, so there is nothing to refuse —
+   * but the moment worth saying so is before the edit, not after it: two agents pulling one file in
+   * different directions is cheap to avoid and expensive to unpick, and the version that lands
+   * second is written by an agent that never knew the first one existed. recordEdit still reports
+   * the collision afterwards; this is the same information half a minute earlier.
+   */
+  private recentlyEditedBy(a: AgentRow, rel: string): string | null {
+    const others = this.db.all<{ agent_id: string; ts: string }>(
+      'SELECT agent_id, MAX(ts) AS ts FROM file_touches WHERE repo_id = ? AND path = ? AND agent_id <> ? AND ts >= ? GROUP BY agent_id',
+      a.repo_id,
+      rel,
+      a.id,
+      this.windowStart(),
+    );
+    const live = others
+      .map((o) => ({ o, agent: this.agent(o.agent_id) }))
+      .filter((x): x is { o: { agent_id: string; ts: string }; agent: AgentRow } => !!x.agent && x.agent.status !== 'offline');
+    if (!live.length) return null;
+    if (!this.shouldWarn(`pre-overlap|${a.id}|${rel}`)) return null;
+    const who = live
+      .map(({ o, agent }) => `${agent.name} (${agent.worktree === a.worktree ? 'same worktree' : (agent.branch ?? 'no branch')}, ${ago(o.ts)}${agent.intent ? `, working on "${clip(agent.intent, 80)}"` : ''})`)
+      .join('; ');
+    return `Switchboard: ${rel} was edited just now by ${who}. Read it before you write it, and if your change pulls against theirs, settle it with sb_send (to: "${live[0].agent.name}") first.`;
   }
 
   /**
@@ -1050,20 +1380,87 @@ export class Coordinator {
   }
 
   /**
-   * Stop hook for sessions without a channel: if someone is waiting on this agent, keep it going
-   * instead of letting it idle. Returns the reason to show the model, or null to allow the stop.
+   * Questions put to this agent that it has read and not answered. Delivery is the point: an agent
+   * cannot owe an answer to something it was never shown, and one that arrived seconds ago is being
+   * read right now rather than ignored. An asker that has since gone is dropped — nobody is waiting
+   * on that any more — and so is anything switchboard itself sent, which is a reminder, not a
+   * question.
+   */
+  private owedAnswers(a: AgentRow): MessageRow[] {
+    return this.db
+      .all<MessageRow>(
+        `SELECT m.* FROM messages m
+         JOIN deliveries d ON d.message_id = m.id AND d.agent_id = m.to_id
+         WHERE m.repo_id = ? AND m.to_id = ? AND m.from_id <> ? AND m.from_id <> ?
+           AND m.kind IN ('question', 'request', 'handoff')
+           AND d.delivered_at < ? AND m.created_at > ?
+           AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id AND r.from_id = m.to_id)
+         ORDER BY m.id DESC LIMIT 5`,
+        a.repo_id,
+        a.id,
+        a.id,
+        SYSTEM,
+        new Date(Date.now() - OWED_ANSWER_MS).toISOString(),
+        new Date(Date.now() - 6 * 3600_000).toISOString(),
+      )
+      .filter((m) => m.from_id === HUMAN || this.agent(m.from_id)?.status !== 'offline')
+      .reverse();
+  }
+
+  /**
+   * Stop hook: what this agent has to settle before its turn can end.
+   *
+   * Every other push towards keeping the board true is advisory — a line in a digest, a nudge that
+   * rides along with a hook — and an agent deep in its own task can read all of them and stop
+   * anyway, leaving a question unanswered and a lock held. The end of a turn is the one moment
+   * where saying so costs the agent nothing but a moment and costs the others everything if it is
+   * skipped, so it is the one place Switchboard insists.
+   *
+   * It insists on exactly what leaves somebody else stuck: a question this agent has read, a lock
+   * somebody is standing in front of, a message it has not even been shown. Not intent, not tidy
+   * bookkeeping — those are nudged where they happen. And it insists once: an agent that has heard
+   * this and stopped anyway has decided, and being asked again every turn would only cost turns.
+   *
+   * Returns the reason to show the model, or null to allow the stop.
    */
   stopBlockReason(agentId: string): string | null {
     const a = this.agent(agentId);
-    if (!a || bool(a.has_channel)) return null;
-    const rows = this.pending(a).filter((m) => this.isPushWorthy(m, a));
-    if (!rows.length) return null;
-    this.markDelivered(
-      rows.map((m) => m.id),
-      agentId,
-      'hook',
-    );
-    return `${this.formatUpdates(rows.slice(0, 8), rows.length - 8)}\nHandle these before stopping (reply with sb_send), then finish.`;
+    if (!a) return null;
+    const parts: string[] = [];
+
+    // Messages it has never been shown. A channel session has already had these put in front of it
+    // mid-turn, so for those this is empty and the two cases below carry the weight.
+    const unseen = bool(a.has_channel) ? [] : this.pending(a).filter((m) => this.isPushWorthy(m, a));
+    if (unseen.length) parts.push(this.formatUpdates(unseen.slice(0, 8), unseen.length - 8));
+
+    const owed = this.owedAnswers(a);
+    if (owed.length) {
+      parts.push(
+        `You have not answered:\n${owed.map((m) => `- #${m.id} from ${this.nameOf(m.from_id)} (${ago(m.created_at)}) [${m.kind}]: "${clip(m.body, 300)}" — reply with sb_send (reply_to=${m.id})`).join('\n')}`,
+      );
+    }
+
+    const blocking = this.openBlocks(a.repo_id).filter((b) => b.holder_id === a.id);
+    if (blocking.length) {
+      parts.push(
+        `Agents are blocked on claims you hold:\n${blocking
+          .map((b) => `- ${b.waiterName} wants ${b.path}, inside your exclusive "${b.claim.pattern}" (waiting since ${ago(b.since)}) — sb_release it if you are done, or tell them how long you need with sb_send`)
+          .join('\n')}`,
+      );
+    }
+
+    if (!parts.length) return null;
+    // Per agent, not per thing owed: a repo busy enough to keep finding new business would
+    // otherwise hold the same session open turn after turn, which costs more than it is worth.
+    if (!this.shouldWarn(`settle|${a.id}`, SETTLE_TTL_MS)) return null;
+    if (unseen.length) {
+      this.markDelivered(
+        unseen.map((m) => m.id),
+        agentId,
+        'hook',
+      );
+    }
+    return `${parts.join('\n')}\nSettle this before you stop — the others are waiting on it — then finish.`;
   }
 
   inbox(agentId: string, includeSeen = false, limit = 30): string {
@@ -1203,6 +1600,10 @@ export class Coordinator {
     );
     for (const m of unanswered.reverse()) {
       todo.push(`Answer #${m.id} from ${this.nameOf(m.from_id)} with sb_send (reply_to=${m.id}): "${clip(m.body, 120)}"`);
+    }
+    // Ahead of the general "release when you are done": somebody is standing in front of this one.
+    for (const b of this.openBlocks(a.repo_id).filter((x) => x.holder_id === a.id)) {
+      todo.push(`${b.waiterName} has been blocked on your exclusive claim "${b.claim.pattern}" since ${ago(b.since)} — sb_release it, or tell them how long you need.`);
     }
     const mine = claims.filter((c) => c.agent_id === a.id);
     if (mine.length) todo.push(`Release ${mine.map((c) => c.pattern).join(', ')} with sb_release as soon as you are done with ${mine.length > 1 ? 'them' : 'it'}.`);
@@ -1446,6 +1847,10 @@ export class Coordinator {
       ...this.db.all<AgentRow>("SELECT * FROM agents WHERE repo_id = ? AND status <> 'offline' ORDER BY started_at", repoId),
       ...this.db.all<AgentRow>("SELECT * FROM agents WHERE repo_id = ? AND status = 'offline' ORDER BY last_seen DESC LIMIT 30", repoId),
     ];
+    const waits = new Map<number, Waiting[]>();
+    for (const b of this.openBlocks(repoId)) {
+      waits.set(b.claim_id, [...(waits.get(b.claim_id) ?? []), { agentId: b.waiter_id, agentName: b.waiterName, path: b.path, since: b.since }]);
+    }
     const claims: Claim[] = this.activeClaims(repoId).map((c) => ({
       id: c.id,
       repoId: c.repo_id,
@@ -1456,6 +1861,7 @@ export class Coordinator {
       reason: c.reason,
       createdAt: c.created_at,
       expiresAt: c.expires_at,
+      waiting: waits.get(c.id) ?? [],
     }));
     const conflicts: Conflict[] = this.db
       .all<ConflictRow>(

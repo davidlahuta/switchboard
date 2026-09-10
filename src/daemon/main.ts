@@ -30,6 +30,7 @@ export async function startDaemon(): Promise<void> {
   const runs = new RunManager(db, bus, subs, coord, launcher, models);
   const hub = new AgentHub(coord, runs);
   coord.setPushTarget(hub);
+  coord.setSessionGone((sessionId) => runs.sessionOver(sessionId));
   const auth = new Auth(db);
   const updater = new Updater(db, bus, runs);
   runs.versionProvider = () => updater.currentVersion;
