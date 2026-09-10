@@ -349,6 +349,17 @@ export interface SwapRequest {
   force?: boolean;
 }
 
+/** POST /api/runs/:id/restart — same subscription, resumes the same session GUID. */
+export interface RestartRequest {
+  /** restart even if the agent is mid-turn */
+  force?: boolean;
+}
+
+/** POST /api/update/restart-sessions */
+export interface RestartAllResult {
+  queued: number;
+}
+
 export interface HumanMessageRequest {
   /** agent id or null for broadcast */
   to: string | null;

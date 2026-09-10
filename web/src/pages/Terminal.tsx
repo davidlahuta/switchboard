@@ -4,6 +4,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { RunStatus, StateSnapshot, TermClientFrame, TermServerFrame } from '@shared/types.ts';
+import { RestartMenu } from '../components/RestartMenu.tsx';
+import { RunTags } from '../components/RunTags.tsx';
 import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Icon, StatusPill } from '../components/ui.tsx';
 import { api, wsUrl } from '../lib/api.ts';
@@ -427,6 +429,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             <span className="term-sub" title="Subscription">
               {subLabel}
             </span>
+            {run && <RunTags run={run} models={state.models} update={state.update} />}
             {size && (
               <span className="term-size mono" title="Terminal size (columns × rows)">
                 {size.cols}×{size.rows}
@@ -464,6 +467,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             <Icon name="fit" />
           </button>
           {run && <SwapMenu run={{ ...run, status: status ?? run.status }} subs={state.subscriptions} compact />}
+          {run && <RestartMenu run={{ ...run, status: status ?? run.status }} compact />}
         </div>
       </header>
 

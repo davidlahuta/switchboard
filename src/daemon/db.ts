@@ -188,6 +188,22 @@ export type Row = Record<string, SQLInputValue>;
 
 export class Db {
   readonly raw: DatabaseSync;
+  private closed = false;
+
+  /** False once closed. Async work in flight during shutdown must check this before querying. */
+  get open(): boolean {
+    return !this.closed;
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      this.raw.close();
+    } catch {
+      // already closed by the runtime
+    }
+  }
 
   constructor(file = DB_PATH) {
     if (file !== ':memory:') ensureDirs();

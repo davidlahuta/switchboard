@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import type { AgentStatus, RunStatus, UsageWindow } from '@shared/types.ts';
-import { pctText, usageLevel } from '../lib/format.ts';
-import { resetsIn } from '../lib/time.ts';
+import type { AgentStatus, RunStatus, Usage, UsageWindow } from '@shared/types.ts';
+import { pctText, usageIssue, usageLevel } from '../lib/format.ts';
+import { absTime, resetsIn, retryIn } from '../lib/time.ts';
 
 // ---------- icons ----------
 
@@ -114,6 +114,28 @@ export function Badge({
   return (
     <span className={`badge badge-${tone}`} title={title}>
       {children}
+    </span>
+  );
+}
+
+/**
+ * Why the usage numbers are not current — "rate limited", "login expired", … — with a live
+ * countdown to the moment polling resumes. Renders nothing when the numbers are fresh.
+ */
+export function StaleBadge({ usage, now }: { usage: Usage | null | undefined; now: number }) {
+  const issue = usageIssue(usage);
+  if (!issue) return null;
+  const limited = usage?.errorKind === 'rate_limited';
+  return (
+    <span className="stale-flag">
+      <Badge tone={issue.tone} title={issue.title}>
+        {issue.label}
+      </Badge>
+      {limited && usage?.retryAt && (
+        <span className="stale-retry small dim" title={`Polling resumes at ${absTime(usage.retryAt)}`}>
+          {retryIn(usage.retryAt, now)}
+        </span>
+      )}
     </span>
   );
 }

@@ -46,6 +46,15 @@ export function countdown(iso: string | null | undefined, now = Date.now()): str
   return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
+/** "retry in 4m" / "retry in 45s" / "retrying…" — for paused polling after a rate limit. */
+export function retryIn(iso: string | null | undefined, now = Date.now()): string {
+  const t = ms(iso);
+  if (t === null) return 'retry time unknown';
+  const diff = t - now;
+  if (diff <= 0) return 'retrying…';
+  return `retry in ${formatDuration(diff)}`;
+}
+
 export function absTime(iso: string | null | undefined): string {
   const t = ms(iso);
   if (t === null) return '';

@@ -61,7 +61,7 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | Method | Path                     | Body               | Returns |
 |--------|--------------------------|--------------------|---------|
 | GET    | `/api/runs`              |                    | `Run[]` |
-| POST   | `/api/runs`              | `CreateRunRequest` – opens a Windows Terminal tab | `Run` |
+| POST   | `/api/runs`              | `CreateRunRequest` – opens a Windows Terminal tab. Besides `cwd`/`subscriptionId` it takes `name`, `worktree`, `resumeSessionId` (a GUID), `autoSwap`, `model`, `autoCompact`, `autoCompactTokens` and `args` (extra `claude` arguments; ones Switchboard manages are refused with 400) | `Run` |
 | POST   | `/api/runs/:id/swap`     | `SwapRequest`      | `Run`   |
 | POST   | `/api/runs/:id/restart`  | `{ force? }` – same subscription, resumes the same session GUID | `Run` |
 | POST   | `/api/runs/:id/stop`     |                    | `{ ok }`|

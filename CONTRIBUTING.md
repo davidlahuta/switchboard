@@ -37,6 +37,8 @@ npm test
   judgement calls. If a rule fires too often or too rarely in your workflow, that is worth an issue.
 - **The web terminal on mobile.** Virtual-keyboard handling and the key bar are the least-tested
   parts.
+- **Automatic start beyond Windows.** `switchboard service install` writes a Task Scheduler logon
+  task; systemd user units and launchd agents would be the equivalents elsewhere.
 
 ## Things to know before changing code
 
@@ -47,6 +49,10 @@ npm test
   edit an existing migration.
 - The daemon binds to loopback, and anything arriving from elsewhere must present a paired device.
   If you touch `src/daemon/auth.ts`, say in the pull request how you tested that boundary.
+- A session's identity is its **GUID**. Display names are aliases that can be reused once a session
+  goes offline, so never key anything durable on a name.
+- Two endpoints Switchboard depends on — OAuth usage and the model list — are undocumented. Treat
+  failure as normal: degrade to a labelled stale state, never crash or block a session.
 - Anything read from a repository, a message or a tool argument is untrusted input. Agent messages
   are relayed between sessions, so treat their contents as data, never as instructions.
 

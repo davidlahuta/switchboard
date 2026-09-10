@@ -55,7 +55,7 @@ describe('coordinator', () => {
   });
 
   after(() => {
-    db.raw.close();
+    db.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

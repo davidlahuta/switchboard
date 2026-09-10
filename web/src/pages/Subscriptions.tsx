@@ -2,10 +2,10 @@ import { useEffect, useState, type FormEvent } from 'react';
 import type { StateSnapshot, Subscription, UsagePoint } from '@shared/types.ts';
 import { PageHead } from '../components/PageHead.tsx';
 import { Sparkline } from '../components/Sparkline.tsx';
-import { Badge, ConfirmDialog, Dialog, Empty, Icon, IconButton, Toggle, UsageBar } from '../components/ui.tsx';
+import { Badge, ConfirmDialog, Dialog, Empty, Icon, IconButton, StaleBadge, Toggle, UsageBar } from '../components/ui.tsx';
 import { api, request } from '../lib/api.ts';
-import { planLabel, subStatusLabel } from '../lib/format.ts';
-import { absTime, timeAgo, useNow } from '../lib/time.ts';
+import { isRateLimited, planLabel, subStatusLabel } from '../lib/format.ts';
+import { absTime, retryIn, timeAgo, useNow } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
 
 export function Subscriptions({ state }: { state: StateSnapshot }) {
@@ -51,6 +51,8 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
   const [refreshing, setRefreshing] = useState(false);
   const u = sub.usage;
   const id = encodeURIComponent(sub.id);
+  // While rate limited the daemon refuses early refreshes, so the button would only produce an error.
+  const limited = isRateLimited(u, now);
 
   useEffect(() => setPriority(String(sub.priority)), [sub.priority]);
   useEffect(() => {
@@ -133,11 +135,7 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
             </Badge>
             {sub.kind === 'default' && <Badge tone="muted">~/.claude</Badge>}
             <Badge tone={sub.status === 'ready' ? 'ok' : sub.status === 'error' ? 'crit' : 'warn'}>{subStatusLabel(sub.status)}</Badge>
-            {u?.stale && (
-              <Badge tone="warn" title={u.error ?? 'usage could not be refreshed'}>
-                stale
-              </Badge>
-            )}
+            <StaleBadge usage={u} now={now} />
             {sub.liveRuns > 0 && <Badge tone="accent">{sub.liveRuns} live</Badge>}
           </div>
           <div className="sub-account">
@@ -209,7 +207,17 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
           {sub.configDir}
         </span>
         <span className="row-actions">
-          <button type="button" className="btn btn-sm" onClick={() => void refresh()} disabled={refreshing}>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => void refresh()}
+            disabled={refreshing || limited}
+            title={
+              limited
+                ? `Rate limited — polling is paused until ${absTime(u?.retryAt) || 'the endpoint recovers'} (${retryIn(u?.retryAt, now)}). The daemon refuses earlier refreshes.`
+                : 'Poll this subscription’s usage now'
+            }
+          >
             <Icon name="refresh" size={14} />
             <span>{refreshing ? 'Refreshing…' : 'Refresh usage'}</span>
           </button>

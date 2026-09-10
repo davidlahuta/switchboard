@@ -1,24 +1,51 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import qrcode from 'qrcode-generator';
-import type { Device, IntegrationStatus, PairingCode, Settings, StateSnapshot } from '@shared/types.ts';
+import type {
+  Device,
+  IntegrationStatus,
+  Model,
+  PairingCode,
+  ServiceStatus,
+  Settings,
+  StateSnapshot,
+  UpdateStatus,
+} from '@shared/types.ts';
 import { PageHead } from '../components/PageHead.tsx';
 import { Badge, ConfirmDialog, Empty, Icon, Section, Spinner, Toggle } from '../components/ui.tsx';
 import { api, request } from '../lib/api.ts';
+import { contextLabel, plural, tokensShort } from '../lib/format.ts';
+import { joinArgs, splitArgs } from '../lib/argv.ts';
 import { countdown, timeAgo, useNow } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
+
+/** Matches the daemon's clamp in src/daemon/settings.ts. */
+const LIMITS = {
+  updateCheckHours: { min: 1, max: 168 },
+  autoCompactTokens: { min: 20_000, max: 990_000, step: 10_000 },
+  // The usage endpoint is shared across subscriptions and rate-limits hard; 60s is the floor.
+  usagePollSec: { min: 60, step: 30 },
+} as const;
 
 export function SettingsPage({ state }: { state: StateSnapshot }) {
   return (
     <div className="page settings-page">
       <PageHead title="Settings" subtitle={`Switchboard v${state.daemon.version} · port ${state.daemon.port}`} />
-      <SettingsForm settings={state.settings} />
+      <SettingsForm settings={state.settings} update={state.update} models={state.models} />
       <IntegrationSection />
       {state.daemon.local ? (
-        <RemoteAccessSection port={state.daemon.port} />
+        <>
+          <AutoStartSection />
+          <RemoteAccessSection port={state.daemon.port} />
+        </>
       ) : (
-        <Section title="Remote access">
-          <p className="muted">Pairing and device management are only available from the desk itself.</p>
-        </Section>
+        <>
+          <Section title="Automatic start">
+            <p className="muted">Automatic start is configured from the desk itself.</p>
+          </Section>
+          <Section title="Remote access">
+            <p className="muted">Pairing and device management are only available from the desk itself.</p>
+          </Section>
+        </>
       )}
       <Section title="Daemon">
         <dl className="kv">
@@ -38,29 +65,17 @@ export function SettingsPage({ state }: { state: StateSnapshot }) {
 
 // ---------------- settings form ----------------
 
-function parseArgs(s: string): string[] {
-  const out: string[] = [];
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(s))) out.push(m[1] ?? m[2] ?? m[3]);
-  return out;
-}
-
-function formatArgs(a: string[]): string {
-  return a.map((x) => (/\s/.test(x) || x === '' ? `"${x}"` : x)).join(' ');
-}
-
-function SettingsForm({ settings }: { settings: Settings }) {
+function SettingsForm({ settings, update, models }: { settings: Settings; update: UpdateStatus; models: Model[] }) {
   const [draft, setDraft] = useState<Settings>(settings);
-  const [args, setArgs] = useState(formatArgs(settings.claudeArgs));
+  const [args, setArgs] = useState(joinArgs(settings.claudeArgs));
   const [busy, setBusy] = useState(false);
 
   // Pick up external changes when there are no local edits.
   const [base, setBase] = useState(settings);
   useEffect(() => {
-    if (JSON.stringify(draft) === JSON.stringify(base) && args === formatArgs(base.claudeArgs)) {
+    if (JSON.stringify(draft) === JSON.stringify(base) && args === joinArgs(base.claudeArgs)) {
       setDraft(settings);
-      setArgs(formatArgs(settings.claudeArgs));
+      setArgs(joinArgs(settings.claudeArgs));
     }
     setBase(settings);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -68,7 +83,7 @@ function SettingsForm({ settings }: { settings: Settings }) {
 
   const patch = useMemo(() => {
     const p: Partial<Settings> = {};
-    const next = { ...draft, claudeArgs: parseArgs(args) };
+    const next = { ...draft, claudeArgs: splitArgs(args) };
     (Object.keys(next) as Array<keyof Settings>).forEach((k) => {
       if (JSON.stringify(next[k]) !== JSON.stringify(settings[k])) (p as Record<string, unknown>)[k] = next[k];
     });
@@ -86,7 +101,7 @@ function SettingsForm({ settings }: { settings: Settings }) {
     setBusy(false);
     if (res) {
       setDraft(res);
-      setArgs(formatArgs(res.claudeArgs));
+      setArgs(joinArgs(res.claudeArgs));
       setBase(res);
       emitToast('success', 'Settings saved');
     }
@@ -94,12 +109,112 @@ function SettingsForm({ settings }: { settings: Settings }) {
 
   const reset = () => {
     setDraft(settings);
-    setArgs(formatArgs(settings.claudeArgs));
+    setArgs(joinArgs(settings.claudeArgs));
   };
 
   return (
-    <Section title="Sessions & swapping">
-      <form className="form settings-form" onSubmit={save}>
+    <form className="form settings-form" onSubmit={save}>
+      <Section title="Claude Code version">
+        <UpdatePanel update={update} />
+
+        <div className="setting">
+          <div className="setting-text">
+            <div className="setting-name">Keep claude up to date</div>
+            <div className="setting-desc">Run <span className="mono">claude update</span> on a schedule so new versions land without you asking.</div>
+          </div>
+          <Toggle checked={draft.autoUpdate} onChange={(v) => set('autoUpdate', v)} label="Keep claude up to date" />
+        </div>
+
+        <div className="field-row">
+          <label className="field field-narrow">
+            <span className="field-label">Check every (hours)</span>
+            <input
+              type="number"
+              className="input"
+              min={LIMITS.updateCheckHours.min}
+              max={LIMITS.updateCheckHours.max}
+              step={1}
+              value={draft.updateCheckHours}
+              disabled={!draft.autoUpdate}
+              onChange={(e) => set('updateCheckHours', Number(e.target.value))}
+            />
+            <span className="field-hint">1–168 (a week).</span>
+          </label>
+        </div>
+
+        <div className="setting">
+          <div className="setting-text">
+            <div className="setting-name">Restart sessions after an update</div>
+            <div className="setting-desc">
+              When the version changes, each hosted session restarts by resuming the same session — as soon as it is idle, never mid-turn.
+            </div>
+          </div>
+          <Toggle
+            checked={draft.restartAfterUpdate}
+            onChange={(v) => set('restartAfterUpdate', v)}
+            label="Restart sessions after an update"
+          />
+        </div>
+      </Section>
+
+      <Section title="Session defaults">
+        <p className="muted">These pre-fill the “New session” dialog. Changing them never touches a session that is already running.</p>
+
+        <label className="field">
+          <span className="field-label">Default model</span>
+          <select
+            className="input"
+            value={draft.defaultModel ?? ''}
+            disabled={models.length === 0}
+            onChange={(e) => set('defaultModel', e.target.value || null)}
+          >
+            <option value="">Claude Code default</option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.displayName} — {contextLabel(m)}
+              </option>
+            ))}
+          </select>
+          {models.length === 0 && (
+            <span className="field-hint">
+              Model list unavailable — sessions use the Claude Code default. Refresh it below once a subscription is signed in.
+            </span>
+          )}
+        </label>
+
+        <div className="form-actions">
+          <RefreshModelsButton count={models.length} />
+        </div>
+
+        <div className="setting">
+          <div className="setting-text">
+            <div className="setting-name">Auto-compact by default</div>
+            <div className="setting-desc">New sessions summarise their context automatically once it passes the threshold.</div>
+          </div>
+          <Toggle checked={draft.defaultAutoCompact} onChange={(v) => set('defaultAutoCompact', v)} label="Auto-compact by default" />
+        </div>
+
+        <div className="field-row">
+          <label className="field field-narrow">
+            <span className="field-label">Auto-compact at (tokens)</span>
+            <input
+              type="number"
+              className="input"
+              min={LIMITS.autoCompactTokens.min}
+              max={LIMITS.autoCompactTokens.max}
+              step={LIMITS.autoCompactTokens.step}
+              value={draft.defaultAutoCompactTokens}
+              disabled={!draft.defaultAutoCompact}
+              onChange={(e) => set('defaultAutoCompactTokens', Number(e.target.value))}
+            />
+          </label>
+          <span className={draft.defaultAutoCompact ? 'compact-value mono' : 'compact-value mono dim'} aria-hidden="true">
+            {tokensShort(draft.defaultAutoCompactTokens)}
+          </span>
+        </div>
+      </Section>
+
+      <Section title="Sessions & swapping">
         <div className="setting">
           <div className="setting-text">
             <div className="setting-name">Auto-swap on limits</div>
@@ -153,11 +268,12 @@ function SettingsForm({ settings }: { settings: Settings }) {
             <input
               type="number"
               className="input"
-              min={15}
-              step={5}
+              min={LIMITS.usagePollSec.min}
+              step={LIMITS.usagePollSec.step}
               value={draft.usagePollSec}
               onChange={(e) => set('usagePollSec', Number(e.target.value))}
             />
+            <span className="field-hint">At least {LIMITS.usagePollSec.min}s — the usage endpoint is shared by every subscription and rate-limits aggressively.</span>
           </label>
           <label className="field">
             <span className="field-label">Conflict window (min)</span>
@@ -184,17 +300,113 @@ function SettingsForm({ settings }: { settings: Settings }) {
           />
           <span className="field-hint">Space-separated, quote values with spaces. Added to every session Switchboard launches.</span>
         </label>
+      </Section>
 
-        <div className="form-actions">
-          <button type="submit" className="btn btn-primary" disabled={!dirty || busy}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-          <button type="button" className="btn btn-ghost" disabled={!dirty} onClick={reset}>
-            Discard changes
-          </button>
-        </div>
-      </form>
-    </Section>
+      <div className="form-actions settings-actions">
+        <button type="submit" className="btn btn-primary" disabled={!dirty || busy}>
+          {busy ? 'Saving…' : 'Save settings'}
+        </button>
+        <button type="button" className="btn btn-ghost" disabled={!dirty} onClick={reset}>
+          Discard changes
+        </button>
+        {dirty && <span className="field-hint">{plural(Object.keys(patch).length, 'unsaved change')}</span>}
+      </div>
+    </form>
+  );
+}
+
+// ---------------- claude version ----------------
+
+function UpdatePanel({ update }: { update: UpdateStatus }) {
+  const now = useNow(30_000);
+  const [checking, setChecking] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const busyCheck = checking || update.checking;
+
+  const check = async () => {
+    setChecking(true);
+    const res = await api.post<UpdateStatus>('/api/update/check');
+    setChecking(false);
+    if (!res) return;
+    if (res.lastError) emitToast('warn', res.lastError);
+    else if (res.lastUpdate && Date.now() - Date.parse(res.lastUpdate.at) < 60_000) {
+      emitToast('success', `Updated to claude ${res.lastUpdate.to}`);
+    } else emitToast('info', `claude ${res.currentVersion ?? '?'} is the latest`);
+  };
+
+  const restartSessions = async () => {
+    setRestarting(true);
+    const res = await api.post<{ queued: number }>('/api/update/restart-sessions');
+    setRestarting(false);
+    if (!res) return;
+    emitToast(
+      'info',
+      res.queued > 0 ? `${plural(res.queued, 'session')} will restart as soon as it is idle` : 'No live sessions to restart',
+    );
+  };
+
+  return (
+    <div className="update-panel">
+      <dl className="kv">
+        <dt>Installed</dt>
+        <dd className="mono">{update.currentVersion ?? <span className="dim">unknown</span>}</dd>
+        <dt>Last checked</dt>
+        <dd>{update.lastCheckAt ? timeAgo(update.lastCheckAt, now) : <span className="dim">never</span>}</dd>
+        <dt>Last update</dt>
+        <dd>
+          {update.lastUpdate ? (
+            <>
+              <span className="mono">
+                {update.lastUpdate.from} → {update.lastUpdate.to}
+              </span>
+              , {timeAgo(update.lastUpdate.at, now)}
+            </>
+          ) : (
+            <span className="dim">none seen yet</span>
+          )}
+        </dd>
+        {update.pendingRestarts > 0 && (
+          <>
+            <dt>Queued</dt>
+            <dd>
+              <Badge tone="accent">
+                {update.pendingRestarts === 1 ? '1 session restarts when idle' : `${update.pendingRestarts} sessions restart when idle`}
+              </Badge>
+            </dd>
+          </>
+        )}
+      </dl>
+      {update.lastError && <div className="callout callout-warn">{update.lastError}</div>}
+      <div className="form-actions">
+        <button type="button" className="btn" disabled={busyCheck} onClick={() => void check()}>
+          {busyCheck ? <Spinner label="Checking for a new claude version" /> : <Icon name="refresh" size={16} />}
+          <span>{busyCheck ? 'Checking…' : 'Check now'}</span>
+        </button>
+        <button type="button" className="btn" disabled={restarting} onClick={() => void restartSessions()}>
+          <Icon name="swap" size={16} />
+          <span>{restarting ? 'Queueing…' : 'Restart sessions now'}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RefreshModelsButton({ count }: { count: number }) {
+  const [busy, setBusy] = useState(false);
+  const refresh = async () => {
+    setBusy(true);
+    const res = await api.post<Model[]>('/api/models/refresh');
+    setBusy(false);
+    if (res) emitToast('success', `${plural(res.length, 'model')} available`);
+  };
+  return (
+    <>
+      <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void refresh()}>
+        <Icon name="refresh" size={14} />
+        <span>{busy ? 'Refreshing…' : 'Refresh model list'}</span>
+      </button>
+      <span className="field-hint">{count === 0 ? 'No models cached' : `${plural(count, 'model')} available`}</span>
+    </>
   );
 }
 
@@ -256,6 +468,182 @@ function IntegrationSection() {
       )}
     </Section>
   );
+}
+
+// ---------------- automatic start ----------------
+
+const DELAY_MIN = 0;
+const DELAY_MAX = 300;
+
+/** POST /api/service/install — not in shared/types.ts, mirrored from the daemon route. */
+interface InstallServiceRequest {
+  delaySeconds?: number;
+}
+
+async function copyText(text: string, what: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    emitToast('success', `${what} copied`);
+  } catch {
+    emitToast('warn', `Could not copy — select the ${what.toLowerCase()} and copy it manually`);
+  }
+}
+
+/**
+ * The daemon can register a Windows Task Scheduler logon task that keeps it alive. Desk only: the
+ * task belongs to the signed-in user, and the endpoints 403 for a paired remote device.
+ */
+function AutoStartSection() {
+  const now = useNow(30_000);
+  const [status, setStatus] = useState<ServiceStatus | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [delay, setDelay] = useState(20);
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState<'install' | 'uninstall' | null>(null);
+
+  const load = async () => {
+    try {
+      setStatus(await request<ServiceStatus>('GET', '/api/service'));
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const run = async (action: 'install' | 'uninstall') => {
+    setConfirming(null);
+    setBusy(true);
+    const body: InstallServiceRequest = { delaySeconds: clampDelay(delay) };
+    const res = await api.post<ServiceStatus>(`/api/service/${action}`, action === 'install' ? body : {});
+    setBusy(false);
+    if (!res) return;
+    setStatus(res);
+    emitToast('success', action === 'install' ? 'Switchboard will start at logon' : 'Automatic start removed');
+  };
+
+  const supported = status?.supported ?? true;
+
+  return (
+    <Section title="Automatic start">
+      <p className="muted">
+        Switchboard starts <strong>when you sign in</strong>, not at boot — it opens Windows Terminal tabs, which needs an interactive
+        desktop. After an unattended reboot it comes back as soon as the desk is signed in, and it is restarted within about ten seconds
+        if it exits.
+      </p>
+
+      {loadError ? (
+        <div className="callout callout-crit">
+          {loadError}{' '}
+          <button type="button" className="link-btn" onClick={() => void load()}>
+            Retry
+          </button>
+        </div>
+      ) : !status ? (
+        <Spinner label="Reading the automatic-start status" />
+      ) : !supported ? (
+        <p className="field-hint">Automatic start is implemented for Windows Task Scheduler only.</p>
+      ) : (
+        <>
+          <dl className="kv">
+            <dt>Logon task</dt>
+            <dd>{status.installed ? <Badge tone="ok">installed</Badge> : <Badge tone="muted">not installed</Badge>}</dd>
+            <dt>Task state</dt>
+            <dd>
+              {status.state ?? <span className="dim">—</span>}
+              {status.lastResult && <span className="dim small"> · last result {status.lastResult}</span>}
+            </dd>
+            <dt>Daemon</dt>
+            <dd>{status.running ? <Badge tone="ok">running</Badge> : <Badge tone="warn">not answering</Badge>}</dd>
+            <dt>Last run</dt>
+            <dd>{status.lastRunTime ? timeAgo(status.lastRunTime, now) : <span className="dim">never</span>}</dd>
+            <dt>Log file</dt>
+            <dd className="log-path">
+              <span className="mono" title={status.logPath}>
+                {status.logPath}
+              </span>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => void copyText(status.logPath, 'Log path')}
+                aria-label="Copy the log file path"
+              >
+                <Icon name="paste" size={14} />
+                <span>Copy</span>
+              </button>
+            </dd>
+          </dl>
+
+          <div className="field-row">
+            <label className="field field-narrow">
+              <span className="field-label">Delay after logon (s)</span>
+              <input
+                type="number"
+                className="input"
+                min={DELAY_MIN}
+                max={DELAY_MAX}
+                step={5}
+                value={delay}
+                disabled={busy}
+                onChange={(e) => setDelay(Number(e.target.value))}
+                onBlur={() => setDelay((d) => clampDelay(d))}
+              />
+              <span className="field-hint">Lets the desktop and network settle first. 0–{DELAY_MAX}s.</span>
+            </label>
+          </div>
+
+          <div className="form-actions">
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={() => setConfirming('install')}>
+              {busy ? 'Working…' : status.installed ? 'Reinstall task' : 'Install task'}
+            </button>
+            {status.installed && (
+              <button type="button" className="btn btn-danger" disabled={busy} onClick={() => setConfirming('uninstall')}>
+                Uninstall
+              </button>
+            )}
+            <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void load()}>
+              <Icon name="refresh" size={14} />
+              <span>Refresh</span>
+            </button>
+          </div>
+        </>
+      )}
+
+      <ConfirmDialog
+        open={confirming === 'install'}
+        title={status?.installed ? 'Reinstall the logon task?' : 'Start Switchboard at logon?'}
+        confirmLabel={status?.installed ? 'Reinstall' : 'Install'}
+        busy={busy}
+        onConfirm={() => void run('install')}
+        onCancel={() => setConfirming(null)}
+      >
+        <p>
+          Registers a Windows Task Scheduler task for your account that launches the daemon {clampDelay(delay)} seconds after you sign
+          in and restarts it within about ten seconds if it exits.
+        </p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirming === 'uninstall'}
+        title="Remove automatic start?"
+        confirmLabel="Uninstall"
+        danger
+        busy={busy}
+        onConfirm={() => void run('uninstall')}
+        onCancel={() => setConfirming(null)}
+      >
+        <p>The scheduled task is deleted. The daemon keeps running now, but will not come back on its own after a sign-out or reboot.</p>
+      </ConfirmDialog>
+    </Section>
+  );
+}
+
+function clampDelay(v: number): number {
+  if (!Number.isFinite(v)) return DELAY_MIN;
+  return Math.min(DELAY_MAX, Math.max(DELAY_MIN, Math.round(v)));
 }
 
 // ---------------- remote access ----------------
@@ -336,14 +724,7 @@ function RemoteAccessSection({ port }: { port: number }) {
   const link = pairing ? `${base}/#/pair?code=${encodeURIComponent(pairing.code)}` : '';
   const isLoopback = /^(localhost|127\.|\[::1\])/.test(location.hostname);
 
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(link);
-      emitToast('success', 'Link copied');
-    } catch {
-      emitToast('warn', 'Could not copy — select the link text instead');
-    }
-  };
+  const copy = () => copyText(link, 'Link');
 
   return (
     <Section title="Remote access">

@@ -518,6 +518,7 @@ export class SubscriptionManager {
   }
 
   async refreshIdentity(id: string): Promise<void> {
+    if (!this.db.open) return;
     const r = this.row(id);
     if (!r) return;
     const creds = this.readCredentials(r.config_dir);
@@ -531,7 +532,7 @@ export class SubscriptionManager {
     if (token) {
       try {
         const res = await this.oauthGet(token, '/api/oauth/profile');
-        if (res.ok) {
+        if (res.ok && this.db.open) {
           const p = (await res.json()) as { account?: { email?: string; display_name?: string; full_name?: string } };
           const email = p.account?.email ?? null;
           this.db.run('UPDATE subscriptions SET email = COALESCE(?, email), display_name = ? WHERE id = ?', email, p.account?.display_name ?? p.account?.full_name ?? null, id);
@@ -583,6 +584,8 @@ export class SubscriptionManager {
   }
 
   async poll(id: string, force: boolean): Promise<Subscription | null> {
+    // A poll can still be in flight when the daemon shuts down.
+    if (!this.db.open) return null;
     const r = this.row(id);
     if (!r || r.status === 'pending_login' || this.inFlight.has(id)) return this.get(id);
     if (!force && Date.now() - (this.lastPoll.get(id) ?? 0) < 20_000) return this.get(id);

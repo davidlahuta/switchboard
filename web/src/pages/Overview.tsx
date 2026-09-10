@@ -2,8 +2,10 @@ import { useState } from 'react';
 import type { Run, StateSnapshot, Subscription } from '@shared/types.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { PageHead } from '../components/PageHead.tsx';
+import { RestartMenu } from '../components/RestartMenu.tsx';
+import { RunTags } from '../components/RunTags.tsx';
 import { SwapMenu } from '../components/SwapMenu.tsx';
-import { Badge, Empty, Icon, Section, StatusPill, UsageBar } from '../components/ui.tsx';
+import { Badge, Empty, Icon, Section, StaleBadge, StatusPill, UsageBar } from '../components/ui.tsx';
 import { planLabel, shortPath, subStatusLabel, usageLevel } from '../lib/format.ts';
 import { href } from '../lib/router.ts';
 import { timeAgo, useNow } from '../lib/time.ts';
@@ -199,11 +201,9 @@ function SubUsageCard({ sub, now, rank }: { sub: Subscription; now: number; rank
           <Badge tone={sub.status === 'error' ? 'crit' : 'warn'}>{subStatusLabel(sub.status)}</Badge>
         ) : !sub.enabled ? (
           <Badge tone="muted">disabled</Badge>
-        ) : u?.stale ? (
-          <Badge tone="warn" title={u.error ?? undefined}>
-            stale
-          </Badge>
-        ) : null}
+        ) : (
+          <StaleBadge usage={u} now={now} />
+        )}
         <span className="muted">{sub.liveRuns} live</span>
       </div>
       <UsageBar label="5h" window={u?.fiveHour} now={now} binding={usable && sub.bindingWindow === 'fiveHour'} />
@@ -230,12 +230,14 @@ function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
         </span>
       </a>
       <span className="list-badges">
+        <RunTags run={run} models={state.models} update={state.update} />
         <StatusPill status={run.agentStatus ?? run.status} title={`run: ${run.status}`} />
         <a className="btn btn-sm" href={href.terminal(run.id)} aria-label={`Open terminal for ${run.name}`}>
           <Icon name="terminal" size={16} />
           <span className="hide-sm">Open</span>
         </a>
         <SwapMenu run={run} subs={state.subscriptions} compact />
+        <RestartMenu run={run} compact />
       </span>
     </li>
   );

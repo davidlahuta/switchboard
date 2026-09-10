@@ -704,6 +704,53 @@ select.input {
 .form-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* argv preview / launch arguments */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.chips:empty {
+  display: none;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.advanced > summary {
+  font-weight: 600;
+}
+.advanced-body {
+  padding-top: 4px;
+}
+.compact-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.compact-value {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
 }
 .hint {
   font-size: 12px;
@@ -869,6 +916,23 @@ select.input {
   font-size: 11px;
   font-weight: 600;
   vertical-align: middle;
+}
+.stale-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.stale-retry {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.run-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 /* ============ usage ============ */
@@ -1138,6 +1202,21 @@ a.list-main:hover {
 .cell-title .auto-swap {
   display: inline-flex;
   margin-left: 0;
+}
+/* .cell-title > * is display:block, which would flatten these two */
+.cell-title .run-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+.cell-title .args-collapse {
+  margin-top: 0;
+}
+.args-collapse > summary {
+  padding: 4px 0;
+  min-height: 28px;
+  font-size: 12px;
 }
 .cell-wrap {
   max-width: 320px;
@@ -1513,6 +1592,12 @@ a.list-main:hover {
   padding: 8px;
   color: var(--muted);
 }
+.menu-note {
+  padding: 0 8px 6px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
 .menu-check {
   display: flex;
   align-items: center;
@@ -1827,6 +1912,47 @@ a.list-main:hover {
 }
 .settings-form {
   gap: 16px;
+}
+/* one form spanning several sections: the sections space themselves like page children do */
+.settings-page > .settings-form {
+  gap: 18px;
+}
+.settings-page > .settings-form > .section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.settings-page > .settings-form > .section > .section-head {
+  margin-bottom: -4px;
+}
+.settings-actions {
+  max-width: 860px;
+  position: sticky;
+  bottom: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  box-shadow: var(--shadow);
+}
+.update-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.update-panel .kv {
+  align-items: baseline;
+}
+.log-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.log-path .mono {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .setting {
   display: flex;
@@ -2178,6 +2304,22 @@ a.list-main:hover {
   background: #141920;
   border-color: #2b3440;
   color: #e5e9ef;
+}
+/* the terminal chrome is always dark, so badges there use the terminal palette */
+.term-meta .run-tags {
+  flex-wrap: nowrap;
+}
+.term-meta .badge {
+  height: 18px;
+  background: #1f2630;
+  color: var(--t-text-2);
+}
+.term-meta .badge-warn {
+  background: rgba(245, 215, 110, 0.16);
+  color: #f5d76e;
+}
+.term-meta .dim {
+  color: #6e7681;
 }
 
 /* ============ responsive ============ */
@@ -2557,6 +2699,18 @@ a.list-main:hover {
   }
   .setting {
     align-items: flex-start;
+  }
+  .settings-actions {
+    bottom: calc(var(--tabbar-h) + var(--safe-b) + 8px);
+  }
+  .settings-actions .btn {
+    flex: 1;
+    min-height: 44px;
+  }
+  /* the model/version tags belong under the session name, not squeezed next to the status pill */
+  .run-row .run-tags,
+  .list > li > a.list-row .run-tags {
+    order: -1;
   }
 
   .term-size {

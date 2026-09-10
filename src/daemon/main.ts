@@ -63,11 +63,7 @@ export async function startDaemon(): Promise<void> {
       server.close();
       server.closeAllConnections();
     }
-    try {
-      db.raw.close();
-    } catch {
-      // already closed
-    }
+    db.close();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

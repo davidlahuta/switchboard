@@ -12,7 +12,9 @@
    stays open and the conversation continues.
 
 Each hosted session is also mirrored to the web UI as the real Claude Code terminal, so you can
-keep driving your agents from your phone (for example over Tailscale).
+keep driving your agents from your phone (for example over Tailscale). It is built to stay up:
+registered with Task Scheduler, it restarts itself within seconds if it ever dies, and it can keep
+`claude` itself up to date.
 
 > Status: early, Windows-first (Windows Terminal + ConPTY). The coordination server works anywhere
 > Claude Code runs; session hosting also has a macOS Terminal launcher.
@@ -37,13 +39,17 @@ keep driving your agents from your phone (for example over Tailscale).
 
 - Each subscription gets its own isolated `CLAUDE_CONFIG_DIR` profile. Transcripts, plugins, skills and settings are shared with `~/.claude`.
 - Live usage per subscription (5‑hour, weekly, per-model weekly) with reset countdowns and 48 h history, plus aggregate capacity across all plans.
+- Subscriptions are ranked by what you can actually use **right now**: plan size scaled by whichever window is tighter, so the one to start on is always first.
 - One-click launch into a Windows Terminal tab, optionally in a fresh worktree or resuming an older session.
+- Per session: model (1M-context models, listed from the API rather than hardcoded), auto-compact and its threshold, and any extra `claude` arguments.
 - **Hot swap**: `kill` + `claude --resume <same session>` under another subscription, in the same tab. It triggers:
   - manually,
   - automatically when a session hits a usage limit (then it types `continue` for you),
   - or proactively when a subscription crosses a threshold while the session is idle.
+- **Restart on update**: `claude update` runs on a schedule; when the version changes, sessions restart onto the new build once their agent is idle.
 - Web terminal: full Claude Code TUI in the browser (xterm.js), with a mobile key bar, a prompt composer and a "fit to this screen" mode.
 - Device pairing for remote access (QR code). Local access needs no login.
+- Runs as a Task Scheduler logon task with a supervisor that brings the daemon back if it exits.
 
 ---
 
@@ -57,7 +63,7 @@ keep driving your agents from your phone (for example over Tailscale).
 ## Quick start
 
 ```powershell
-git clone https://github.com/<you>/switchboard
+git clone https://github.com/davidlahuta/switchboard
 cd switchboard
 npm install
 aspire run
@@ -190,8 +196,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the [API reference](docs/AP
 
 ```
 src/
-  cli.ts            entry point: daemon | run | mcp | install | uninstall | status
-  daemon/           HTTP + WebSocket server, coordination, subscriptions, runs, auth
+  cli.ts            entry point: daemon | run | mcp | install | service | status
+  daemon/           HTTP + WebSocket server, coordination, subscriptions, runs, auth,
+                    usage polling, model catalogue, claude updates, auto-start
   mcp/shim.ts       stdio MCP server + channel, one per Claude Code session
   runner/runner.ts  PTY host that keeps the terminal alive across swaps
   shared/           API types, MCP tool definitions, internal protocol
@@ -210,14 +217,19 @@ apphost.cs          Aspire AppHost for development
 | `SWITCHBOARD_WT_WINDOW`   | `switchboard`                     | Windows Terminal window for hosted tabs   |
 | `SWITCHBOARD_LOG_LEVEL`   | `info`                            | `debug` / `info` / `warn` / `error`       |
 
-Runtime settings (auto-swap, thresholds, continue message, extra `claude` arguments, conflict
-window, polling interval) live in the UI under **Settings**.
+Runtime settings (auto-swap, thresholds, continue message, session defaults for model and
+auto-compact, update schedule, conflict window, polling interval) live in the UI under
+**Settings**.
 
 ## Caveats
 
 - **Usage numbers come from the same OAuth endpoint Claude Code's `/usage` uses.** It is not a
-  documented public API and may change. When it fails, cards show *stale*, and limit detection
-  still works through the `StopFailure` hook.
+  documented public API and may change. When it fails, cards say why — *rate limited*, *login
+  expired*, *unreachable* — and limit detection still works through the `StopFailure` hook.
+  That endpoint rate-limits per account, so a 429 pauses polling for every subscription until
+  `Retry-After` expires; raise **Settings → usage polling** if you see it often.
+- **The model list comes from `/v1/models`** and is filtered to models with a 1M-token context.
+  If it cannot be fetched, sessions fall back to whatever Claude Code would pick by default.
 - **Push delivery uses Claude Code channels** (research preview). Hosted sessions start with
   `--dangerously-load-development-channels server:switchboard`, because custom channels are not on
   Anthropic's allowlist. Team/Enterprise orgs must enable channels.
@@ -235,6 +247,9 @@ npm run typecheck   # daemon + web
 npm test            # node:test suite
 aspire run          # daemon with --watch + Vite HMR
 ```
+
+`aspire run` and the auto-start task both want port 4477, so stop one before using the other
+(`node src/cli.ts service uninstall`, or just stop the task for the session).
 
 ## Contributing
 

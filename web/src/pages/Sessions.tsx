@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { Run, StateSnapshot } from '@shared/types.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { PageHead } from '../components/PageHead.tsx';
+import { RestartMenu } from '../components/RestartMenu.tsx';
+import { RunArgs, RunTags } from '../components/RunTags.tsx';
 import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Badge, ConfirmDialog, Empty, Icon, StatusPill } from '../components/ui.tsx';
 import { api } from '../lib/api.ts';
@@ -92,6 +94,8 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                       <span className="mono dim small" title={`session ${r.sessionId}`}>
                         {r.sessionId.slice(0, 8)} · {exited && r.endedAt ? `ended ${timeAgo(r.endedAt, now)}` : `started ${timeAgo(r.createdAt, now)}`}
                       </span>
+                      <RunTags run={r} models={state.models} update={state.update} />
+                      <RunArgs args={r.args} />
                     </td>
                     <td data-label="Repo">
                       {repo ? (
@@ -129,6 +133,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                           <span>Terminal</span>
                         </a>
                         {!exited && <SwapMenu run={r} subs={state.subscriptions} compact />}
+                        {!exited && <RestartMenu run={r} compact />}
                         {!exited ? (
                           <button type="button" className="btn btn-sm btn-danger" onClick={() => setStopping(r)}>
                             <Icon name="stop" size={14} />

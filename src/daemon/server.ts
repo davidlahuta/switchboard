@@ -222,6 +222,10 @@ export function createServer(s: Services): http.Server {
       resumeSessionId: typeof body.resumeSessionId === 'string' && body.resumeSessionId ? body.resumeSessionId : undefined,
       autoSwap: body.autoSwap !== false,
       args: Array.isArray(body.args) ? body.args.filter((a: unknown): a is string => typeof a === 'string') : undefined,
+      // undefined means "fall back to the configured default"; null means "no model override".
+      model: body.model === undefined ? undefined : typeof body.model === 'string' && body.model ? body.model : null,
+      autoCompact: typeof body.autoCompact === 'boolean' ? body.autoCompact : undefined,
+      autoCompactTokens: typeof body.autoCompactTokens === 'number' ? body.autoCompactTokens : undefined,
     });
   });
   route('POST', '/api/runs/:id/swap', ({ params, body }) =>
