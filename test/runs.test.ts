@@ -6,7 +6,7 @@ import path from 'node:path';
 import { attentionFor, limitSwapPlan, rejectReservedArgs, safeToRespawn, titleDecision } from '../src/daemon/runs.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
-import { withoutParentSession } from '../src/config.ts';
+import { PTY_TERM, withoutParentSession } from '../src/config.ts';
 import type { Usage } from '../src/shared/types.ts';
 
 const usage = (five: number | null, seven: number | null): Usage => ({
@@ -118,6 +118,28 @@ describe('a hosted session belongs to no other session', () => {
 
   it('leaves an ordinary environment alone', () => {
     assert.deepEqual(withoutParentSession({ PATH: '/usr/bin', HOME: '/home/x' }), { PATH: '/usr/bin', HOME: '/home/x' });
+  });
+
+  it('does not let the launching terminal decide how sessions look', () => {
+    // Claude Code sets NO_COLOR=1 on everything it launches. A daemon started from inside a session
+    // handed that down, and every session it opened rendered in black and white.
+    const env = withoutParentSession({
+      PATH: '/usr/bin',
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+      TERM: 'dumb',
+      COLORTERM: '',
+      TERM_PROGRAM: 'vscode',
+    });
+    assert.equal(env.NO_COLOR, undefined);
+    assert.equal(env.FORCE_COLOR, undefined);
+    assert.equal(env.TERM, undefined, 'the pseudo-terminal the runner makes says what TERM is');
+    assert.equal(env.TERM_PROGRAM, undefined);
+    assert.equal(env.PATH, '/usr/bin');
+
+    // And what the runner then says about the terminal it actually created.
+    assert.equal(PTY_TERM.TERM, 'xterm-256color');
+    assert.equal(PTY_TERM.COLORTERM, 'truecolor');
   });
 });
 

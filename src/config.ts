@@ -50,6 +50,16 @@ const PARENT_SESSION_ENV = new Set([
 ]);
 
 /**
+ * What the terminal a process was launched from says about itself.
+ *
+ * None of it describes the terminal a hosted session actually runs in, which is a pseudo-terminal
+ * the runner makes on the spot. Claude Code sets NO_COLOR=1 on everything it launches, so a daemon
+ * started from inside a session hands that down, and every session it opens renders in black and
+ * white — correctly, on the strength of a variable that was describing somebody else's terminal.
+ */
+const PARENT_TERMINAL_ENV = new Set(['TERM', 'COLORTERM', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'NO_COLOR', 'FORCE_COLOR', 'CLICOLOR', 'CLICOLOR_FORCE']);
+
+/**
  * The environment with a launching session's fingerprints wiped off it.
  *
  * A session Switchboard hosts is nobody's child. It owns its own conversation, and its transcript is
@@ -66,10 +76,17 @@ const PARENT_SESSION_ENV = new Set([
 export function withoutParentSession(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
-    if (typeof v === 'string' && !PARENT_SESSION_ENV.has(k)) out[k] = v;
+    if (typeof v === 'string' && !PARENT_SESSION_ENV.has(k) && !PARENT_TERMINAL_ENV.has(k)) out[k] = v;
   }
   return out;
 }
+
+/**
+ * The terminal variables for the pseudo-terminal the runner is about to create, which is the only
+ * terminal the session will ever be looking at. Set rather than inherited, so how the daemon
+ * happened to be started cannot decide whether sessions come out in colour.
+ */
+export const PTY_TERM: Record<string, string> = { TERM: 'xterm-256color', COLORTERM: 'truecolor' };
 export const DB_PATH = path.join(DATA_DIR, 'switchboard.db');
 
 /** The user's regular Claude Code config dir: the "default" subscription and the shared source. */
