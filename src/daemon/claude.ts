@@ -40,6 +40,8 @@ export const HOOK_EVENTS = [
   'PostToolUse',
   'Stop',
   'StopFailure',
+  'SubagentStart',
+  'SubagentStop',
   'Notification',
   'SessionEnd',
   'CwdChanged',

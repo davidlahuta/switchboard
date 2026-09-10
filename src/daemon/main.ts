@@ -8,6 +8,7 @@ import { findClaude } from './claude.ts';
 import { Coordinator } from './coord.ts';
 import { Db } from './db.ts';
 import { RepoScanner } from './discovery.ts';
+import { repairIntegration } from './integration.ts';
 import { Launcher } from './launcher.ts';
 import { getSettings } from './settings.ts';
 import { ModelCatalog } from './models.ts';
@@ -34,6 +35,15 @@ export async function startDaemon(): Promise<void> {
   const auth = new Auth(db);
   const updater = new Updater(db, bus, runs);
   runs.versionProvider = () => updater.currentVersion;
+
+  // An installation from an older build is missing whatever hooks this one added; a session
+  // started before that is repaired would report nothing about its subagents.
+  void repairIntegration().then(
+    (added) => {
+      if (added.length) bus.toast('info', `Claude Code integration updated: now also watching ${added.join(', ')}.`);
+    },
+    (err) => log.warn('could not update the Claude Code integration', err instanceof Error ? err.message : err),
+  );
 
   runs.start();
   subs.start();

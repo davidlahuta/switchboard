@@ -16,6 +16,8 @@ import type {
   NoteKind,
   Repo,
   RepoDetail,
+  SessionWork,
+  SessionWorkKind,
   Waiting,
 } from '../shared/types.ts';
 import { UNREAD_CAP } from '../shared/types.ts';
@@ -181,6 +183,35 @@ const OWED_ANSWER_MS = 20_000;
  * process that really died stops hooking at once, so anything inside this window is alive.
  */
 const RECENTLY_SEEN_MS = 2 * 60_000;
+
+/**
+ * How long work with no sign of life is still believed in, per kind.
+ *
+ * A subagent announces its end, so silence here means the announcement was lost — the hook timed
+ * out, the daemon was down for it, the process died in a way that skipped it. Half an hour is long
+ * enough that no real subagent is dropped while it is still thinking, and short enough that a lost
+ * SubagentStop cannot hold a queued restart for the rest of the day.
+ *
+ * A background shell or a monitor announces nothing at all: a dev server started this morning is
+ * still running this afternoon with no hook to say so, so these are believed for much longer and
+ * are cleared wholesale when the session that owns them restarts or ends.
+ */
+const WORK_SILENT_MS: Record<SessionWorkKind, number> = {
+  subagent: 30 * 60_000,
+  shell: 6 * 3600_000,
+  monitor: 6 * 3600_000,
+};
+
+interface WorkRow {
+  id: string;
+  session_id: string;
+  kind: SessionWorkKind;
+  label: string | null;
+  started_at: string;
+  last_seen: string;
+  ended_at: string | null;
+  end_reason: string | null;
+}
 
 export function editedPath(toolName: unknown, toolInput: unknown): string | null {
   if (typeof toolName !== 'string' || !EDIT_TOOLS.has(toolName)) return null;
@@ -532,8 +563,101 @@ export class Coordinator {
     const ts = now();
     this.db.run("UPDATE agents SET status = 'offline', ended_at = ?, last_seen = ? WHERE id = ?", ts, ts, id);
     this.db.run('UPDATE claims SET released_at = ? WHERE agent_id = ? AND released_at IS NULL', ts, id);
+    // Whatever it had running was running inside it.
+    this.endSessionWork(id, `session offline: ${why}`);
     this.event(a.repo_id, id, 'left', `${a.name} left (${why})`);
     this.bus.invalidate('state', `repo:${a.repo_id}`);
+  }
+
+  // -------------------------------------------------------- work in flight
+
+  /**
+   * Something the session started and has not finished: a subagent, a background shell, a monitor.
+   *
+   * Recorded because a session's own status answers a narrower question than it looks like it does.
+   * The main thread reports idle the moment its turn ends, and a subagent launched in the background
+   * outlives that turn by minutes — during which the session looks finished, is not, and would lose
+   * everything the subagent has spent if it were taken down.
+   */
+  workStarted(sessionId: string, work: { id: string; kind: SessionWorkKind; label?: string | null }): void {
+    const ts = now();
+    this.db.run(
+      `INSERT INTO session_work (id, session_id, kind, label, started_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, kind = excluded.kind,
+         label = COALESCE(excluded.label, session_work.label), last_seen = excluded.last_seen,
+         ended_at = NULL, end_reason = NULL`,
+      work.id,
+      sessionId,
+      work.kind,
+      work.label ?? null,
+      ts,
+      ts,
+    );
+    log.info('session work started', { session: sessionId, kind: work.kind, id: work.id, label: work.label ?? undefined });
+    this.bus.invalidate('state');
+  }
+
+  /** Any hook stamped with this work's id is proof it is still going. */
+  workSeen(id: string): void {
+    this.db.run('UPDATE session_work SET last_seen = ? WHERE id = ? AND ended_at IS NULL', now(), id);
+  }
+
+  workEnded(id: string, reason: string): boolean {
+    const changed = this.db.run('UPDATE session_work SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL', now(), reason, id).changes;
+    if (changed) this.bus.invalidate('state');
+    return changed > 0;
+  }
+
+  /**
+   * Everything a session had open, ended at once. The session's process is what all of it was
+   * running inside, so when that process restarts, ends, or stops on a usage limit, none of it
+   * survived — including the subagents that would otherwise have announced themselves.
+   */
+  endSessionWork(sessionId: string, reason: string): number {
+    const n = this.db.run(
+      'UPDATE session_work SET ended_at = ?, end_reason = ? WHERE session_id = ? AND ended_at IS NULL',
+      now(),
+      reason,
+      sessionId,
+    ).changes;
+    if (n) {
+      log.info('session work cleared', { session: sessionId, count: n, reason });
+      this.bus.invalidate('state');
+    }
+    return n;
+  }
+
+  liveWork(sessionId: string): SessionWork[] {
+    return this.db
+      .all<WorkRow>('SELECT * FROM session_work WHERE session_id = ? AND ended_at IS NULL ORDER BY started_at', sessionId)
+      .map((r) => ({ id: r.id, kind: r.kind, label: r.label, since: r.started_at, lastSeen: r.last_seen }));
+  }
+
+  /** All live work, by session, for the one caller that renders every session at once. */
+  liveWorkBySession(): Map<string, SessionWork[]> {
+    const out = new Map<string, SessionWork[]>();
+    for (const r of this.db.all<WorkRow>('SELECT * FROM session_work WHERE ended_at IS NULL ORDER BY started_at')) {
+      const list = out.get(r.session_id) ?? [];
+      list.push({ id: r.id, kind: r.kind, label: r.label, since: r.started_at, lastSeen: r.last_seen });
+      out.set(r.session_id, list);
+    }
+    return out;
+  }
+
+  liveSubagents(sessionId: string): number {
+    return this.db.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM session_work WHERE session_id = ? AND kind = 'subagent' AND ended_at IS NULL",
+      sessionId,
+    )!.n;
+  }
+
+  /** Work whose end was never announced, given up on so it cannot hold a session for ever. */
+  private sweepWork(): void {
+    for (const r of this.db.all<WorkRow>('SELECT * FROM session_work WHERE ended_at IS NULL')) {
+      if (Date.now() - Date.parse(r.last_seen) < WORK_SILENT_MS[r.kind]) continue;
+      this.workEnded(r.id, 'no sign of life');
+      log.info('gave up on session work that went silent', { session: r.session_id, kind: r.kind, id: r.id });
+    }
   }
 
   /**
@@ -596,6 +720,7 @@ export class Coordinator {
 
   /** Periodic liveness sweep: dead pids and long-silent hook-only agents go offline. */
   sweep(): void {
+    this.sweepWork();
     const live = this.db.all<AgentRow>("SELECT * FROM agents WHERE status <> 'offline'");
     for (const a of live) {
       if (this.pushTarget.isConnected(a.id)) continue;

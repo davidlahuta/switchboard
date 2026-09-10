@@ -10,15 +10,15 @@ import {
   rejectReservedArgs,
   rescueDecision,
   respawnPlacement,
-  safeToRespawn,
   titleDecision,
 } from '../src/daemon/runs.ts';
+import { readyForRespawn, safeToRespawn, workSummary } from '../src/shared/respawn.ts';
+import { looksFinished, startedWork, taskIdOf } from '../src/daemon/hooks.ts';
 import { attentionMark, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
 import { PTY_TERM, withoutParentSession } from '../src/config.ts';
-import type { AgentStatus, Run, Usage } from '../src/shared/types.ts';
-import { willWaitForTurn } from '../web/src/lib/respawn.ts';
+import type { Run, SessionWork, Usage } from '../src/shared/types.ts';
 
 const usage = (five: number | null, seven: number | null): Usage => ({
   fiveHour: five === null ? null : { pct: five, resetsAt: null },
@@ -100,6 +100,41 @@ describe('moving a session off a spent subscription', () => {
   });
 });
 
+describe('what a session still has running', () => {
+  const work = (kind: SessionWork['kind'], id = 'x'): SessionWork => ({ id, kind, label: null, since: '', lastSeen: '' });
+
+  it('recognises a background shell by the handle the tool result hands back', () => {
+    // Measured: a background Bash returns { ..., backgroundTaskId } and fires no hook of its own,
+    // either when it starts or when it ends.
+    assert.deepEqual(startedWork('Bash', { stdout: '', backgroundTaskId: 'bpylfmjzd' }), { id: 'bpylfmjzd', kind: 'shell' });
+    assert.equal(startedWork('Bash', { stdout: 'done' }), null, 'an ordinary Bash leaves nothing running');
+  });
+
+  it('tells a monitor apart from a shell, since only one of them is watching something', () => {
+    assert.equal(startedWork('Monitor', { backgroundTaskId: 'm1' })?.kind, 'monitor');
+  });
+
+  it('finds the task a later call is about, under every name Claude Code has used', () => {
+    assert.equal(taskIdOf({ task_id: 't1' }), 't1');
+    assert.equal(taskIdOf({ bash_id: 'b1' }), 'b1');
+    assert.equal(taskIdOf({ shell_id: 's1' }), 's1');
+    assert.equal(taskIdOf({ command: 'ls' }), null);
+  });
+
+  it('reads a peek at a task as an ending only when it says so', () => {
+    assert.equal(looksFinished({ status: 'completed' }), true);
+    assert.equal(looksFinished({ exitCode: 1 }), true);
+    assert.equal(looksFinished({ status: 'running' }), false);
+    assert.equal(looksFinished({ stdout: 'still going' }), false);
+  });
+
+  it('says what is open in the words the operator would use', () => {
+    assert.equal(workSummary([work('subagent', 'a'), work('subagent', 'b'), work('shell', 'c')]), '2 subagents, 1 background shell');
+    assert.equal(workSummary([work('monitor')]), '1 monitor');
+    assert.equal(workSummary([]), '');
+  });
+});
+
 describe('which terminal a session comes back into', () => {
   it('gives a relaunch a new terminal, whatever the host is running', () => {
     assert.equal(respawnPlacement({ kind: 'relaunch', staleHost: false }), 'new-terminal');
@@ -121,22 +156,24 @@ describe('which terminal a session comes back into', () => {
 });
 
 describe('when a session is taken for a restart, swap or relaunch', () => {
-  it('agrees with the menus about what a click will do', () => {
-    // The web says "now" or "when the turn ends" on the button; the daemon decides which actually
-    // happens. Two answers to one question, so they are checked against each other here.
-    const statuses: Array<AgentStatus | null> = ['starting', 'working', 'idle', 'waiting', 'limited', 'offline', null];
-    for (const agentStatus of statuses) {
-      const run = { status: 'running', agentStatus } as Run;
-      assert.equal(
-        willWaitForTurn(run, false),
-        !safeToRespawn(agentStatus ?? undefined),
-        `web and daemon disagree about ${agentStatus}`,
-      );
-    }
+  it('waits for a subagent that outlived the turn that launched it', () => {
+    // Measured: the parent's Stop hook arrives while a background subagent is still thinking, and
+    // the session reads as idle for as long as the subagent takes.
+    const sub = (kind: SessionWork['kind']): SessionWork => ({ id: 'a1', kind, label: null, since: '', lastSeen: '' });
+    assert.equal(readyForRespawn({ status: 'idle', work: [] }), true);
+    assert.equal(readyForRespawn({ status: 'idle', work: [sub('subagent')] }), false);
   });
 
-  it('never waits when the operator forced it', () => {
-    assert.equal(willWaitForTurn({ status: 'running', agentStatus: 'working' } as Run, true), false);
+  it('does not wait for a background shell or a monitor', () => {
+    // A dev server left running would hold a restart off for ever, and re-running it costs nothing
+    // like what a subagent's tokens cost.
+    const work = (kind: SessionWork['kind']): SessionWork => ({ id: 'b1', kind, label: null, since: '', lastSeen: '' });
+    assert.equal(readyForRespawn({ status: 'idle', work: [work('shell')] }), true);
+    assert.equal(readyForRespawn({ status: 'idle', work: [work('monitor')] }), true);
+  });
+
+  it('still protects a running turn whatever else is open', () => {
+    assert.equal(readyForRespawn({ status: 'working', work: [] }), false);
   });
 
 

@@ -6,12 +6,14 @@ import { DAEMON_URL, HOME_CLAUDE_DIR } from '../config.ts';
 import { logger } from '../log.ts';
 import { tabTitle } from '../shared/marks.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
+import { readyForRespawn } from '../shared/respawn.ts';
 import type {
   AgentStatus,
   Attention,
   CreateRunRequest,
   RespawnKind,
   RespawnTrigger,
+  SessionWork,
   Run,
   RunStatus,
   Subscription,
@@ -95,6 +97,14 @@ const CONTINUE_RETRIES = 15;
 const CONTINUE_FALLBACK_MS = 25_000;
 /** How long before a session that is still limited is offered another way out. */
 const RESCUE_DEBOUNCE_MS = 60_000;
+/**
+ * How far past its deadline a respawn will wait for a subagent to finish. Long enough for real
+ * work — a research subagent runs for minutes, not seconds — and bounded so a subagent whose end
+ * was never announced cannot hold a session that is out of usage on a spent subscription.
+ */
+const SUBAGENT_GRACE_MS = 20 * 60_000;
+/** How long after the last subagent finishes before a queued respawn is taken, if nothing else happens. */
+const WORK_SETTLED_MS = 5000;
 /**
  * What a session is told when the swap could not wait for the end of its turn. "continue" on its
  * own invites it to carry on from a plan whose later half never ran: the tools it called last may
@@ -201,10 +211,6 @@ export function respawnPlacement(input: { kind: RespawnKind; staleHost: boolean 
   return input.kind === 'relaunch' || input.staleHost ? 'new-terminal' : 'in-place';
 }
 
-export function safeToRespawn(status: AgentStatus | undefined): boolean {
-  return status === undefined || status === 'idle' || status === 'limited';
-}
-
 export function titleDecision(name: string, shadow: string | null, reported: string | null): { adopt?: string; push?: string } {
   const title = reported?.trim() || null;
   // Adopting a title that already matches the name is a no-op rename that records the shadow, so
@@ -288,11 +294,15 @@ export class RunManager {
    * every session at once, and one grouped query for all of them beats one query each.
    */
   private operatorUnread: { at: number; by: Map<string, number> } | null = null;
+  /** The same trick for work in flight: one query for the whole board rather than one per session. */
+  private workCache: { at: number; by: Map<string, SessionWork[]> } | null = null;
   /** Set by the daemon once the updater knows which claude version is installed. */
   versionProvider: () => string | null = () => null;
   private readonly pendingContinue = new Map<string, { text: string; timer: NodeJS.Timeout }>();
   /** When each session was last picked up off a limit, so a poll every few seconds does it once. */
   private readonly lastRescue = new Map<string, number>();
+  /** Runs whose due respawn is being held for a subagent, so that is said once rather than every sweep. */
+  private readonly subagentHeld = new Set<string>();
   private readonly lastLimit = new Map<string, number>();
 
   constructor(db: Db, bus: Bus, subs: SubscriptionManager, coord: Coordinator, launcher: Launcher, models: ModelCatalog) {
@@ -389,6 +399,7 @@ export class RunManager {
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
       skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
       continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
+      work: this.liveWorkFor(r.session_id),
       waiting: waiting
         ? {
             kind: waiting.kind,
@@ -495,6 +506,21 @@ export class RunManager {
         this.savePending(runId, null);
         continue;
       }
+      /*
+       * A deadline exists to stop a session waiting for a turn that never ends, and a subagent is
+       * not that: it announces its own end, and what it has spent is lost with it. So the deadline
+       * gives way to a live subagent — up to a bound, because a SubagentStop that never arrives
+       * must not turn a bounded wait into an unbounded one.
+       */
+      if (this.coord.liveSubagents(r.session_id) > 0 && Date.now() < plan.deadline + SUBAGENT_GRACE_MS) {
+        if (!this.subagentHeld.has(runId)) {
+          this.subagentHeld.add(runId);
+          log.info('holding a due respawn while a subagent finishes', { run: runId, kind: plan.kind });
+          this.bus.toast('info', `${r.name}: ${plan.kind} is due, but a subagent is still running — waiting for it.`);
+        }
+        continue;
+      }
+      this.subagentHeld.delete(runId);
       log.info('respawning on deadline', { run: runId, kind: plan.kind, waitedMs: Date.now() - plan.queuedAt });
       try {
         this.executeRespawn(r, plan);
@@ -1078,6 +1104,13 @@ export class RunManager {
     return r;
   }
 
+  private liveWorkFor(sessionId: string): SessionWork[] {
+    if (!this.workCache || Date.now() - this.workCache.at > 1000) {
+      this.workCache = { at: Date.now(), by: this.coord.liveWorkBySession() };
+    }
+    return this.workCache.by.get(sessionId) ?? [];
+  }
+
   private unreadForOperator(sessionId: string): number {
     if (!this.operatorUnread || Date.now() - this.operatorUnread.at > 1000) {
       this.operatorUnread = { at: Date.now(), by: this.coord.humanUnreadBySession() };
@@ -1086,7 +1119,7 @@ export class RunManager {
   }
 
   private busy(r: RunRow): boolean {
-    return !safeToRespawn(this.coord.agent(r.session_id)?.status);
+    return !readyForRespawn({ status: this.coord.agent(r.session_id)?.status, work: this.coord.liveWork(r.session_id) });
   }
 
   /** Defer until the agent is idle unless forced, so a respawn never interrupts a turn. */
@@ -1408,9 +1441,32 @@ export class RunManager {
     if (r) this.db.run('UPDATE runs SET last_cwd = ? WHERE id = ?', cwd, r.id);
   }
 
+  /**
+   * The last thing a session had running has finished. Its own turn ended minutes ago, so nothing
+   * else is going to say "now" for a respawn that has been waiting on it.
+   *
+   * Taken after a pause rather than at once, because a subagent finishing is normally followed
+   * within a moment by the session waking up to read its report — and a respawn landing in that gap
+   * would throw away the result the wait was for. If the session does wake, it is working again by
+   * the time this fires and the check falls through to the ordinary path.
+   */
+  onWorkSettled(sessionId: string): void {
+    const r = this.bySession(sessionId);
+    if (!r || !this.pendingRespawn.has(r.id)) return;
+    setTimeout(() => {
+      const fresh = this.bySession(sessionId);
+      if (!fresh || fresh.status === 'exited' || !this.pendingRespawn.has(fresh.id) || this.busy(fresh)) return;
+      log.info('taking a queued respawn now that the session has nothing running', { run: fresh.id });
+      this.onIdle(sessionId);
+    }, WORK_SETTLED_MS);
+  }
+
   onIdle(sessionId: string): void {
     const r = this.bySession(sessionId);
     if (!r) return;
+    // The turn is over but the session may not be: a subagent it launched in the background is
+    // still spending, and onWorkSettled will come back here when it is really done.
+    if (this.busy(r)) return;
     const pending = this.pendingRespawn.get(r.id);
     if (pending) {
       try {
@@ -1538,7 +1594,9 @@ export class RunManager {
     if (used < settings.swapThresholdPct) return;
     for (const r of runs) {
       if (!bool(r.auto_swap) || this.pendingRespawn.has(r.id)) continue;
-      if (this.coord.agent(r.session_id)?.status !== 'idle') continue;
+      // Idle on the main thread is not idle: a background subagent is still spending, and a swap
+      // would take the session out from under it.
+      if (this.coord.agent(r.session_id)?.status !== 'idle' || this.busy(r)) continue;
       /*
        * Crossing the threshold is a reason to look, not a reason to move. A swap costs the session
        * its place in the conversation and a resume, so somewhere merely a little better is not worth

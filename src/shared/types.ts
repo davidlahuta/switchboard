@@ -210,6 +210,28 @@ export interface FileTouch {
 export type RunStatus = 'starting' | 'running' | 'swapping' | 'exited' | 'disconnected';
 
 /**
+ * Something a session has running besides its own turn.
+ *
+ * A session whose main thread has gone quiet is not necessarily done: it may have subagents
+ * thinking, a build running in a background shell, or a monitor watching a log. Only the first of
+ * those costs tokens that are lost if the session is taken down, which is why they are told apart
+ * rather than counted together.
+ */
+export type SessionWorkKind = 'subagent' | 'shell' | 'monitor';
+
+export interface SessionWork {
+  /** Claude Code's own id for it: an agent_id for a subagent, a background task id otherwise */
+  id: string;
+  kind: SessionWorkKind;
+  /** the subagent's type, or the command or description the work was started with */
+  label: string | null;
+  /** ISO timestamp it started */
+  since: string;
+  /** ISO timestamp of the last hook that mentioned it */
+  lastSeen: string;
+}
+
+/**
  * A session going down and coming back up. Kind is what changes while it is down; trigger is who or
  * what asked. They are separate on purpose: the same restart means one thing when an operator
  * clicked it and another when an update queued it behind an hour-long turn.
@@ -260,6 +282,12 @@ export interface Run {
   continueOnResume: boolean;
   /** a swap or restart holding off until this session's turn ends */
   waiting: WaitingRespawn | null;
+  /**
+   * Subagents, background shells and monitors this session still has open. A session reports itself
+   * idle the moment its own turn ends, so this is the difference between "finished" and "waiting on
+   * something it started".
+   */
+  work: SessionWork[];
   /** why this session wants looking at; all false when it does not */
   attention: Attention;
   /** claude version this session is currently running on, when known */
