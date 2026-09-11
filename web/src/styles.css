@@ -3394,6 +3394,13 @@ a.list-main:hover {
 .srow + .srow {
   border-top: 1px solid var(--border);
 }
+/*
+ * No hover or tap highlight on the row itself. This list paints itself when something changes, and
+ * a background that also lights up under the pointer competes with that — on a desk of nine
+ * sessions the eye learns to read the light as news, and a row lighting up because the mouse
+ * happens to be resting on it teaches it the opposite. The buttons in the row keep their own
+ * affordances; the row's is the cursor.
+ */
 .srow-head {
   display: flex;
   align-items: center;
@@ -3401,9 +3408,7 @@ a.list-main:hover {
   padding: 5px 10px 5px 4px;
   min-height: 38px;
   cursor: pointer;
-}
-.srow-head:hover {
-  background: var(--surface-2);
+  -webkit-tap-highlight-color: transparent;
 }
 .srow-toggle {
   flex: none;
@@ -3418,9 +3423,9 @@ a.list-main:hover {
   color: var(--muted);
   cursor: pointer;
 }
-.srow-toggle:hover {
+.srow-toggle:hover,
+.srow-toggle:focus-visible {
   color: var(--text);
-  background: var(--surface);
 }
 .srow .session-name,
 .srow .rename-wrap {

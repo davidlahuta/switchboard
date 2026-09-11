@@ -139,10 +139,11 @@ export function Sessions({ state }: { state: StateSnapshot }) {
  * One session, in one line.
  *
  * A desk runs nine of these and a phone shows a screen at a time, so what is always visible is what
- * changes: the mark, the name, what it is doing, and the handful of actions worth taking on a
- * session you are only glancing at — open it, tell it to carry on, restart it, bring it back. The
- * rest of what a session is — where it lives, which subscription, its id, its settings, its swaps —
- * does not change from minute to minute and is a click away.
+ * changes: the mark, the name, what it is doing, and the two actions worth taking on a session you
+ * are only glancing at — open it, or tell it to carry on. Everything that is a decision rather than
+ * a reflex, restarting included, is a click away with the rest of what a session is: where it
+ * lives, which subscription, its id, its settings, its swaps. None of that changes from minute to
+ * minute, and none of it is why anybody opens this page.
  */
 function SessionRow({
   run,
@@ -211,7 +212,6 @@ function SessionRow({
           {/* No terminal of its own: exited on its own, or the machine was off. */}
           {(exited || r.status === 'disconnected') && <ResumeButton run={r} compact />}
           {!exited && <ContinueButton run={r} compact />}
-          {!exited && <RestartMenu run={r} compact />}
         </span>
       </div>
 
@@ -264,6 +264,7 @@ function SessionRow({
           <RunTags run={r} models={state.models} update={state.update} />
           <RunArgs args={r.args} />
           <div className="row-actions">
+            {!exited && <RestartMenu run={r} compact />}
             {!exited && <SwapMenu run={r} subs={state.subscriptions} compact />}
             {!exited && <HandoffButton run={r} compact />}
             {!exited ? (
