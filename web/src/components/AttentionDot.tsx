@@ -1,5 +1,5 @@
 import type { Run } from '@shared/types.ts';
-import { attentionMark, sessionMark } from '@shared/marks.ts';
+import { attentionRank, sessionMark } from '@shared/marks.ts';
 
 /**
  * Whether this session is asking for the operator.
@@ -9,7 +9,7 @@ import { attentionMark, sessionMark } from '@shared/marks.ts';
  * stopped and is waiting to be told what to do, which is the opposite of what the order is for.
  */
 export function wantsAttention(run: Run): boolean {
-  return attentionMark(run) !== null;
+  return attentionRank(run) > 0;
 }
 
 /**
@@ -17,16 +17,18 @@ export function wantsAttention(run: Run): boolean {
  * about which session is at the top.
  *
  * What wants the operator comes first — that is what a mark is for, and a list that shows marks and
- * then buries them below a dozen quiet rows has made the reader do the sorting. Then the most
- * recently active, because with a dozen sessions open the one being worked on is the one being
- * looked for; then by name, so a list of idle sessions holds still between refreshes rather than
- * shuffling on every tick. Sessions that have exited stay at the bottom whatever they are asking
- * for: they are history, and the live ones are the work.
+ * then buries them below a dozen quiet rows has made the reader do the sorting. And by how much it
+ * wants them, not merely whether: a session stopped on a question is above one that has only
+ * finished something, however long ago it stopped, because it is the one that will still be sitting
+ * there tomorrow. Then the most recently active, because with a dozen sessions open the one being
+ * worked on is the one being looked for; then by name, so a list of idle sessions holds still
+ * between refreshes rather than shuffling on every tick. Sessions that have exited stay at the
+ * bottom whatever they are asking for: they are history, and the live ones are the work.
  */
 export function byAttention(a: Run, b: Run): number {
   return (
     Number(a.status === 'exited') - Number(b.status === 'exited') ||
-    Number(wantsAttention(b)) - Number(wantsAttention(a)) ||
+    attentionRank(b) - attentionRank(a) ||
     b.lastActivity.localeCompare(a.lastActivity) ||
     a.name.localeCompare(b.name)
   );

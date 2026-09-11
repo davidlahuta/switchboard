@@ -17,7 +17,7 @@ import {
 } from '../src/daemon/runs.ts';
 import { readyForRespawn, safeToRespawn, workSummary } from '../src/shared/respawn.ts';
 import { looksFinished, startedWork, taskIdOf } from '../src/daemon/hooks.ts';
-import { attentionMark, sessionMark, tabTitle } from '../src/shared/marks.ts';
+import { attentionMark, attentionRank, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
 import { PTY_TERM, withoutParentSession } from '../src/config.ts';
@@ -618,6 +618,38 @@ describe('one mark, wherever a session is shown', () => {
     const waiting = run({ agentStatus: 'waiting', attention: { waiting: true, unread: 0, unseen: false } });
     assert.equal(attentionMark(waiting)?.glyph, sessionMark(waiting)?.glyph);
     assert.equal(tabTitle(waiting, 'apex'), '❗ apex');
+  });
+
+  it('puts a session waiting on a person above one that has merely finished', () => {
+    /*
+     * These used to sort as one group — "is it asking for me at all" — and then by whatever moved
+     * last, so a session blocked on a question ten minutes ago sat below one that finished a minute
+     * ago. One of them will still be sitting there tomorrow; the other is done.
+     */
+    const blocked = run({ agentStatus: 'waiting', attention: { waiting: true, unread: 0, unseen: false } });
+    const spoke = run({ attention: { waiting: false, unread: 2, unseen: true } });
+    const done = run({ attention: { waiting: false, unread: 0, unseen: true } });
+    const quiet = run({});
+    assert.ok(attentionRank(blocked) > attentionRank(spoke));
+    assert.ok(attentionRank(spoke) > attentionRank(done));
+    assert.ok(attentionRank(done) > attentionRank(quiet));
+    assert.equal(attentionRank(quiet), 0);
+  });
+
+  it('counts a session that has stopped trying as waiting on a person', () => {
+    // No next attempt means nothing is coming for it but an operator. It used to carry the mark for
+    // "finished something you have not read" — which is what a session that is done looks like.
+    const gaveUp = run({ stalled: { reason: 'a spend cap', since: '', nextTry: null, tries: 8 }, attention: { waiting: false, unread: 0, unseen: true } });
+    assert.equal(attentionMark(gaveUp)?.glyph, '❗');
+    assert.equal(tabTitle(gaveUp, 'apex'), '❗ apex');
+    assert.ok(attentionRank(gaveUp) > attentionRank(run({ attention: { waiting: false, unread: 1, unseen: true } })));
+  });
+
+  it('leaves a session that is still being told to carry on to get on with it', () => {
+    // It has an attempt coming, so it is not waiting for anybody yet.
+    const retrying = run({ stalled: { reason: 'rate_limit', since: '', nextTry: '2026-09-11T14:00:00Z', tries: 2 } });
+    assert.equal(attentionMark(retrying), null);
+    assert.equal(attentionRank(retrying), 0);
   });
 
   it('marks a busy session in both, and asks nothing of anyone for it', () => {

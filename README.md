@@ -159,9 +159,12 @@ From there you can:
   read as one thing: `❗` stopped on a prompt only you can answer, `✉` it has said something to you,
   `✓` finished something you have not looked at, `●` working, `◐` working through subagents (its own
   turn has ended, theirs has not), `◌` idle but still holding a background shell or monitor open,
-  `⏳` waiting out a limit, and nothing at all when it is idle and read. The lists sort the first
-  three to the top — a session that is merely working wants nothing from you and will finish on its
-  own.
+  `⏳` waiting out a limit, and nothing at all when it is idle and read. A session that has been told
+  to carry on as often as it is worth asking carries `❗` too: nothing else is coming for it. The
+  lists sort the first three to the top, and in that order — a session stopped on a question is
+  above one that has only finished something, however long ago it stopped, because it is the one
+  that will still be sitting there tomorrow. A session that is merely working wants nothing from you
+  and will finish on its own.
 - **Hand back** the terminal when you are done with it on the phone. A pseudo-terminal has one size:
   while a browser is fitted to its own screen it owns that size, and the desktop window is parked
   rather than shown a frame drawn for other dimensions. The browser then follows the desktop
