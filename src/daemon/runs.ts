@@ -123,12 +123,13 @@ const REVIVE_BACKOFF_MS = [30_000, 2 * 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_
 /**
  * How long after a respawn the terminal's output says nothing about usage limits.
  *
- * The runner is quiet for its own window too, but a limit already in flight can arrive here just
- * after the swap that answered it, where it reads as a limit on the subscription the session has
- * only just moved to. Three times overnight that bounced a session straight off the subscription
- * that was going to save it.
+ * This covers the milliseconds: a limit already on its way here when the swap happened, which would
+ * otherwise be blamed on the subscription the session has only just moved to. Three times overnight
+ * that bounced a session straight off the one that was going to save it. The longer problem — a
+ * resumed conversation replaying the banner it hit yesterday — is the runner's to solve, and it
+ * stays quiet for longer than this; a limit that survives both windows is a live one.
  */
-const LIMIT_QUIET_AFTER_RESPAWN_MS = 60_000;
+const LIMIT_QUIET_AFTER_RESPAWN_MS = 15_000;
 /**
  * How far past its deadline a respawn will wait for a subagent to finish. Long enough for real
  * work — a research subagent runs for minutes, not seconds — and bounded so a subagent whose end
@@ -1494,6 +1495,10 @@ export class RunManager {
         false,
       );
     }
+    // Past the queue, this is a session going down and coming back, so it starts the same clock a
+    // swap does: nothing else takes it while it is coming up, and the screen it comes up with is
+    // not read as news about usage.
+    this.lastRespawn.set(r.id, Date.now());
     if (r.status === 'exited') {
       // It ended — on its own, or because the machine did. Clear that so it is a live run again.
       this.db.run("UPDATE runs SET ended_at = NULL, exit_code = NULL WHERE id = ?", r.id);
