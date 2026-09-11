@@ -378,11 +378,22 @@ export function clearedInPlace(event: string, source: string | null): boolean {
  *
  * `hostPid` is the pid the runner spawned, and `hostSession` reads back the conversation Claude
  * Code says that pid is in — asked lazily, because it is a file read and most reports never need
- * it. A shim settles it without either: it carries the pid of the claude that started it, and that
- * is the same question from the other end.
+ * it. Together they are the question: is the claude saying this the one in this run's terminal?
+ *
+ * A shim carries a pid of its own, and it is worth no more than the pid it names. Claude Code
+ * stamps CLAUDE_PID on everything a session launches and the shim prefers it, so a `claude -p`
+ * started from a hosted session hands its shim the *parent's* pid along with a conversation of its
+ * own — a claim to be this run's session that matches on pid and is false. The pid has to agree
+ * about which conversation it is in before it means anything.
  */
 export function reporterOf(witness: RebindWitness, reported: string, hostPid: number | null, hostSession: () => string | null): Reporter {
-  if (witness.kind === 'shim') return witness.pid !== null && witness.pid === hostPid ? 'hosted' : 'elsewhere';
+  if (witness.kind === 'shim') {
+    if (witness.pid === null || witness.pid !== hostPid) return 'elsewhere';
+    const inThere = hostSession();
+    // Nothing known about the pid is not evidence against it: older builds keep no such file, and
+    // refusing every shim on a build that does not write one would take the board down with it.
+    return inThere === null || inThere === reported ? 'hosted' : 'elsewhere';
+  }
   if (clearedInPlace(witness.event, witness.source)) return 'cleared';
   return hostPid !== null && hostSession() === reported ? 'hosted' : 'elsewhere';
 }
