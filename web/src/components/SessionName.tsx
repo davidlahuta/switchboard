@@ -59,12 +59,15 @@ export function SessionName({ run, as: Tag = 'span', href, dot }: { run: Run; as
   return (
     <Tag className="rename-wrap">
       {dot && <AttentionDot run={run} />}
+      {/* Truncated in the lists, so the whole name has to be available without opening anything. */}
       {href ? (
-        <a href={href} className="run-name">
+        <a href={href} className="run-name" title={run.name}>
           {run.name}
         </a>
       ) : (
-        <span className="run-name">{run.name}</span>
+        <span className="run-name" title={run.name}>
+          {run.name}
+        </span>
       )}
       <button
         type="button"
