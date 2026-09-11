@@ -430,9 +430,21 @@ describe('whether the claude reporting an id is the one the run is hosting', () 
   });
 
   it('lets the MCP shim answer for the claude that started it', () => {
-    assert.equal(reporterOf({ kind: 'shim', pid: 4242 }, THEIRS, 4242, never), 'hosted', 'the session, on a conversation the run has not heard of yet');
+    assert.equal(reporterOf({ kind: 'shim', pid: 4242 }, THEIRS, 4242, () => THEIRS), 'hosted', 'the session, on a conversation the run has not heard of yet');
     assert.equal(reporterOf({ kind: 'shim', pid: 88 }, THEIRS, 4242, never), 'elsewhere', 'a claude the session itself started');
     assert.equal(reporterOf({ kind: 'shim', pid: null }, THEIRS, 4242, never), 'elsewhere', 'and one that will not say');
+  });
+
+  it('does not let a borrowed pid make a shim sound like the session', () => {
+    // Claude Code stamps CLAUDE_PID on everything a session launches, and the shim prefers it to
+    // its own parent — so a `claude -p` in a Bash tool hands its shim the session's pid and a
+    // conversation of its own. The pid is only worth something if it agrees about which
+    // conversation it is in.
+    assert.equal(reporterOf({ kind: 'shim', pid: 4242 }, THEIRS, 4242, () => MINE), 'elsewhere');
+  });
+
+  it('still believes a shim on a build that keeps no such file', () => {
+    assert.equal(reporterOf({ kind: 'shim', pid: 4242 }, THEIRS, 4242, () => null), 'hosted');
   });
 });
 
