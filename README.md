@@ -137,6 +137,12 @@ From there you can:
   open. Background shells and monitors are shown the same way but do not hold anything up: a dev
   server would block a restart for ever, and re-running one costs nothing like a subagent's tokens.
 
+- A limit takes the whole session with it. A subagent is not a separate claim on the account, so a session
+  that runs out takes its subagents down too, and none of them ever reports finishing — so the limit clears
+  them itself. Otherwise the first thing those ghosts do is hold up the swap the limit is asking for, the
+  respawn falling due, seeing a subagent and waiting for work that died with the turn. One limit is also
+  answered once, however many times the banner is reprinted as Claude Code retries: a second reading of the
+  same limit does not buy the session another three minutes before it moves.
 - Let it swap itself when it hits a limit (Settings → *Auto-swap*, on by default), or before it gets there
   (*Proactive swap*, on by default at 85%). Waiting for the limit means every swap lands mid-turn; whatever
   sits above the threshold has to carry one whole turn, so lower it if your turns run long. A session that

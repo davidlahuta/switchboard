@@ -11,6 +11,7 @@ import {
   rescueDecision,
   respawnGuard,
   stallDecision,
+  earlierDeadline,
   respawnPlacement,
   titleDecision,
 } from '../src/daemon/runs.ts';
@@ -234,6 +235,26 @@ describe('what a session still has running', () => {
     assert.equal(workSummary([work('subagent', 'a'), work('subagent', 'b'), work('shell', 'c')]), '2 subagents, 1 background shell');
     assert.equal(workSummary([work('monitor')]), '1 monitor');
     assert.equal(workSummary([]), '');
+  });
+});
+
+describe('how long a queued respawn waits', () => {
+  /*
+   * A limit is not one event. Claude Code reprints the banner as it retries and the terminal
+   * repaints, so the same limit arrives every few minutes — and each arrival used to re-queue the
+   * swap with a fresh three-minute deadline, which is a deadline that never falls due.
+   */
+  it('keeps the patience already running when a plan is replaced', () => {
+    const first = 1000;
+    const again = 5000;
+    assert.equal(earlierDeadline(first, again), first, 'asking again does not buy the session more time');
+  });
+
+  it('treats waiting for the turn to end as the longest patience there is', () => {
+    // null is "however long the turn takes", so anything with a clock on it is sooner.
+    assert.equal(earlierDeadline(null, 5000), 5000);
+    assert.equal(earlierDeadline(5000, null), 5000);
+    assert.equal(earlierDeadline(null, null), null);
   });
 });
 
