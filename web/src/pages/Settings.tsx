@@ -565,7 +565,7 @@ function RepoLine({ repo }: { repo: DiscoveredRepo }) {
  * a fleet on an old build stays on it.
  */
 function FleetSection({ runs }: { runs: Run[] }) {
-  const [busy, setBusy] = useState<'restart' | 'relaunch' | null>(null);
+  const [busy, setBusy] = useState<'restart' | 'relaunch' | 'rebalance' | null>(null);
   const live = runs.filter((r) => r.status !== 'exited');
   const queued = live.filter((r) => r.waiting).length;
   const stale = live.filter((r) => r.staleRunner).length;
@@ -577,6 +577,21 @@ function FleetSection({ runs }: { runs: Run[] }) {
     if (!res) return;
     const what = kind === 'relaunch' ? 'move to a new terminal' : 'restart';
     emitToast('info', res.queued > 0 ? `${plural(res.queued, 'session')} will ${what} as soon as it is idle` : 'No live sessions to take');
+  };
+
+  const rebalance = async () => {
+    setBusy('rebalance');
+    const res = await api.post<{ queued: number; considered: number }>('/api/runs/rebalance', {});
+    setBusy(null);
+    if (!res) return;
+    // Nothing moved is the ordinary answer on a desk that is already spread out, and saying so is
+    // the point of pressing it: it is the difference between "nothing to do" and "did not work".
+    emitToast(
+      'info',
+      res.queued > 0
+        ? `${plural(res.queued, 'session')} of ${res.considered} will move as soon as it is idle`
+        : `Nothing to move — all ${plural(res.considered, 'session')} are already on the best subscription for them`,
+    );
   };
 
   return (
@@ -597,11 +612,22 @@ function FleetSection({ runs }: { runs: Run[] }) {
           <Icon name="terminal" size={16} />
           <span>{busy === 'relaunch' ? 'Queueing…' : 'Give every session a new terminal'}</span>
         </button>
+        <button type="button" className="btn" disabled={busy !== null || live.length === 0} onClick={() => void rebalance()}>
+          <Icon name="swap" size={16} />
+          <span>{busy === 'rebalance' ? 'Working out…' : 'Rebalance subscriptions'}</span>
+        </button>
       </div>
       <p className="muted small">
-        Neither interrupts anything: each session waits for its own turn to end. A restart resumes the same conversation on
-        the installed claude; a new terminal also reloads the Switchboard code hosting it, which a restart in place cannot —
-        though a session whose host is already out of date gets a new terminal either way.
+        None of these interrupts anything: each session waits for its own turn to end. A restart resumes the same
+        conversation on the installed claude; a new terminal also reloads the Switchboard code hosting it, which a restart
+        in place cannot — though a session whose host is already out of date gets a new terminal either way.
+      </p>
+      <p className="muted small">
+        <strong>Rebalance</strong> looks at the whole desk at once and moves the sessions that would be clearly better off
+        on another subscription — worst-placed first, and counting each move as it makes it, so two sessions are never sent
+        to the same emptiest account. Swapping them one by one from their own menus cannot do that: each of those answers
+        is given as though it were the only session moving. A session already where it should be is left alone, and a
+        margin too small to be worth a resume counts as already there.
       </p>
     </Section>
   );

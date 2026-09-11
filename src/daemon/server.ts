@@ -324,6 +324,13 @@ export function createServer(s: Services): http.Server {
     }),
   }));
 
+  /**
+   * Spread the desk out again in one pass, rather than one session at a time from nine menus —
+   * where every answer is given in ignorance of the other eight. Same queuing as a restart: each
+   * move waits for its own session's turn.
+   */
+  route('POST', '/api/runs/rebalance', ({ body }) => s.runs.rebalanceAll(body.force === true));
+
   // models
   route('GET', '/api/models', () => s.models.list());
   route('POST', '/api/models/refresh', async () => {
