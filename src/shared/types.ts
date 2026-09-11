@@ -248,7 +248,9 @@ export type RespawnTrigger =
   /** the subscription it was on crossed the threshold while it sat idle */
   | 'proactive'
   /** it had stopped on a limit and somewhere got its capacity back */
-  | 'rescue';
+  | 'rescue'
+  /** its terminal died without anybody asking it to, and it is being brought back */
+  | 'revive';
 
 export interface Swap {
   fromSubscriptionId: string | null;
@@ -364,6 +366,12 @@ export interface Settings {
   defaultSkipPermissions: boolean;
   /** Swap automatically when a session hits a usage limit */
   autoSwap: boolean;
+  /**
+   * Bring a session back when its terminal dies on its own. The conversation is on disk and
+   * addressed by GUID, so a death that nobody chose is something the daemon can undo at three in
+   * the morning; an operator stopping a session is not, and is never undone.
+   */
+  autoRevive: boolean;
   /** Swap idle sessions proactively once their subscription crosses swapThresholdPct */
   proactiveSwap: boolean;
   swapThresholdPct: number;

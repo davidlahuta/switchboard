@@ -301,6 +301,18 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
       <Section title="Sessions & swapping">
         <div className="setting">
           <div className="setting-text">
+            <div className="setting-name">Bring sessions back when their terminal dies</div>
+            <div className="setting-desc">
+              A window that closes on its own, a claude that falls over, a resume that collides with a process still
+              shutting down — the conversation is on disk and addressed by id, so it is reopened and resumed on a
+              backoff rather than left down until somebody notices. Stopping a session yourself is never undone.
+            </div>
+          </div>
+          <Toggle checked={draft.autoRevive} onChange={(v) => set('autoRevive', v)} label="Bring sessions back when their terminal dies" />
+        </div>
+
+        <div className="setting">
+          <div className="setting-text">
             <div className="setting-name">Auto-swap on limits</div>
             <div className="setting-desc">When a session hits a usage limit, resume it on the subscription with the most headroom.</div>
           </div>

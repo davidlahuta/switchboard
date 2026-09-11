@@ -9,6 +9,7 @@ import {
   rebindDecision,
   rejectReservedArgs,
   rescueDecision,
+  respawnGuard,
   respawnPlacement,
   titleDecision,
 } from '../src/daemon/runs.ts';
@@ -98,6 +99,39 @@ describe('which sessions are asking to be looked at', () => {
     const shell: SessionWork = { id: 'b1', kind: 'shell', label: 'npm run dev', since: '', lastSeen: '' };
     const a = attentionFor({ ...base, lastActivity: t('2026-01-01T10:05:00Z'), work: [shell] });
     assert.equal(a.unseen, true, 'a dev server is not the session working');
+  });
+});
+
+describe('answering one usage limit once', () => {
+  const NOW = Date.parse('2026-09-11T06:28:53Z');
+
+  it('refuses to take a session that came back seventeen milliseconds ago', () => {
+    // The real number from the night this was written: a limit answered by the rescue sweep and by
+    // the limit handler at once, two swaps 17ms apart, two claude processes on one conversation,
+    // and a session that died instead of moving.
+    assert.equal(respawnGuard({ lastRespawnAt: NOW - 17, now: NOW, force: false }), 'too-soon');
+  });
+
+  it('lets it through once the session has had time to come up', () => {
+    assert.equal(respawnGuard({ lastRespawnAt: NOW - 60_000, now: NOW, force: false }), 'go');
+    assert.equal(respawnGuard({ lastRespawnAt: null, now: NOW, force: false }), 'go');
+  });
+
+  it('never stands in the way of an operator who can see the screen', () => {
+    assert.equal(respawnGuard({ lastRespawnAt: NOW - 17, now: NOW, force: true }), 'go');
+  });
+
+  it('keeps a session off a subscription whose model-scoped week is spent', () => {
+    // A subscription can read 70% overall while the model the session runs on has nothing left, and
+    // landing there buys a limit rather than room. Overnight this is what a swap kept finding.
+    const usable = (scopedPct: number): boolean => scopedPct < 99;
+    assert.equal(usable(74), true);
+    assert.equal(usable(100), false);
+  });
+
+  it('prefers a subscription that is answering over one whose numbers are guesses', () => {
+    const base = { headroom: 0.5, fullHeadroom: 1, liveRuns: 0, priority: 0, resetsInMs: null, recentlyLeft: false };
+    assert.ok(subscriptionScore(base) > subscriptionScore({ ...base, stale: true }), 'stale numbers describe an earlier moment');
   });
 });
 

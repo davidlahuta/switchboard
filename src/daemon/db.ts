@@ -274,6 +274,16 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX session_work_live ON session_work (session_id, ended_at);
   `,
+  `
+  -- When to try bringing a session back, and how many times that has been tried.
+  --
+  -- A terminal that dies at eleven at night used to stay dead until someone sat down in the
+  -- morning: the run went to 'disconnected' and nothing ever looked at it again. The conversation
+  -- is on disk and addressed by GUID, so coming back is only a matter of opening a terminal on it,
+  -- which is something a daemon can do at two in the morning and a person cannot.
+  ALTER TABLE runs ADD COLUMN revive_after TEXT;
+  ALTER TABLE runs ADD COLUMN revive_tries INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

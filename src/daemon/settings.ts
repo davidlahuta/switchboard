@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultAutoCompactTokens: 700_000,
   defaultSkipPermissions: true,
   autoSwap: true,
+  autoRevive: true,
   // Waiting for the limit means the swap lands mid-turn, which is the one time it costs something.
   // Moving an idle session while there is still headroom left spends a little of a subscription to
   // buy the next turn room to run long; 85 leaves enough for a turn of an hour or so.
@@ -57,6 +58,7 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
   }
   if (patch.usagePollSec !== undefined) next.usagePollSec = n(patch.usagePollSec, 60, 3600, current.usagePollSec);
   if (typeof patch.autoSwap === 'boolean') next.autoSwap = patch.autoSwap;
+  if (typeof patch.autoRevive === 'boolean') next.autoRevive = patch.autoRevive;
   if (typeof patch.proactiveSwap === 'boolean') next.proactiveSwap = patch.proactiveSwap;
   if (patch.swapThresholdPct !== undefined) next.swapThresholdPct = n(patch.swapThresholdPct, 50, 100, current.swapThresholdPct);
   if (typeof patch.continueMessage === 'string') next.continueMessage = patch.continueMessage.slice(0, 2000);

@@ -17,6 +17,8 @@ export function triggerLabel(trigger: RespawnTrigger): string {
       return 'usage headroom';
     case 'rescue':
       return 'usage came back';
+    case 'revive':
+      return 'its terminal died';
   }
 }
 

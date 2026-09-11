@@ -49,6 +49,8 @@ interface RunRow {
   worktree: string | null;
   resume: number;
   resuming: string | null;
+  revive_after: string | null;
+  revive_tries: number;
   pid: number | null;
   cols: number;
   rows: number;
@@ -97,6 +99,36 @@ const CONTINUE_RETRIES = 15;
 const CONTINUE_FALLBACK_MS = 25_000;
 /** How long before a session that is still limited is offered another way out. */
 const RESCUE_DEBOUNCE_MS = 60_000;
+/**
+ * How long a run is left alone after a respawn.
+ *
+ * Coming back takes a few seconds — kill claude, reset the terminal, resume the conversation — and
+ * a second respawn arriving inside that window does not queue behind the first, it lands on top of
+ * it. One usage limit answered by two parts of the daemon at once is exactly what that looked like:
+ * two swaps seventeen milliseconds apart, two claude processes on one conversation, and a session
+ * that died instead of moving. Nothing takes a run twice inside this window except an operator who
+ * asks for it directly.
+ */
+const RESPAWN_COOLDOWN_MS = 30_000;
+/**
+ * How long to wait before bringing a dead session back, per attempt.
+ *
+ * The first is short because most deaths are a moment's bad luck — a terminal closed, a resume that
+ * collided with a process still shutting down — and the session is sitting on disk ready to go. The
+ * rest lengthen because a session that has failed four times is failing for a reason that will not
+ * be different thirty seconds later, and a terminal reopening every thirty seconds all night is
+ * worse than one that stopped.
+ */
+const REVIVE_BACKOFF_MS = [30_000, 2 * 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000];
+/**
+ * How long after a respawn the terminal's output says nothing about usage limits.
+ *
+ * The runner is quiet for its own window too, but a limit already in flight can arrive here just
+ * after the swap that answered it, where it reads as a limit on the subscription the session has
+ * only just moved to. Three times overnight that bounced a session straight off the subscription
+ * that was going to save it.
+ */
+const LIMIT_QUIET_AFTER_RESPAWN_MS = 60_000;
 /**
  * How far past its deadline a respawn will wait for a subagent to finish. Long enough for real
  * work — a research subagent runs for minutes, not seconds — and bounded so a subagent whose end
@@ -204,6 +236,20 @@ export function rescueDecision(input: { ownUsedPct: number; bestElsewherePct: nu
 }
 
 /**
+ * Whether a run may be taken down again, given when it last came back.
+ *
+ * Coming back is not instant — kill claude, reset the terminal, resume the conversation, wait for
+ * the first hook — and a second respawn arriving inside that window does not queue behind the
+ * first, it lands on top of it. That is how one usage limit answered by two parts of the daemon
+ * produced two claude processes on one conversation and killed the session outright. An operator
+ * forcing it is the exception: a person can see the screen.
+ */
+export function respawnGuard(input: { lastRespawnAt: number | null; now: number; force: boolean; cooldownMs?: number }): 'go' | 'too-soon' {
+  if (input.force || input.lastRespawnAt === null) return 'go';
+  return input.now - input.lastRespawnAt < (input.cooldownMs ?? RESPAWN_COOLDOWN_MS) ? 'too-soon' : 'go';
+}
+
+/**
  * Whether a session coming back comes back into the terminal it was in, or into a new one.
  *
  * A relaunch is the request for a new terminal, so it always gets one. The rest of the time it
@@ -308,6 +354,10 @@ export class RunManager {
   private readonly lastRescue = new Map<string, number>();
   /** Runs whose due respawn is being held for a subagent, so that is said once rather than every sweep. */
   private readonly subagentHeld = new Set<string>();
+  /** Runs the operator has asked to stop, so the death that follows is not treated as an accident. */
+  private readonly stopping = new Set<string>();
+  /** When each run was last taken down and brought back, so nothing takes it again mid-flight. */
+  private readonly lastRespawn = new Map<string, number>();
   private readonly lastLimit = new Map<string, number>();
 
   constructor(db: Db, bus: Bus, subs: SubscriptionManager, coord: Coordinator, launcher: Launcher, models: ModelCatalog) {
@@ -322,6 +372,17 @@ export class RunManager {
 
   start(): void {
     this.db.run("UPDATE runs SET status = 'disconnected' WHERE status IN ('starting', 'running', 'swapping')");
+    /*
+     * Everything live is disconnected until its runner says otherwise, and most of them will within
+     * seconds. The ones that do not are sessions whose terminal is genuinely gone — the desk was
+     * rebooted, a window was closed, something fell over while the daemon was down — and they used
+     * to sit there until a person noticed. Each is given a turn at coming back; a runner that
+     * reconnects in the meantime cancels its own.
+     */
+    for (const r of this.db.all<RunRow>("SELECT * FROM runs WHERE status = 'disconnected'")) {
+      if (r.revive_after) continue;
+      this.scheduleRevive(r, 'its terminal was not there when the daemon started');
+    }
     this.subs.liveRunsFor = (id) => this.liveCount(id);
     this.subs.onUsage = (s) => this.onUsage(s);
   }
@@ -884,7 +945,10 @@ export class RunManager {
       if (!runId || this.conns.get(runId) !== ws) return;
       this.conns.delete(runId);
       const r = this.row(runId);
-      if (r && r.status !== 'exited') this.setStatus(runId, 'disconnected');
+      if (!r || r.status === 'exited') return;
+      this.setStatus(runId, 'disconnected');
+      // The terminal is gone and nobody asked for that. A relaunch in flight has its own path.
+      if (!this.relaunching.has(runId) && !this.stopping.has(runId)) this.scheduleRevive(r, 'its terminal disappeared');
     });
   }
 
@@ -955,6 +1019,9 @@ export class RunManager {
         this.setStatus(runId, 'exited');
         this.coord.markOffline(r.session_id, 'session exited');
         this.pendingRespawn.delete(runId);
+        // An exit the operator asked for is meant to stay an exit; one claude took by itself is a
+        // session with work in it that has stopped for a reason it did not choose.
+        if (!msg.intentional && !this.stopping.has(runId)) this.scheduleRevive(r, `it exited on its own (${msg.code})`);
         break;
       case 'limit-detected':
         this.onLimit(r.session_id, msg.text, 'pty');
@@ -1129,8 +1196,96 @@ export class RunManager {
     return !readyForRespawn({ status: this.coord.agent(r.session_id)?.status, work: this.coord.liveWork(r.session_id) });
   }
 
+  /**
+   * Arrange for a session that has died to come back on its own.
+   *
+   * Everything needed is already on disk: the conversation is addressed by GUID and the run knows
+   * its directory. What was missing was anybody to act on that between midnight and morning, so a
+   * terminal that fell over at eleven was still down at seven with its work half-finished.
+   *
+   * Not called when the operator stopped the session: that is a session that is meant to be off.
+   */
+  private scheduleRevive(r: RunRow, why: string): void {
+    if (!getSettings(this.db).autoRevive) return;
+    if (!this.workDir(r)) return;
+    const tries = r.revive_tries ?? 0;
+    if (tries >= REVIVE_BACKOFF_MS.length) {
+      if (r.revive_after !== null) this.db.run('UPDATE runs SET revive_after = NULL WHERE id = ?', r.id);
+      this.bus.toast('error', `${r.name} has stopped coming back (${why}). Resume it when you are at the desk.`);
+      return;
+    }
+    const at = new Date(Date.now() + REVIVE_BACKOFF_MS[tries]).toISOString();
+    this.db.run('UPDATE runs SET revive_after = ? WHERE id = ?', at, r.id);
+    log.info('will bring a session back', { run: r.id, why, tries, at });
+    this.bus.invalidate('state');
+  }
+
+  /** It is alive and answering, so the next death starts counting from nothing again. */
+  private reviveSucceeded(runId: string): void {
+    const r = this.row(runId);
+    if (!r || (r.revive_after === null && (r.revive_tries ?? 0) === 0)) return;
+    this.db.run('UPDATE runs SET revive_after = NULL, revive_tries = 0 WHERE id = ?', runId);
+  }
+
+  /** The operator's decision to stop a session outranks any plan to bring it back. */
+  private cancelRevive(runId: string): void {
+    this.db.run('UPDATE runs SET revive_after = NULL, revive_tries = 0 WHERE id = ?', runId);
+  }
+
+  /**
+   * Sessions that are due to come back. Run from the same sweep that drains queued respawns, so a
+   * desk left alone overnight repairs itself at the pace of the backoff rather than at the pace of
+   * somebody noticing.
+   */
+  reviveDue(): void {
+    const due = this.db.all<RunRow>(
+      "SELECT * FROM runs WHERE revive_after IS NOT NULL AND revive_after <= ? AND status <> 'running'",
+      now(),
+    );
+    for (const r of due) {
+      const tries = (r.revive_tries ?? 0) + 1;
+      this.db.run('UPDATE runs SET revive_tries = ?, revive_after = NULL WHERE id = ?', tries, r.id);
+      if (this.conns.has(r.id)) {
+        // Its runner came back on its own; nothing to open.
+        this.reviveSucceeded(r.id);
+        continue;
+      }
+      try {
+        log.info('bringing a session back', { run: r.id, session: r.session_id, attempt: tries });
+        this.relaunch(r.id, true, `bringing it back (attempt ${tries})`, 'revive');
+        this.bus.toast('info', `${r.name}: its terminal was gone, so it is being resumed.`);
+      } catch (err) {
+        log.warn('could not bring a session back', { run: r.id, error: err instanceof Error ? err.message : err });
+        this.scheduleRevive(this.row(r.id) ?? r, 'the attempt failed');
+      }
+    }
+  }
+
+  /** How long ago this run last came back, or null if it has not within the cooldown. */
+  private respawnedRecently(runId: string): number | null {
+    const at = this.lastRespawn.get(runId) ?? null;
+    if (at === null || respawnGuard({ lastRespawnAt: at, now: Date.now(), force: false }) === 'go') return null;
+    return Date.now() - at;
+  }
+
   /** Defer until the agent is idle unless forced, so a respawn never interrupts a turn. */
   private respawn(r: RunRow, plan: PendingRespawn, force: boolean): Run {
+    /*
+     * A run that came back a moment ago is still coming back. Whatever asked for this — a limit
+     * answered twice, a stale banner, a proactive swap racing a rescue — waits behind the respawn
+     * already in flight rather than landing on top of it. An operator forcing it is the exception,
+     * because that is a person who can see the screen.
+     */
+    const since = force ? null : this.respawnedRecently(r.id);
+    if (since !== null) {
+      log.info('not taking a session that has only just come back', {
+        run: r.id,
+        kind: plan.kind,
+        reason: plan.reason,
+        msSinceRespawn: since,
+      });
+      return this.dto(r);
+    }
     if (!force && this.busy(r)) {
       this.pendingRespawn.set(r.id, plan);
       this.savePending(r.id, plan);
@@ -1151,6 +1306,7 @@ export class RunManager {
 
   private executeRespawn(r: RunRow, plan: PendingRespawn): void {
     const { target, reason, continueAfter, kind } = plan;
+    this.lastRespawn.set(r.id, Date.now());
     // Read before the kill, because after it the session comes back with no memory of being cut off.
     const interrupted = this.busy(r);
     this.pendingRespawn.delete(r.id);
@@ -1305,6 +1461,11 @@ export class RunManager {
       return;
     }
     this.db.run('UPDATE runs SET resume = 1 WHERE id = ?', r.id);
+    // The profile is where this session's hooks and MCP registration live, and it is only ever as
+    // current as the last time somebody wrote to it. A terminal opened from here — a relaunch, a
+    // revive, a stale host being replaced — is a session starting, so it gets the same treatment a
+    // brand new one does.
+    this.subs.syncProfile(r.subscription_id);
     this.launcher.openTerminal({ title: r.name, cwd: r.last_cwd ?? r.cwd, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
   }
 
@@ -1361,6 +1522,8 @@ export class RunManager {
   stop(runId: string): void {
     const r = this.row(runId);
     if (!r) throw httpError(404, 'Unknown run');
+    this.stopping.add(runId);
+    this.cancelRevive(runId);
     if (!this.send(runId, { type: 'stop' })) {
       this.db.run('UPDATE runs SET ended_at = ? WHERE id = ?', now(), runId);
       this.setStatus(runId, 'exited');
@@ -1422,16 +1585,28 @@ export class RunManager {
   private resumeLost(r: RunRow, got: string): void {
     log.error('resume did not take: claude came up on a new conversation', { run: r.id, wanted: r.session_id, got });
     this.stop(r.id);
+    /*
+     * Stopped, but not abandoned. The usual reason a resume comes up empty is a collision rather
+     * than a broken transcript — the process that held the conversation was still letting go of it
+     * — and that is over in seconds. Left as it was, a session that failed this way at three in the
+     * morning was still down at seven; retried, it is usually back before anyone notices. The
+     * backoff gives up after a few attempts rather than reopening a terminal all night.
+     */
+    this.stopping.delete(r.id);
+    this.scheduleRevive(this.row(r.id) ?? r, 'the resume did not take');
     this.bus.toast(
       'error',
       `${r.name}: Claude Code could not resume this conversation and started a new one, so it was stopped before it took the session's place. ` +
-        `Nothing is lost — relaunch to try again, or pick it up yourself with: claude --resume ${r.session_id}`,
+        `Nothing is lost — it will be tried again shortly, or pick it up yourself with: claude --resume ${r.session_id}`,
     );
   }
 
   onSessionStart(sessionId: string, cwd: string | null): void {
     const r = this.bySession(sessionId);
     if (!r) return;
+    // It is up and talking, so whatever brought it down is over.
+    this.reviveSucceeded(r.id);
+    this.stopping.delete(r.id);
     if (cwd) this.db.run('UPDATE runs SET last_cwd = ? WHERE id = ?', cwd, r.id);
     if (r.status !== 'running') this.setStatus(r.id, 'running');
     // The session is at a prompt, so a queued continue message need not wait out the full delay
@@ -1507,12 +1682,38 @@ export class RunManager {
     const r = this.bySession(sessionId);
     if (!r || r.status === 'exited') return;
     if (Date.now() - (this.lastLimit.get(r.id) ?? 0) < LIMIT_DEBOUNCE_MS) return;
+    /*
+     * A limit seen in the terminal just after a respawn is almost always the last one, arriving
+     * late or replayed by the resume — and it would be blamed on the subscription the session has
+     * only just moved to. A limit reported through StopFailure is a fact about the turn that just
+     * ended, so it is believed whenever it arrives.
+     */
+    if (source === 'pty') {
+      const since = this.lastRespawn.get(r.id);
+      if (since !== undefined && Date.now() - since < LIMIT_QUIET_AFTER_RESPAWN_MS) {
+        log.info('ignoring a usage limit on screen from before the session moved', { run: r.id, msSinceRespawn: Date.now() - since });
+        return;
+      }
+    }
     this.lastLimit.set(r.id, Date.now());
+    const subAtLimit = r.subscription_id;
     this.coord.setStatus(sessionId, 'limited');
     const label = this.subs.row(r.subscription_id)?.label ?? r.subscription_id;
     log.warn('usage limit', { run: r.id, subscription: r.subscription_id, source, detail });
     void (async () => {
       const sub = await this.subs.poll(r.subscription_id, true);
+      /*
+       * Reading usage takes a moment, and the daemon does not stand still for it: the poll's own
+       * result wakes the rescue sweep, which may have moved this session already. Acting on the
+       * plan made before that would move it a second time, which is a respawn on top of a respawn.
+       */
+      const fresh = this.row(r.id);
+      if (!fresh || fresh.status === 'exited') return;
+      if (fresh.subscription_id !== subAtLimit) {
+        log.info('the limit was answered while usage was being read', { run: r.id, from: subAtLimit, now: fresh.subscription_id });
+        return;
+      }
+      if (this.respawnedRecently(r.id) !== null) return;
       if (source === 'pty') {
         // Text detection is a fallback; make sure the subscription really is at its limit.
         const u = sub?.usage;
@@ -1570,6 +1771,10 @@ export class RunManager {
     for (const r of this.db.all<RunRow>("SELECT * FROM runs WHERE status = 'running'")) {
       if (this.coord.agent(r.session_id)?.status !== 'limited') continue;
       if (this.pendingRespawn.has(r.id)) continue;
+      // A limit reported in the last minute or two belongs to onLimit, which is in the middle of
+      // answering it. Two answers to one limit is two respawns, and two respawns is a dead session.
+      if (Date.now() - (this.lastLimit.get(r.id) ?? 0) < LIMIT_DEBOUNCE_MS) continue;
+      if (this.respawnedRecently(r.id) !== null) continue;
       if (Date.now() - (this.lastRescue.get(r.id) ?? 0) < RESCUE_DEBOUNCE_MS) continue;
       const own = this.subs.get(r.subscription_id);
       // Stale numbers say nothing about now, and acting on them would only type into a session
@@ -1616,6 +1821,7 @@ export class RunManager {
     if (used < settings.swapThresholdPct) return;
     for (const r of runs) {
       if (!bool(r.auto_swap) || this.pendingRespawn.has(r.id)) continue;
+      if (this.respawnedRecently(r.id) !== null) continue;
       // Idle on the main thread is not idle: a background subagent is still spending, and a swap
       // would take the session out from under it.
       if (this.coord.agent(r.session_id)?.status !== 'idle' || this.busy(r)) continue;

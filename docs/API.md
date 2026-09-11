@@ -73,6 +73,10 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | DELETE | `/api/runs/:id`          | forget an exited run | `{ ok }` |
 | GET    | `/api/sessions/recent?cwd=` | recent Claude sessions for a directory (for "resume") | `{ id, title, mtime }[]` |
 
+A run also carries `revive_after` behaviour of its own: a death nobody asked for schedules another
+attempt, and `status` returns to `running` when it comes back. Nothing takes a run twice inside the
+respawn cooldown except an operator forcing it.
+
 Swap, restart and relaunch all take the session down and bring it back on the same conversation, so
 all three behave the same way about timing: a request that lands mid-turn is **queued**, not
 refused, and taken the moment the turn ends. `force` takes it now and loses whatever the turn had in

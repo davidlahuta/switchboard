@@ -320,6 +320,56 @@ so it survives a daemon restart, carries the `trigger` that asked for it — an 
 update, a usage limit, the proactive threshold, a subscription coming back — and is reported with
 that trigger wherever it is shown. Settings → *All sessions* queues one across the fleet.
 
+## Staying up
+
+A desk is left alone for eight hours at a time, so the failures that matter are the ones nobody is
+there to answer. One night's log, and what each of them turned out to be:
+
+**One limit, answered twice.** `onLimit` polls usage before deciding what to do. That poll's result
+wakes `onUsage`, which wakes the rescue sweep, which moved the session — and then `onLimit` resumed
+after its await and moved it again. Two swaps seventeen milliseconds apart. The runner's respawn was
+an unawaited async call, so the second did not queue behind the first: both killed the same child,
+both waited, and both spawned. Two claude processes on one conversation, the second `--resume`
+failing because the first still held the transcript, and when the orphan exited it reported an exit
+nobody asked for and took the terminal down with it. Sessions did not swap that night; they died.
+
+Three things now stand between that and a session. A respawn stamps the run, and nothing takes a run
+again inside `RESPAWN_COOLDOWN_MS` unless an operator asks for it (`respawnGuard`). `onLimit`
+re-reads the run after its poll and drops its plan if the session has already moved. The rescue
+sweep leaves a limit reported in the last couple of minutes to `onLimit`, whose job it is. And the
+runner serialises respawns through a promise chain, so even a daemon that asked twice gets one.
+
+**A limit blamed on the wrong subscription.** Resuming replays the conversation, and a conversation
+that once hit a usage limit replays the banner saying so. Read as live, that banner bounced the
+session straight off the subscription it had just been moved to — three times in one night, each
+within forty milliseconds of the swap that was supposed to save it. The runner now clears its tail
+and stays quiet about usage for `LIMIT_QUIET_AFTER_SPAWN_MS` after every spawn, and the daemon
+ignores a screen-detected limit for a minute after a respawn. A `StopFailure` limit is still
+believed whenever it arrives: that one is a fact about the turn that just ended.
+
+**Nothing brought a dead session back.** A terminal that died at eleven at night was still down at
+seven in the morning. The conversation was on disk the whole time, addressed by GUID, in a directory
+the run knows. So a death nobody chose — the runner's socket gone, claude exiting on its own, a
+resume that came up on the wrong conversation — now schedules a revive on a backoff that starts at
+half a minute and ends, after six attempts, in an error rather than a terminal that reopens all
+night (`scheduleRevive`, `reviveDue`). A stop the operator asked for is never undone, and a runner
+that reconnects on its own cancels its own revive. Runs found disconnected when the daemon starts
+are given the same treatment, which is what recovers a desk after a reboot.
+
+**A session moved somewhere it could not work.** Ranking read the five-hour and seven-day windows
+and ignored the model-scoped weekly ones, so a subscription could read 70% overall while the model
+the session runs on had nothing left. Scoped windows now take a subscription out of the running at
+`SPENT_PCT`, and count in `usedPct`. Numbers that could not be refreshed — the usage endpoint
+rate-limits everyone at once, for minutes at a time — still count, but score lower than numbers from
+a subscription that is answering.
+
+**A profile without hooks.** Hooks live in the profile a session runs under, not in the home
+directory, and a profile was only ever synced when a session was about to start on it. A
+subscription nobody had used since the hooks changed kept a settings file without them, and the
+first session to land there would have run invisibly: no status, no limit reporting, no subagents.
+Every profile is now synced when the integration is repaired, and again whenever a terminal is
+opened — a relaunch and a revive are sessions starting too.
+
 ## Burn rate
 
 The subscription cards answer "where should the next session go". They do not answer the question
