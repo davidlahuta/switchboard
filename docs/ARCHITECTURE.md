@@ -555,10 +555,12 @@ serialized current screen and then live data, and can send input. Enter sends an
 a new line, in the composer and in the grid alike — the grid gets `ESC CR` for the latter, the
 sequence Claude Code's own `/terminal-setup` installs, because a terminal otherwise sends a plain
 carriage return for both. Ctrl/Cmd+V is handed back to the browser rather than claimed by xterm,
-which would send `^V` to the session instead of pasting. It offers a key bar (Esc, Tab,
-⇧Tab, arrows, Ctrl‑C, Enter) plus a text composer, which is the default way in: on a phone, typing
-into the grid goes through the browser's hidden input where autocorrect rewrites as it pleases, and
-there is nowhere to read a prompt back before sending it.
+which would send `^V` to the session instead of pasting. It offers a key bar plus a text composer, which is the default
+way in: on a phone, typing into the grid goes through the browser's hidden input where autocorrect
+rewrites as it pleases, and there is nowhere to read a prompt back before sending it. The bar runs
+Esc, Tab, ⇧Tab, Enter, the arrows, Ctrl‑C, `/` and paste — ordered by use rather than by the shape
+of a keyboard, because it pans sideways and a phone shows about eight keys of it. Enter behind four
+arrows meant a swipe before every send.
 
 The browser view is always fitted to its own screen — there is no unfitted mode to choose, because
 a mirror of a TUI at someone else's dimensions is not useful. It re-fits whenever its box changes

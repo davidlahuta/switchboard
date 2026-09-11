@@ -120,7 +120,7 @@ From there you can:
   ends properly. A session that stops because it is **finished**, or because it asked you something,
   or because you parked it, is never told anything: only a failed turn leaves the mark, and a good
   turn clears it. Sessions with *Send the continue message* switched off are left alone either way.
-- Leave it running overnight. A session whose terminal dies — a window closed, a claude that fell
+- Trust it to come back. A session whose terminal dies — a window closed, a claude that fell
   over, a resume that collided with a process still shutting down — is reopened and resumed on a
   backoff that starts at half a minute, and gives up after a few attempts rather than reopening a
   terminal all night (Settings → *Bring sessions back when their terminal dies*). Stopping a session
@@ -170,7 +170,23 @@ time, or *never*, which is what it usually is when the windows turn over faster 
 them.
 
 The session list is ordered by activity — live sessions first, most recently active at the top —
-and can be filtered to one repository. Each row says when its session was last active.
+and can be filtered to one repository.
+
+A session is **one line**: its mark, its name, what it is doing right now, when it was last active,
+and the two things worth doing to a session you are only glancing at — open its terminal, or tell it
+to carry on. Everything that is a decision rather than a reflex is one tap away: open the row and it
+says where it lives, which subscription it is on, its session id and its swap history, and offers
+restart, swap, hand-back and stop. A desk of nine sessions fits on a phone screen that way, which is
+the point — the rows that stay closed are the ones with nothing to answer.
+
+The list moves under you, so it says so: a row that changes places **slides** there rather than
+jumping, and a row whose state changes **lights up** for a moment even when it does not move. The
+two are different questions — what moved, and what changed — and a session that picks up a subagent
+or stalls where it stands answers only the second. Both are off under `prefers-reduced-motion`.
+
+Names are the row's own: as long as the session called itself, ending in an ellipsis with the whole
+thing in the tooltip when the row runs out of width. The badges beside them yield first and fade out
+at the edge — a session you cannot name is not worth listing.
 
 Each session can override the model (1M-context models only, listed live from the API rather than
 hardcoded; a later `/model` inside the session is picked up automatically), auto-compact and its
@@ -268,6 +284,11 @@ $env:SWITCHBOARD_BIND = "100.x.y.z"   # your Tailscale IP; loopback stays bound 
 ```
 
 Then reach it at `http://100.x.y.z:4477` (Windows Firewall must allow inbound on that port).
+
+The key bar under the terminal is ordered by what a thumb reaches for rather than by what a
+keyboard looks like: composer, keyboard, `Esc`, `Tab`, `⇧Tab`, `Enter`, then the arrows, `Ctrl‑C`,
+`/` and paste. The bar pans sideways, and anything past the fold costs a swipe before it can be
+pressed, so the keys that send and dismiss come before the ones that move around.
 
 On the phone, use **Share → Add to Home Screen**. It opens without browser chrome from then on,
 which for a full-screen terminal is most of the screen back. Safari's own bar above the keyboard is

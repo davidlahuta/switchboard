@@ -3527,9 +3527,17 @@ a.list-main:hover {
     row-gap: 4px;
     padding: 6px 8px 6px 2px;
   }
+  /*
+   * From zero, not from the name's own width. A wrapping flex container decides its lines from the
+   * content width of each item and only then shrinks what is on them, so a name sized from its
+   * content claimed the whole line up front and pushed the time and the buttons onto a second one
+   * — on an iPhone every session called anything longer than "rakousko" got a two-line row and no
+   * ellipsis, because nothing ever had to shrink. Starting from zero keeps the line intact and
+   * lets the name grow into whatever the buttons leave, which is where the ellipsis lives.
+   */
   .srow .session-name,
   .srow .rename-wrap {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     max-width: none;
   }
   .srow-live {
