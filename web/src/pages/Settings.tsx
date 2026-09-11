@@ -581,16 +581,18 @@ function FleetSection({ runs }: { runs: Run[] }) {
 
   const rebalance = async () => {
     setBusy('rebalance');
-    const res = await api.post<{ queued: number; considered: number }>('/api/runs/rebalance', {});
+    const res = await api.post<{ queued: number; considered: number; skipped: number }>('/api/runs/rebalance', {});
     setBusy(null);
     if (!res) return;
     // Nothing moved is the ordinary answer on a desk that is already spread out, and saying so is
     // the point of pressing it: it is the difference between "nothing to do" and "did not work".
+    // Sessions it could not consider are named separately, so neither is mistaken for the other.
+    const left = res.skipped > 0 ? `; ${res.skipped} left alone, already on the way somewhere` : '';
     emitToast(
       'info',
       res.queued > 0
-        ? `${plural(res.queued, 'session')} of ${res.considered} will move as soon as it is idle`
-        : `Nothing to move — all ${plural(res.considered, 'session')} are already on the best subscription for them`,
+        ? `${plural(res.queued, 'session')} of ${res.considered} will move as soon as it is idle${left}`
+        : `Nothing to move — the ${plural(res.considered - res.skipped, 'session')} it could weigh are already best placed${left}`,
     );
   };
 

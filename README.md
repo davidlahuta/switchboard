@@ -164,7 +164,9 @@ From there you can:
   of them names the same emptiest subscription and they all pile onto it. A rebalance counts its own moves as it
   makes them — worst-placed session first, each destination worth less once it has been given one, each source
   worth more to the sessions left on it — and asks the same margin a proactive swap does before moving anything at
-  all. Both are queued per session, so pressing either on a working desk interrupts
+  all. Pressing it straight after *Give every session a new terminal* is safe and does what both asked: the queued
+  relaunch is absorbed into the swap rather than raced with it, so each session comes back once, on its new
+  subscription, in a new terminal. A session already on its way somewhere for a limit is left where it is going. Both are queued per session, so pressing either on a working desk interrupts
   nothing. A restart in place reuses the window Switchboard opened, which
   hosts part of Switchboard itself, so it keeps running the code it started with; sessions in that
   state are badged *old host*. You rarely have to ask for it: a session badged that way gets a new
