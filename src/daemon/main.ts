@@ -62,8 +62,10 @@ export async function startDaemon(): Promise<void> {
   const titles = setInterval(() => {
     runs.pollSessions();
     runs.drainPending();
-    // A session whose terminal died is brought back here, on its own backoff.
+    // A session whose terminal died is brought back here, on its own backoff; one whose turn failed
+    // is told to carry on, on its own.
     runs.reviveDue();
+    runs.resumeStalled();
   }, 4000);
 
   // One server per bound address: loopback for the desk's own hooks/shims/runners, plus any

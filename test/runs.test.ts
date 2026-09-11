@@ -10,6 +10,7 @@ import {
   rejectReservedArgs,
   rescueDecision,
   respawnGuard,
+  stallDecision,
   respawnPlacement,
   titleDecision,
 } from '../src/daemon/runs.ts';
@@ -99,6 +100,53 @@ describe('which sessions are asking to be looked at', () => {
     const shell: SessionWork = { id: 'b1', kind: 'shell', label: 'npm run dev', since: '', lastSeen: '' };
     const a = attentionFor({ ...base, lastActivity: t('2026-01-01T10:05:00Z'), work: [shell] });
     assert.equal(a.unseen, true, 'a dev server is not the session working');
+  });
+});
+
+describe('a session whose turn failed', () => {
+  const base = {
+    reason: 'api_error',
+    agentStatus: 'idle' as const,
+    ownUsedPct: 10,
+    threshold: 85,
+    unread: 0,
+    tries: 0,
+    continueOnResume: true,
+  };
+
+  it('is told to carry on, because nothing else is coming for it', () => {
+    // No terminal died, so nothing revives it; no usage moved, so nothing swaps it. This is the
+    // only thing between a turn that fell over at one in the morning and a desk that finds it at
+    // seven exactly where it stopped.
+    assert.equal(stallDecision(base), 'nudge');
+  });
+
+  it('leaves a session that is asking for a person', () => {
+    assert.equal(stallDecision({ ...base, agentStatus: 'waiting' }), 'wait', 'a dialog is on screen');
+    assert.equal(stallDecision({ ...base, unread: 2 }), 'wait', 'it has asked the operator something');
+  });
+
+  it('leaves one that is already going again', () => {
+    assert.equal(stallDecision({ ...base, agentStatus: 'working' }), 'wait');
+  });
+
+  it('waits out a usage limit rather than typing into a session that would only hit it again', () => {
+    assert.equal(stallDecision({ ...base, reason: 'rate_limit', ownUsedPct: 99 }), 'wait');
+    assert.equal(stallDecision({ ...base, reason: 'rate_limit', ownUsedPct: 10 }), 'nudge', 'its window came back');
+  });
+
+  it('does not wait on usage for a cap the usage numbers cannot see', () => {
+    // A spend cap is the account's own ceiling; no window percentage will ever move to announce it
+    // is over, so the only way back is to try again later.
+    assert.equal(stallDecision({ ...base, reason: 'a spend cap', ownUsedPct: 99 }), 'nudge');
+  });
+
+  it('stops asking a session that never picks up', () => {
+    assert.equal(stallDecision({ ...base, tries: 8 }), 'stop-trying');
+  });
+
+  it('never asks a session the operator told to stay put', () => {
+    assert.equal(stallDecision({ ...base, continueOnResume: false }), 'stop-trying');
   });
 });
 

@@ -118,15 +118,19 @@ export function RestartMenu({
           <button type="button" role="menuitem" className="menu-item" onClick={() => void nudge(close)}>
             <Icon name="bolt" size={16} />
             <span className="menu-item-main">
-              <strong>Send the continue message now</strong>
-              <span className="menu-sub">for a session that has stopped and has nothing to start it again</span>
+              <strong>Tell it to carry on</strong>
+              <span className="menu-sub">
+                {run.stalled
+                  ? `it stopped on ${run.stalled.reason}${run.stalled.nextTry ? ' — this is what it will be told anyway, sooner' : ''}`
+                  : 'without restarting anything'}
+              </span>
             </span>
           </button>
           <p className="menu-note">
-            Types the continue message into the session as it stands, without restarting anything. For one that stopped
-            on something Switchboard could not see — a spend cap, an error it recovered from, a turn that simply ended —
-            and has been sitting at its prompt since. Anything already typed in its composer stays where it is, so clear
-            that first if you do not want it sent along.
+            A session whose turn <em>failed</em> is told this on its own, on a backoff, until it has a turn that ends
+            properly — that is what the <strong>stalled</strong> badge counts. This is the same message sent by hand, for
+            when you would rather not wait for the next attempt. A session that stopped because it was finished is never
+            told it, by either route. Anything already typed in its composer stays where it is.
           </p>
           <div className="menu-heading">When it comes back</div>
           <label className="menu-check">

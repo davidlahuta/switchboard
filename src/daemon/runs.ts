@@ -52,6 +52,10 @@ interface RunRow {
   resuming: string | null;
   revive_after: string | null;
   revive_tries: number;
+  stalled_since: string | null;
+  stall_reason: string | null;
+  stall_after: string | null;
+  stall_tries: number;
   pid: number | null;
   cols: number;
   rows: number;
@@ -235,6 +239,54 @@ export function rescueDecision(input: { ownUsedPct: number; bestElsewherePct: nu
   if (input.ownUsedPct < input.threshold) return 'continue';
   if (input.bestElsewherePct !== null && input.bestElsewherePct < SPENT_PCT) return 'move';
   return 'wait';
+}
+
+/**
+ * How long to leave a stalled session before telling it to carry on, per attempt.
+ *
+ * The first wait is short because most failed turns are a moment's trouble — an overloaded API, a
+ * blip, a cap that has already reset — and the session is sitting there ready to go. They lengthen
+ * because a session that fails every time it is asked is failing for a reason that will still be
+ * true in a minute, and a session being poked every thirty seconds all night is worse than one that
+ * stopped.
+ */
+const STALL_BACKOFF_MS = [20_000, 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000, 60 * 60_000, 60 * 60_000];
+
+/**
+ * What to do about a session whose last turn ended in failure.
+ *
+ * The distinction this rests on is between a turn that **ended** and a turn that **failed**. A
+ * session that finished, or asked a question, or was parked by its operator, ended its turn and is
+ * exactly where it should be — telling it to carry on would restart work somebody deliberately
+ * stopped. A session whose turn failed is not where anybody wanted it, and nothing else is coming
+ * to start it: no terminal died, so nothing revives it; no usage moved, so nothing swaps it.
+ *
+ * So the only sessions here are the ones Claude Code said it had failed, and even those are left
+ * alone while a person is needed — a dialog on screen, a question waiting for an answer — or while
+ * the thing that stopped them plainly has not changed.
+ */
+export function stallDecision(input: {
+  /** what ended the turn */
+  reason: string;
+  agentStatus: AgentStatus | null;
+  /** how spent the session's own subscription is, for a stall that was a usage limit */
+  ownUsedPct: number;
+  threshold: number;
+  /** it has said something to the operator that nobody has read */
+  unread: number;
+  tries: number;
+  continueOnResume: boolean;
+}): 'nudge' | 'wait' | 'stop-trying' {
+  if (!input.continueOnResume) return 'stop-trying';
+  if (input.tries >= STALL_BACKOFF_MS.length) return 'stop-trying';
+  // Already going again, or already being asked something only a person can answer.
+  if (input.agentStatus === 'working' || input.agentStatus === 'starting') return 'wait';
+  if (input.agentStatus === 'waiting') return 'wait';
+  if (input.unread > 0) return 'wait';
+  // A usage limit is the one failure whose end is visible from here, so it is worth waiting for
+  // rather than typing into a session that would only hit it again.
+  if (input.reason === 'rate_limit' && input.ownUsedPct >= input.threshold) return 'wait';
+  return 'nudge';
 }
 
 /**
@@ -469,6 +521,14 @@ export class RunManager {
       skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
       continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
       work,
+      stalled: r.stalled_since
+        ? {
+            reason: r.stall_reason ?? 'an error',
+            since: r.stalled_since,
+            nextTry: r.stall_after,
+            tries: r.stall_tries ?? 0,
+          }
+        : null,
       waiting: waiting
         ? {
             kind: waiting.kind,
@@ -1209,6 +1269,97 @@ export class RunManager {
   }
 
   /**
+   * Note that a turn ended in failure, and arrange for the session to be told to carry on.
+   *
+   * Called from the two places that know a turn failed rather than finished: the StopFailure hook,
+   * whatever its error, and a usage limit read off the screen. Everything else — a turn that ended
+   * with an answer, a session parked at its prompt — leaves no mark here and is never touched.
+   */
+  private markStalled(r: RunRow, reason: string): void {
+    const tries = r.stall_tries ?? 0;
+    const wait = STALL_BACKOFF_MS[Math.min(tries, STALL_BACKOFF_MS.length - 1)];
+    this.db.run(
+      'UPDATE runs SET stalled_since = COALESCE(stalled_since, ?), stall_reason = ?, stall_after = ? WHERE id = ?',
+      now(),
+      reason,
+      new Date(Date.now() + wait).toISOString(),
+      r.id,
+    );
+    log.info('a turn ended in failure', { run: r.id, reason, tries });
+    this.bus.invalidate('state');
+  }
+
+  /**
+   * A turn ended properly, so whatever was wrong is over. Only a good turn clears this: a session
+   * that is nudged, fails again and is nudged again must keep counting, or a session that cannot
+   * work would be asked for ever.
+   */
+  private clearStall(runId: string): void {
+    const r = this.row(runId);
+    if (!r || (r.stalled_since === null && (r.stall_tries ?? 0) === 0)) return;
+    this.db.run('UPDATE runs SET stalled_since = NULL, stall_reason = NULL, stall_after = NULL, stall_tries = 0 WHERE id = ?', runId);
+    this.bus.invalidate('state');
+  }
+
+  /**
+   * Sessions whose last turn failed, told to carry on when it is worth asking.
+   *
+   * The third of the three ways a session comes back, beside reviving a dead terminal and moving one
+   * off a spent subscription. It is the one that covers everything nobody could see: a spend cap the
+   * usage endpoint does not report, an API error, a turn that fell over for its own reasons.
+   */
+  resumeStalled(): void {
+    const settings = getSettings(this.db);
+    const due = this.db.all<RunRow>(
+      "SELECT * FROM runs WHERE stalled_since IS NOT NULL AND stall_after IS NOT NULL AND stall_after <= ? AND status = 'running'",
+      now(),
+    );
+    for (const r of due) {
+      if (this.pendingContinue.has(r.id) || this.pendingRespawn.has(r.id)) continue;
+      if (this.busy(r)) continue;
+      const model = this.modelOf(r.id);
+      const decision = stallDecision({
+        reason: r.stall_reason ?? 'unknown',
+        agentStatus: this.coord.agent(r.session_id)?.status ?? null,
+        ownUsedPct: this.subs.usedPct(r.subscription_id, model),
+        threshold: settings.swapThresholdPct,
+        unread: this.unreadForOperator(r.session_id),
+        tries: r.stall_tries ?? 0,
+        continueOnResume: this.dto(r).continueOnResume,
+      });
+      if (decision === 'wait') {
+        // Come back to it on the same clock rather than spinning on the sweep.
+        const tries = r.stall_tries ?? 0;
+        const wait = STALL_BACKOFF_MS[Math.min(tries, STALL_BACKOFF_MS.length - 1)];
+        this.db.run('UPDATE runs SET stall_after = ? WHERE id = ?', new Date(Date.now() + wait).toISOString(), r.id);
+        continue;
+      }
+      if (decision === 'stop-trying') {
+        this.db.run('UPDATE runs SET stall_after = NULL WHERE id = ?', r.id);
+        log.warn('a session has stopped answering and is being left alone', { run: r.id, reason: r.stall_reason, tries: r.stall_tries });
+        this.bus.toast('warn', `${r.name} stopped on ${r.stall_reason ?? 'an error'} and has not picked up again. It needs you.`);
+        this.bus.invalidate('state');
+        continue;
+      }
+      const tries = (r.stall_tries ?? 0) + 1;
+      const wait = STALL_BACKOFF_MS[Math.min(tries, STALL_BACKOFF_MS.length - 1)];
+      this.db.run('UPDATE runs SET stall_tries = ?, stall_after = ? WHERE id = ?', tries, new Date(Date.now() + wait).toISOString(), r.id);
+      log.info('telling a stalled session to carry on', { run: r.id, reason: r.stall_reason, attempt: tries });
+      this.sendContinue(r, `it stopped on ${r.stall_reason ?? 'an error'}`);
+    }
+  }
+
+  /** Queue the continue message to go in as soon as the session can take it. */
+  private sendContinue(r: RunRow, why: string): void {
+    const text = getSettings(this.db).continueMessage.trim();
+    if (!text) return;
+    const old = this.pendingContinue.get(r.id);
+    if (old) clearTimeout(old.timer);
+    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), 0) });
+    this.bus.toast('info', `${r.name}: ${why} — telling it to carry on.`);
+  }
+
+  /**
    * Arrange for a session that has died to come back on its own.
    *
    * Everything needed is already on disk: the conversation is addressed by GUID and the run knows
@@ -1429,12 +1580,9 @@ export class RunManager {
   nudge(runId: string): void {
     const r = this.liveRun(runId);
     if (this.busy(r)) throw httpError(409, 'It is working. Nothing to nudge.');
-    const text = getSettings(this.db).continueMessage.trim();
-    if (!text) throw httpError(409, 'There is no continue message set, so there is nothing to send.');
-    const old = this.pendingContinue.get(r.id);
-    if (old) clearTimeout(old.timer);
-    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), 0) });
-    log.info('nudging a session to carry on', { run: r.id });
+    if (!getSettings(this.db).continueMessage.trim()) throw httpError(409, 'There is no continue message set, so there is nothing to send.');
+    log.info('an operator asked a session to carry on', { run: r.id });
+    this.sendContinue(r, 'you asked it to carry on');
   }
 
   private typeContinue(runId: string, attempt = 0): void {
@@ -1559,6 +1707,7 @@ export class RunManager {
     if (!r) throw httpError(404, 'Unknown run');
     this.stopping.add(runId);
     this.cancelRevive(runId);
+    this.clearStall(runId);
     if (!this.send(runId, { type: 'stop' })) {
       this.db.run('UPDATE runs SET ended_at = ? WHERE id = ?', now(), runId);
       this.setStatus(runId, 'exited');
@@ -1693,6 +1842,12 @@ export class RunManager {
     this.pushTitle(r);
   }
 
+  /** A turn that ended with an answer rather than an error: whatever was wrong is over. */
+  onTurnEnded(sessionId: string): void {
+    const r = this.bySession(sessionId);
+    if (r) this.clearStall(r.id);
+  }
+
   onIdle(sessionId: string): void {
     const r = this.bySession(sessionId);
     if (!r) return;
@@ -1711,6 +1866,13 @@ export class RunManager {
     }
     const sub = this.subs.get(r.subscription_id);
     if (sub) this.maybeProactive(sub, [r]);
+  }
+
+  /** A turn that ended in failure for a reason nothing else here watches. */
+  onTurnFailed(sessionId: string, reason: string): void {
+    const r = this.bySession(sessionId);
+    if (!r || r.status === 'exited') return;
+    this.markStalled(r, reason);
   }
 
   onLimit(sessionId: string, detail: string, source: 'hook' | 'pty', cause: LimitCause = 'window'): void {
@@ -1777,6 +1939,13 @@ export class RunManager {
         // Corroborated: now it is worth saying so, and worth the rescue sweep watching it.
         this.coord.setStatus(sessionId, 'limited');
       }
+      /*
+       * However this is answered — a swap now, a swap when something frees up, or nothing at all
+       * because every subscription is spent — the session has stopped on a failure and something
+       * has to come back to it. A spend cap especially: no usage number will ever move to say it is
+       * over, so the only way back is to try again later.
+       */
+      this.markStalled(this.row(r.id) ?? r, cause === 'spend' ? 'a spend cap' : 'rate_limit');
       const settings = getSettings(this.db);
       if (!settings.autoSwap || !bool(r.auto_swap)) {
         this.bus.toast('warn', `${r.name} hit the usage limit on ${label}`);

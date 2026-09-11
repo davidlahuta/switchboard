@@ -172,6 +172,8 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
             if (reason) return { decision: 'block', reason };
           }
           coord.setStatus(sid, 'idle', null);
+          // It got to the end of a turn under its own power, so whatever stopped it before is over.
+          runs.onTurnEnded(sid);
           runs.onIdle(sid);
           runs.syncModel(sid, transcript);
           return {};
@@ -179,6 +181,14 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
         case 'StopFailure': {
           const limited = p.error_type === 'rate_limit';
           coord.setStatus(sid, limited ? 'limited' : 'idle', null);
+          /*
+           * Every failed turn, not only the ones about usage. An overloaded API, a network blip, an
+           * error Claude Code could not carry on from — the session stops with its work half done
+           * and nothing else here is watching for it: no terminal died, so nothing revives it; no
+           * usage moved, so nothing swaps it. This is the only mark that it stopped for a reason
+           * nobody chose.
+           */
+          if (!limited) runs.onTurnFailed(sid, String(p.error_type ?? 'an error'));
           if (limited) {
             // The limit that stopped the main thread stops its subagents too: they draw on the same
             // subscription. Nothing will announce their end, so it is announced for them, or the

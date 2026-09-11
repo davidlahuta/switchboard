@@ -115,6 +115,11 @@ From there you can:
   spreads out rather than piling up, and a session is not moved for a margin too small to be worth the turn
   it costs — or moved back where it has just come from.
 - Open it in the browser and keep working.
+- Leave it running overnight. A session whose turn *fails* — a spend cap, an overloaded API, an error
+  it could not carry on from — is told to carry on by itself, on a backoff, until it has a turn that
+  ends properly. A session that stops because it is **finished**, or because it asked you something,
+  or because you parked it, is never told anything: only a failed turn leaves the mark, and a good
+  turn clears it. Sessions with *Send the continue message* switched off are left alone either way.
 - Leave it running overnight. A session whose terminal dies — a window closed, a claude that fell
   over, a resume that collided with a process still shutting down — is reopened and resumed on a
   backoff that starts at half a minute, and gives up after a few attempts rather than reopening a

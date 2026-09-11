@@ -32,9 +32,23 @@ export function RunTags({
   const outdated = !!run.version && !!latest && run.version !== latest;
   const settings = !compact && (run.skipPermissions || run.continueOnResume || !!run.version);
   const work = workSummary(run.work);
-  if (!model && !settings && !run.staleRunner && !run.waiting && !work) return null;
+  if (!model && !settings && !run.staleRunner && !run.waiting && !work && !run.stalled) return null;
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
+      {run.stalled && (
+        <Badge
+          tone="warn"
+          title={
+            `Its last turn ended on ${run.stalled.reason} rather than on an answer, at ${new Date(run.stalled.since).toLocaleTimeString()}. ` +
+            (run.stalled.nextTry
+              ? `It is told to carry on again at ${new Date(run.stalled.nextTry).toLocaleTimeString()}${run.stalled.tries > 0 ? `, after ${run.stalled.tries} ${run.stalled.tries === 1 ? 'try' : 'tries'}` : ''}.`
+              : 'It has been asked as often as it is worth asking, so it is waiting for you.') +
+            ' A turn that ends properly clears this.'
+          }
+        >
+          {run.stalled.nextTry ? `stalled · ${run.stalled.reason}` : `needs you · ${run.stalled.reason}`}
+        </Badge>
+      )}
       {work && (
         <Badge
           tone="accent"
