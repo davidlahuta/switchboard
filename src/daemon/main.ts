@@ -20,6 +20,17 @@ import { Updater } from './updater.ts';
 const log = logger('daemon');
 
 export async function startDaemon(): Promise<void> {
+  /*
+   * The daemon is nobody's session, whatever started it.
+   *
+   * Switchboard is developed from inside Switchboard, so the daemon is routinely restarted from a
+   * hosted session's own shell and inherits that session's run id. Every claude it then starts for
+   * its own housekeeping carried the id too, and each of those is a conversation of its own for a
+   * second — long enough to report itself as that run and take its place. withoutParentSession
+   * strips it at each spawn; this makes sure there is nothing left to strip, for anything the
+   * daemon starts by some other route.
+   */
+  delete process.env.SWITCHBOARD_RUN_ID;
   ensureDirs();
   const db = new Db();
   const bus = new Bus();

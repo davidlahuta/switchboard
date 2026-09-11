@@ -5,9 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   attentionFor,
+  clearedInPlace,
   limitSwapPlan,
   rebindDecision,
   rejectReservedArgs,
+  reporterOf,
   rescueDecision,
   respawnGuard,
   stallDecision,
@@ -356,27 +358,96 @@ describe('the session id a hosted process reports for itself', () => {
   const NEW = '20d0c5f4-3981-43f0-af5c-d9136e85dc95';
 
   it('says nothing about the id the run already holds', () => {
-    assert.equal(rebindDecision(OLD, OLD, null), 'ignore');
-    assert.equal(rebindDecision(OLD, OLD, OLD), 'ignore', 'and that is the resume confirming itself');
+    assert.equal(rebindDecision(OLD, OLD, null, 'hosted'), 'ignore');
+    assert.equal(rebindDecision(OLD, OLD, OLD, 'hosted'), 'ignore', 'and that is the resume confirming itself');
+    assert.equal(rebindDecision(OLD, OLD, null, 'elsewhere'), 'ignore', 'whoever says it, it changes nothing');
   });
 
   it('follows a session that started a new conversation on its own', () => {
     // /clear in a session nobody asked to resume: the run has to follow it or it points at nothing.
-    assert.equal(rebindDecision(OLD, NEW, null), 'adopt');
+    assert.equal(rebindDecision(OLD, NEW, null, 'cleared'), 'adopt');
+    assert.equal(rebindDecision(OLD, NEW, null, 'hosted'), 'adopt', 'and so does the terminal coming up somewhere new');
   });
 
   it('refuses the new conversation a failed resume comes up on', () => {
     // Claude Code answers a transcript it cannot load with a new conversation rather than an exit.
     // Adopting that id was how a day's work stopped being reachable while its transcript sat on
     // disk untouched, so the run keeps the id it was sent to resume and the session is stopped.
-    assert.equal(rebindDecision(OLD, NEW, OLD), 'lost');
+    assert.equal(rebindDecision(OLD, NEW, OLD, 'hosted'), 'lost');
   });
 
   it('still follows a /clear once the resume has been confirmed', () => {
     // The guard is dropped the moment the process reports the id it was asked for, so the session
     // is free to change conversations afterwards the way any other session can.
-    assert.equal(rebindDecision(NEW, NEW, NEW), 'ignore');
-    assert.equal(rebindDecision(NEW, 'later-one', null), 'adopt');
+    assert.equal(rebindDecision(NEW, NEW, NEW, 'hosted'), 'ignore');
+    assert.equal(rebindDecision(NEW, 'later-one', null, 'cleared'), 'adopt');
+  });
+
+  it('ignores a claude that is carrying the run id but is not the session', () => {
+    /*
+     * The run id travels in the environment, so anything a hosted session starts inherits it, and
+     * so did anything the daemon started back when it was launched from inside one. `claude update`
+     * and `claude mcp list` each open a conversation of their own for a moment and fire a lone
+     * SessionEnd on the way out under that borrowed id. Adopting it pointed the run at a
+     * conversation that had already ended and never had anything in it, and the real one — 8500
+     * lines and $145 of it — stopped being reachable from the board while its transcript sat on
+     * disk untouched. Nobody outside the terminal gets to say which conversation a run is on.
+     */
+    assert.equal(rebindDecision(OLD, NEW, null, 'elsewhere'), 'stray');
+  });
+
+  it('would rather stop a terminal than guess during a resume', () => {
+    // Between the spawn and the id coming back, our own failed resume and a stranger look the same.
+    // Calling it a failed resume stops the session and says so, and the conversation survives that;
+    // calling it a stranger leaves a terminal running a conversation the run has quietly disowned.
+    assert.equal(rebindDecision(OLD, NEW, OLD, 'elsewhere'), 'lost');
+  });
+});
+
+describe('whether the claude reporting an id is the one the run is hosting', () => {
+  const MINE = '20d0c5f4-3981-43f0-af5c-d9136e85dc95';
+  const THEIRS = '9be19eba-b4d0-4193-a3ea-e9d4ade34a0e';
+  const never = (): string | null => {
+    throw new Error('the registry should not have been read');
+  };
+
+  it('believes the process the runner started', () => {
+    assert.equal(reporterOf({ kind: 'hook', event: 'SessionStart', source: 'startup' }, MINE, 4242, () => MINE), 'hosted');
+  });
+
+  it('does not believe one that is merely carrying the run id', () => {
+    // `claude update` and `claude mcp list` inherit it and fire a lone SessionEnd on the way out.
+    assert.equal(reporterOf({ kind: 'hook', event: 'SessionEnd', source: null }, THEIRS, 4242, () => MINE), 'elsewhere');
+  });
+
+  it('takes a /clear on its word, so a changed conversation is followed even unread', () => {
+    // The file is how a process is identified, and it is not there on every build or every platform.
+    assert.equal(reporterOf({ kind: 'hook', event: 'SessionStart', source: 'clear' }, THEIRS, 4242, never), 'cleared');
+  });
+
+  it('asks nothing of the registry when there is no pid to ask about', () => {
+    assert.equal(reporterOf({ kind: 'hook', event: 'Stop', source: null }, THEIRS, null, never), 'elsewhere');
+  });
+
+  it('lets the MCP shim answer for the claude that started it', () => {
+    assert.equal(reporterOf({ kind: 'shim', pid: 4242 }, THEIRS, 4242, never), 'hosted', 'the session, on a conversation the run has not heard of yet');
+    assert.equal(reporterOf({ kind: 'shim', pid: 88 }, THEIRS, 4242, never), 'elsewhere', 'a claude the session itself started');
+    assert.equal(reporterOf({ kind: 'shim', pid: null }, THEIRS, 4242, never), 'elsewhere', 'and one that will not say');
+  });
+});
+
+describe('what a hook says about where a new conversation came from', () => {
+  it('knows the two events that change a conversation without restarting the process', () => {
+    assert.ok(clearedInPlace('SessionStart', 'clear'));
+    assert.ok(clearedInPlace('SessionStart', 'compact'));
+  });
+
+  it('and does not take a fresh process for one of them', () => {
+    // A resume that failed, or any claude starting up, reports `startup` — which says nothing about
+    // whether it is the process this run is hosting.
+    assert.ok(!clearedInPlace('SessionStart', 'startup'));
+    assert.ok(!clearedInPlace('SessionStart', null));
+    assert.ok(!clearedInPlace('SessionEnd', 'clear'), 'a session on its way out is never the one to follow');
   });
 });
 
@@ -409,6 +480,20 @@ describe('a hosted session belongs to no other session', () => {
 
   it('leaves an ordinary environment alone', () => {
     assert.deepEqual(withoutParentSession({ PATH: '/usr/bin', HOME: '/home/x' }), { PATH: '/usr/bin', HOME: '/home/x' });
+  });
+
+  it('does not hand Switchboard’s own run id to a claude that is not the session', () => {
+    /*
+     * The hooks carry this as a header and the daemon reads it as "this run is speaking", so it is
+     * the one variable that can rewrite which conversation a run is on. A daemon started from
+     * inside a hosted session carries that session's id, and passed it to every claude it ran for
+     * housekeeping — `claude update`, `claude doctor`, `claude mcp list`. Each opens a conversation
+     * of its own and fires a lone SessionEnd under the borrowed id, and one of them renamed a run
+     * onto a conversation that had never held anything.
+     *
+     * A session that should have it is given it explicitly, by buildSpec, after this has run.
+     */
+    assert.equal(withoutParentSession({ PATH: '/usr/bin', SWITCHBOARD_RUN_ID: '803c73e5' }).SWITCHBOARD_RUN_ID, undefined);
   });
 
   it('does not let the launching terminal decide how sessions look', () => {
