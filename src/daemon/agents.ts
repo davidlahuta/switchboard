@@ -83,6 +83,9 @@ export class AgentHub implements PushTarget {
         ws.close();
         return;
       }
+      // A session announcing itself is a terminal that came up, which is the thing a revive was
+      // waiting to see. SessionStart would say so too, when it fires; this does not depend on it.
+      if (msg.runId) this.runs.cameBack(msg.runId);
       const run = msg.runId ? this.runs.row(msg.runId) : this.runs.bySession(msg.sessionId);
       const agent = await this.coord.registerAgent({
         sessionId: msg.sessionId,

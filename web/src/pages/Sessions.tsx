@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import type { Run, StateSnapshot } from '@shared/types.ts';
 import { byAttention } from '../components/AttentionDot.tsx';
-import { sessionMark } from '@shared/marks.ts';
+import { liveState, liveTone, sessionMark } from '@shared/marks.ts';
 import { triggerLabel } from '@shared/respawn.ts';
 import { orderOf, useReorder } from '../lib/reorder.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
@@ -34,9 +34,10 @@ export function Sessions({ state }: { state: StateSnapshot }) {
   const visible = showExited ? inRepo : inRepo.filter((r) => r.status !== 'exited');
   const exitedCount = inRepo.filter((r) => r.status === 'exited').length;
   const markOf = (r: Run): string => sessionMark(r)?.glyph ?? '';
-  // Rows slide to their new places rather than jumping there; see lib/reorder.ts.
+  // Rows slide to their new places rather than jumping there, and light up when they change; see
+  // lib/reorder.ts.
   const body = useRef<HTMLTableSectionElement>(null);
-  useReorder(body, orderOf(visible.map((r) => ({ id: r.id, mark: markOf(r) }))));
+  useReorder(body, orderOf(visible.map((r) => ({ id: r.id, mark: markOf(r), state: liveState(r) }))));
 
   const stop = async () => {
     if (!stopping) return;
@@ -108,7 +109,14 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                 const repo = r.repoId ? state.repos.find((x) => x.id === r.repoId) : undefined;
                 const exited = r.status === 'exited';
                 return (
-                  <tr key={r.id} data-reorder-key={r.id} data-mark={markOf(r)} className={exited ? 'row-muted' : undefined}>
+                  <tr
+                    key={r.id}
+                    data-reorder-key={r.id}
+                    data-mark={markOf(r)}
+                    data-state={liveState(r)}
+                    data-tone={liveTone(r)}
+                    className={exited ? 'row-muted' : undefined}
+                  >
                     <td data-label="Session" className="cell-title">
                       <SessionName run={r} href={href.terminal(r.id)} dot />
                       {r.autoSwap && (

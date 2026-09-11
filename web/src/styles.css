@@ -765,22 +765,53 @@ select.input {
 }
 /* A row whose mark has just changed, lit briefly so the eye can find what moved and why. Slower
    out than in: the arrival is the news, the fade is only getting out of the way. */
+/*
+ * A row that has just changed, lit briefly so the eye can find what moved and why. Slower out than
+ * in: the arrival is the news, the fade is only getting out of the way.
+ *
+ * The colour is the same vocabulary the mark uses, so the flash and the glyph agree about what kind
+ * of news it is — a session asking for you lights warm, one merely working lights neutral. A row
+ * that only changed places gets the fainter one: the slide has already said that part, and a list
+ * that re-sorts twice a minute would otherwise be a light show.
+ */
 .row-lit {
-  animation: row-lit 1.4s ease-out;
+  animation: row-lit var(--lit-ms, 1.4s) ease-out;
+  --lit: var(--accent-soft);
+}
+.row-lit[data-tone='blocked'],
+.row-lit[data-tone='limited'] {
+  --lit: var(--warn-soft);
+}
+.row-lit[data-tone='message'] {
+  --lit: var(--accent-soft);
+}
+.row-lit[data-tone='unseen'] {
+  --lit: var(--ok-soft);
+}
+.row-lit[data-tone='busy'],
+.row-lit[data-tone='delegating'],
+.row-lit[data-tone='background'],
+.row-lit[data-tone='quiet'] {
+  --lit: var(--surface-2);
+}
+.row-moved {
+  animation: row-lit 0.9s ease-out;
+  --lit: var(--surface-2);
 }
 @keyframes row-lit {
   0% {
-    background-color: var(--accent-soft);
+    background-color: var(--lit, var(--accent-soft));
   }
   12% {
-    background-color: var(--accent-soft);
+    background-color: var(--lit, var(--accent-soft));
   }
   100% {
     background-color: transparent;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .row-lit {
+  .row-lit,
+  .row-moved {
     animation: none;
   }
 }
