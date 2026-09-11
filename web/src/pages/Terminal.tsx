@@ -75,15 +75,21 @@ interface KeyDef {
   wide?: boolean;
 }
 
+/*
+ * Ordered by what a thumb reaches for rather than by what a keyboard looks like. This bar is the one
+ * thing on the terminal page that pans sideways, and a key past the fold costs a swipe before it can
+ * be pressed — which on a phone made sending a prompt a two-gesture affair, Enter having sat at the
+ * far end behind four arrows. It now follows the keys that come before it in use.
+ */
 const KEYS: KeyDef[] = [
   { label: 'Esc', aria: 'Escape', seq: '\x1b' },
   { label: 'Tab', aria: 'Tab', seq: '\t' },
   { label: '⇧Tab', aria: 'Shift Tab', seq: '\x1b[Z' },
+  { label: 'Enter', aria: 'Enter', seq: '\r', wide: true },
   { label: '↑', aria: 'Arrow up', seq: (app) => (app ? '\x1bOA' : '\x1b[A') },
   { label: '↓', aria: 'Arrow down', seq: (app) => (app ? '\x1bOB' : '\x1b[B') },
   { label: '←', aria: 'Arrow left', seq: (app) => (app ? '\x1bOD' : '\x1b[D') },
   { label: '→', aria: 'Arrow right', seq: (app) => (app ? '\x1bOC' : '\x1b[C') },
-  { label: 'Enter', aria: 'Enter', seq: '\r', wide: true },
   { label: 'Ctrl‑C', aria: 'Control C (interrupt)', seq: '\x03', wide: true },
   { label: '/', aria: 'Slash', seq: '/' },
 ];
