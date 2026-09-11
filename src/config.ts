@@ -47,6 +47,19 @@ const PARENT_SESSION_ENV = new Set([
   'CLAUDE_CODE_MESSAGING_SOCKET',
   'CLAUDE_CODE_MESSAGING_TOKEN',
   'CLAUDE_PID',
+  /*
+   * Switchboard's own mark, and the most dangerous one to inherit.
+   *
+   * The hooks carry it as a header, and the daemon reads that header as "this run is speaking". It
+   * is inherited like anything else, so a daemon that happened to be started from inside a hosted
+   * session — `npm run daemon` from that session's own shell, which is how Switchboard is developed
+   * — carries that session's run id, and hands it to every claude it runs for its own purposes.
+   * `claude update` and `claude mcp list` each open a session of their own for a second and fire a
+   * lone SessionEnd on the way out, under a fresh conversation id and that borrowed run id, which
+   * the run then adopted as its own. A $145 conversation stopped being reachable that way while its
+   * transcript sat untouched on disk; see rebindDecision for the other half of the fix.
+   */
+  'SWITCHBOARD_RUN_ID',
 ]);
 
 /**

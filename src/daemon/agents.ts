@@ -78,7 +78,7 @@ export class AgentHub implements PushTarget {
        * watching. If it says the run is somewhere it should not be, the run disowns it here exactly
        * as it would on a hook.
        */
-      if (msg.runId && !this.runs.rebind(msg.runId, msg.sessionId)) {
+      if (msg.runId && !this.runs.rebind(msg.runId, msg.sessionId, { kind: 'shim', pid: msg.pid })) {
         log.warn('a session announced itself on a conversation its run had disowned', { run: msg.runId, session: msg.sessionId });
         ws.close();
         return;

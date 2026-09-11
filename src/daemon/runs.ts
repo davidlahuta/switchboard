@@ -22,7 +22,7 @@ import type {
   TermClientFrame,
 } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
-import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, writeRuntimeJson } from './claude.ts';
+import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, readJson, writeRuntimeJson } from './claude.ts';
 import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
 import { newestSourceMtime } from './source.ts';
@@ -349,7 +349,46 @@ export function titleDecision(name: string, shadow: string | null, reported: str
 }
 
 /**
- * What to do with the session id a hosted process reports for itself.
+ * Whether the claude that reported an id can be believed when it says it is this run.
+ *
+ * `hosted` is the process the runner started, identified by pid. `cleared` is that same process
+ * saying it has changed conversations under us, which is the one thing that legitimately moves a
+ * run's id. Anything else is `elsewhere`: some other claude that is merely carrying the run id in
+ * its environment, and has no standing to say which conversation this run is.
+ */
+export type Reporter = 'hosted' | 'cleared' | 'elsewhere';
+
+/**
+ * Who is telling the run which conversation it is on.
+ *
+ * A hook arrives from the claude that fired it and names the event; the MCP shim arrives from a
+ * process claude started and carries the pid of its parent, which is the claude itself. Neither is
+ * trusted for being able to name the run — the run id is inherited, so anything can — but each
+ * carries something that settles whether it is the process this run hosts.
+ */
+export type RebindWitness = { kind: 'hook'; event: string; source: string | null } | { kind: 'shim'; pid: number | null };
+
+/** Whether a hook says the process changed conversations without restarting: `/clear`, `/compact`. */
+export function clearedInPlace(event: string, source: string | null): boolean {
+  return event === 'SessionStart' && (source === 'clear' || source === 'compact');
+}
+
+/**
+ * Who the process reporting an id turns out to be.
+ *
+ * `hostPid` is the pid the runner spawned, and `hostSession` reads back the conversation Claude
+ * Code says that pid is in — asked lazily, because it is a file read and most reports never need
+ * it. A shim settles it without either: it carries the pid of the claude that started it, and that
+ * is the same question from the other end.
+ */
+export function reporterOf(witness: RebindWitness, reported: string, hostPid: number | null, hostSession: () => string | null): Reporter {
+  if (witness.kind === 'shim') return witness.pid !== null && witness.pid === hostPid ? 'hosted' : 'elsewhere';
+  if (clearedInPlace(witness.event, witness.source)) return 'cleared';
+  return hostPid !== null && hostSession() === reported ? 'hosted' : 'elsewhere';
+}
+
+/**
+ * What to do with the session id a process reports under this run's name.
  *
  * A session may legitimately change id under us — `/clear` starts a new conversation in the same
  * terminal — and the run has to follow it, or Switchboard is holding a pointer to a conversation
@@ -359,11 +398,25 @@ export function titleDecision(name: string, shadow: string | null, reported: str
  * Adopting that id overwrites the only pointer the run holds to the conversation it was resuming.
  *
  * So `wanted` — the id this process was told to resume, until it confirms it — outranks adoption.
+ *
+ * And the process has to be this run's before any of that applies. The run id travels in the
+ * environment, so every claude started from inside a hosted session inherits it: a `claude -p` in a
+ * Bash tool, and — until it was stripped in withoutParentSession — anything the daemon ran for its
+ * own housekeeping. Each of those opens a conversation of its own and fires hooks under the
+ * borrowed run id. One `claude update` renaming a run that way cost a day's work, so an id from a
+ * process that cannot be shown to be this one is dropped rather than believed.
  */
-export function rebindDecision(current: string, reported: string, wanted: string | null): 'ignore' | 'adopt' | 'lost' {
+export function rebindDecision(current: string, reported: string, wanted: string | null, reporter: Reporter): 'ignore' | 'adopt' | 'lost' | 'stray' {
   if (reported === current) return 'ignore';
+  /*
+   * Before the reporter check, not after. In the seconds between a `--resume` spawn and the id
+   * coming back there is no way to tell our own failed resume from a stranger, and the two want
+   * opposite things — stop and say so, or ignore and carry on. Treating the ambiguous case as a
+   * failed resume is the recoverable mistake: it stops a terminal and toasts, and the conversation
+   * the run is holding is still there either way.
+   */
   if (wanted !== null && reported !== wanted) return 'lost';
-  return 'adopt';
+  return reporter === 'elsewhere' ? 'stray' : 'adopt';
 }
 
 function parseArgs(json: string | null): string[] {
@@ -598,6 +651,9 @@ export class RunManager {
    * again, which is the next thing that could fail.
    */
   private readonly resumeLostReported = new Set<string>();
+
+  /** Runs that have already had a stray claude reported for them, so it is said once. */
+  private readonly straysSeen = new Set<string>();
 
   /** Files Claude Code keeps for a session, once found: keyed by run id and file name. */
   private readonly sessionFiles = new Map<string, string>();
@@ -1888,10 +1944,14 @@ export class RunManager {
    * session reporting is not the one this run asked for, so the caller drops it on the floor
    * rather than putting it on the board under this run's name.
    */
-  rebind(runId: string, sessionId: string): boolean {
+  rebind(runId: string, sessionId: string, witness: RebindWitness): boolean {
     const r = this.row(runId);
     if (!r) return true;
-    const decision = rebindDecision(r.session_id, sessionId, r.resuming);
+    const decision = rebindDecision(r.session_id, sessionId, r.resuming, this.whoReported(r, sessionId, witness));
+    if (decision === 'stray') {
+      this.strayReported(r, sessionId, witness.kind === 'hook' ? witness.event : 'an MCP connection');
+      return false;
+    }
     if (decision === 'lost') {
       // The promise outlives the failure: whatever that session says next is still not this run's.
       if (!this.resumeLostReported.has(runId)) {
@@ -1910,6 +1970,44 @@ export class RunManager {
       this.bus.invalidate('state');
     }
     return true;
+  }
+
+  /**
+   * Whether the process reporting this id is the one this run hosts.
+   *
+   * Claude Code keeps a file per live process under `sessions/<pid>.json` in its config directory,
+   * saying which conversation that process is in. The runner reports the pid it spawned, so the two
+   * together answer the question exactly: is this claude the one in this run's terminal, or one of
+   * the others that inherited its run id? A process that has just changed conversations is asked
+   * about by the id it is in now, which is the id being reported, so the file agrees either way —
+   * and `/clear` is recognised from the hook as well, for the case where the file cannot be read.
+   */
+  private whoReported(r: RunRow, sessionId: string, witness: RebindWitness): Reporter {
+    return reporterOf(witness, sessionId, r.pid, () => this.registrySession(r, r.pid!));
+  }
+
+  /** The conversation Claude Code says a process is in, or null if it does not say. */
+  private registrySession(r: RunRow, pid: number): string | null {
+    for (const root of [this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR]) {
+      if (!root) continue;
+      const entry = readJson<{ sessionId?: unknown }>(path.join(root, 'sessions', `${pid}.json`));
+      if (typeof entry?.sessionId === 'string') return entry.sessionId;
+    }
+    return null;
+  }
+
+  /**
+   * A claude that is not this run's terminal reported itself under this run's id, so it is dropped.
+   *
+   * Nothing here is broken — the run is still pointed at its own conversation, which is the whole
+   * point — but something is launching claude with a run id it does not own, and that is worth
+   * saying out loud once rather than leaving as a silence.
+   */
+  private strayReported(r: RunRow, sessionId: string, via: string): void {
+    log.warn('a claude that is not this session reported itself under its run id', { run: r.id, via, session: sessionId, hosting: r.session_id });
+    if (this.straysSeen.has(r.id)) return;
+    this.straysSeen.add(r.id);
+    this.bus.toast('warn', `${r.name}: another claude process reported itself as this session and was ignored — something is passing SWITCHBOARD_RUN_ID on to a claude it should not.`);
   }
 
   /**
