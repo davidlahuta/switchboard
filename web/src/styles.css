@@ -3448,20 +3448,33 @@ a.list-main:hover {
   min-width: 0;
   max-width: min(22rem, 45%);
 }
-/* The live half: what it is doing right now, and nothing that sits still. */
+/*
+ * The live half: what it is doing right now, and nothing that sits still.
+ *
+ * It takes the room the name does not want rather than competing for it. Sized from its content
+ * both halves grow large, and flexbox then shrinks the larger one hardest — so a row carrying four
+ * badges crushed its name to "0…" and still chopped the last badge through the middle of a word.
+ * Starting this half from zero settles the priority: a session is a name first, then as much of
+ * what it is doing as the row has left.
+ */
 .srow-live {
   display: flex;
   align-items: center;
   gap: 5px;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
+  /* What does not fit fades out. A badge cut through its text reads as something broken; one that
+     fades reads as a list that carries on — which it does, in the row's own detail. */
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
 }
 .srow-live .run-tags {
   display: flex;
   gap: 5px;
   flex-wrap: nowrap;
-  overflow: hidden;
+  /* Clipped by the half above, so that the fade is what the eye meets and not a hard edge. */
+  overflow: visible;
 }
 .srow-time {
   flex: none;
