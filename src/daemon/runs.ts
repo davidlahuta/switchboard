@@ -1418,6 +1418,25 @@ export class RunManager {
     this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), CONTINUE_SPAWN_DELAY_MS) });
   }
 
+  /**
+   * Tell a session to carry on, now, because somebody looked at it and it should be working.
+   *
+   * The automatic paths all hang off an event — a swap, a resume, usage coming back — and a session
+   * that stopped for a reason nothing here saw has no event to hang off. It sits at a prompt with
+   * its work half done and no way back except a person typing into it. This is that, as a button:
+   * the same message, the same care about dialogs, from the same place that would have sent it.
+   */
+  nudge(runId: string): void {
+    const r = this.liveRun(runId);
+    if (this.busy(r)) throw httpError(409, 'It is working. Nothing to nudge.');
+    const text = getSettings(this.db).continueMessage.trim();
+    if (!text) throw httpError(409, 'There is no continue message set, so there is nothing to send.');
+    const old = this.pendingContinue.get(r.id);
+    if (old) clearTimeout(old.timer);
+    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), 0) });
+    log.info('nudging a session to carry on', { run: r.id });
+  }
+
   private typeContinue(runId: string, attempt = 0): void {
     const pending = this.pendingContinue.get(runId);
     if (!pending) return;

@@ -47,6 +47,14 @@ export function RestartMenu({
     await api.patch<Run>(`/api/runs/${encodeURIComponent(run.id)}`, body);
   };
 
+  const nudge = async (close: () => void) => {
+    close();
+    setBusy(true);
+    const res = await api.post<{ ok: boolean }>(`/api/runs/${encodeURIComponent(run.id)}/continue`);
+    setBusy(false);
+    if (res) emitToast('info', `Telling ${run.name} to carry on`);
+  };
+
   const relaunch = async (close: () => void) => {
     close();
     setBusy(true);
@@ -105,6 +113,20 @@ export function RestartMenu({
           <p className="menu-note">
             Without this, a session that is mid-turn is queued and taken the moment the turn ends — nothing in flight is
             lost. Forcing kills the turn where it stands.
+          </p>
+          <div className="menu-heading">Now</div>
+          <button type="button" role="menuitem" className="menu-item" onClick={() => void nudge(close)}>
+            <Icon name="bolt" size={16} />
+            <span className="menu-item-main">
+              <strong>Send the continue message now</strong>
+              <span className="menu-sub">for a session that has stopped and has nothing to start it again</span>
+            </span>
+          </button>
+          <p className="menu-note">
+            Types the continue message into the session as it stands, without restarting anything. For one that stopped
+            on something Switchboard could not see — a spend cap, an error it recovered from, a turn that simply ended —
+            and has been sitting at its prompt since. Anything already typed in its composer stays where it is, so clear
+            that first if you do not want it sent along.
           </p>
           <div className="menu-heading">When it comes back</div>
           <label className="menu-check">

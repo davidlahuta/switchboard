@@ -276,6 +276,7 @@ export function createServer(s: Services): http.Server {
     return fail(400, 'Nothing to change');
   });
   route('POST', '/api/runs/:id/relaunch', ({ params, body }) => s.runs.relaunch(params[0], body.force === true, 'you asked', 'manual'));
+  route('POST', '/api/runs/:id/continue', ({ params }) => (s.runs.nudge(params[0]), { ok: true }));
   route('POST', '/api/runs/:id/handoff', ({ params }) => (s.runs.handoff(params[0]), { ok: true }));
   route('POST', '/api/runs/:id/stop', ({ params }) => (s.runs.stop(params[0]), { ok: true }));
   route('DELETE', '/api/runs/:id', ({ params }) => (s.runs.forget(params[0]), { ok: true }));
