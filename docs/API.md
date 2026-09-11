@@ -68,6 +68,7 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | POST   | `/api/runs/:id/restart`  | `{ force? }` – same subscription, resumes the same session GUID, same terminal | `Run` |
 | POST   | `/api/runs/:id/relaunch` | `RelaunchRequest` – opens a terminal on the same session GUID, closing the old one first if there is one. Works on a run in any state: it is both "pick up a change to Switchboard's own runner" and "resume this session after it exited or the machine went down" | `Run` |
 | POST   | `/api/runs/restart-all`  | `{ kind?: 'restart' \| 'relaunch', force? }` – queues one across every live session; `relaunch` gives each a new terminal | `{ queued }` |
+| POST   | `/api/runs/:id/continue` | types the continue message into a session that has stopped, without restarting it | `{ ok }` |
 | POST   | `/api/runs/:id/handoff`  | give the terminal size back to the window the session runs in | `{ ok }` |
 | POST   | `/api/runs/:id/stop`     |                    | `{ ok }`|
 | DELETE | `/api/runs/:id`          | forget an exited run | `{ ok }` |
