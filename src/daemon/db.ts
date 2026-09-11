@@ -284,6 +284,19 @@ const MIGRATIONS: string[] = [
   ALTER TABLE runs ADD COLUMN revive_after TEXT;
   ALTER TABLE runs ADD COLUMN revive_tries INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- A turn that ended in failure rather than in an answer, and when to try it again.
+  --
+  -- A session whose terminal dies is brought back; one that runs out of usage is moved. A session
+  -- whose turn simply failed — a spend cap, an overloaded API, a network blip — had neither, so it
+  -- sat at its prompt with its work half done until somebody typed into it. The reason is kept
+  -- because it decides what the session is waiting for, and the count because a session that fails
+  -- every time it is asked must eventually be left alone.
+  ALTER TABLE runs ADD COLUMN stalled_since TEXT;
+  ALTER TABLE runs ADD COLUMN stall_reason TEXT;
+  ALTER TABLE runs ADD COLUMN stall_after TEXT;
+  ALTER TABLE runs ADD COLUMN stall_tries INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

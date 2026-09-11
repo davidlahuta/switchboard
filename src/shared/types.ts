@@ -290,6 +290,12 @@ export interface Run {
    * something it started".
    */
   work: SessionWork[];
+  /**
+   * Its last turn ended in failure rather than in an answer, and it has not had a good one since.
+   * Null for a session that stopped because it was finished — which is most of them, and the
+   * difference that keeps a parked session parked.
+   */
+  stalled: Stalled | null;
   /** why this session wants looking at; all false when it does not */
   attention: Attention;
   /** claude version this session is currently running on, when known */
@@ -537,6 +543,17 @@ export interface Attention {
 }
 
 /** A respawn queued behind a turn that is still running. */
+export interface Stalled {
+  /** what ended the turn: a usage limit, a spend cap, or the error Claude Code reported */
+  reason: string;
+  /** ISO timestamp of the failure that started this */
+  since: string;
+  /** ISO timestamp of the next attempt to get it going, or null when it has stopped trying */
+  nextTry: string | null;
+  /** how many times it has been told to carry on since its last good turn */
+  tries: number;
+}
+
 export interface WaitingRespawn {
   kind: RespawnKind;
   /** what set it going, so the UI can say so without parsing the reason */

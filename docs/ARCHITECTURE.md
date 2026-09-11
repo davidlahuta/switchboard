@@ -365,6 +365,29 @@ night (`scheduleRevive`, `reviveDue`). A stop the operator asked for is never un
 that reconnects on its own cancels its own revive. Runs found disconnected when the daemon starts
 are given the same treatment, which is what recovers a desk after a reboot.
 
+**A turn that failed, and nothing watching for it.** Three things can stop a session, and until this
+only two of them had an answer: its terminal dies (it is revived) or it runs out of usage (it is
+moved). The third is a turn that simply failed — a spend cap, an overloaded API, an error Claude
+Code could not carry on from. Nothing died, no number moved, so nothing came back to it, and the
+session sat at its prompt with its work half done until a person typed into it.
+
+The distinction that makes this safe is between a turn that **ended** and a turn that **failed**. A
+session that finished, asked a question, or was parked by its operator ended its turn: Claude Code
+fires `Stop`, no mark is made, and nothing will ever tell it to carry on — telling a parked session
+to carry on would restart work somebody deliberately stopped. A turn that failed fires `StopFailure`
+instead, or is read off the screen as a limit, and only that leaves a mark. A later `Stop` — a turn
+that got to the end under its own power — clears it, which is also the only thing that resets the
+count, so a session that fails every time it is asked cannot be asked for ever.
+
+While the mark is there the session is told to carry on, on a backoff from twenty seconds out to an
+hour, and left alone whenever a person is needed instead: a dialog on screen, a question waiting for
+an answer, a per-session continue-on-resume that is off. A usage-limit stall waits for its own
+window to come back rather than typing into a session that would only hit the limit again; a spend
+cap and an ordinary error wait on the clock, because no number will ever announce that they are
+over. After eight attempts it stops and says the session needs a person. `stallDecision` is the
+whole rule, and the menu item that sends the same message by hand is the same code path, a few
+minutes earlier.
+
 **A ceiling the usage endpoint cannot see.** A session stopped at one in the morning on "You've hit
 your monthly spend limit" and was still stopped at seven. Two things had to be wrong for that. The
 pattern watching the screen knew about five-hour and weekly limits and not about a spend cap, so
