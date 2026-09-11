@@ -1009,8 +1009,15 @@ export class RunManager {
       const r = this.row(runId);
       if (!r || r.status === 'exited') return;
       this.setStatus(runId, 'disconnected');
-      // The terminal is gone and nobody asked for that. A relaunch in flight has its own path.
-      if (!this.relaunching.has(runId) && !this.stopping.has(runId)) this.scheduleRevive(r, 'its terminal disappeared');
+      /*
+       * The terminal is gone and nobody asked for that — unless somebody just did. A relaunch opens
+       * the new tab the moment the old process exits and stops tracking the run as relaunching
+       * there, and the old socket closes a fraction of a second later, which read as a death and
+       * queued a revive for a session that was already coming back. Harmless while the new terminal
+       * connected inside half a minute, and a second terminal for the same session when it did not.
+       */
+      const justReplaced = this.respawnedRecently(runId) !== null;
+      if (!justReplaced && !this.relaunching.has(runId) && !this.stopping.has(runId)) this.scheduleRevive(r, 'its terminal disappeared');
     });
   }
 
