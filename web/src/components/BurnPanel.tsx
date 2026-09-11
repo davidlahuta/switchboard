@@ -1,4 +1,4 @@
-import type { BurnForecast, BurnWindow } from '@shared/types.ts';
+import type { BurnForecast, BurnWindow, Subscription } from '@shared/types.ts';
 import { Section } from './ui.tsx';
 import { formatDuration } from '../lib/time.ts';
 
@@ -11,8 +11,9 @@ import { formatDuration } from '../lib/time.ts';
  * faster than eight sessions can spend it — and "never" is worth saying out loud, because the
  * alternative is reading four percentages and guessing.
  */
-export function BurnPanel({ burn, now }: { burn: BurnForecast; now: number }) {
+export function BurnPanel({ burn, subs, now }: { burn: BurnForecast; subs: Subscription[]; now: number }) {
   const verdict = soonest(burn, now);
+  const ceilings = scopedCeilings(subs);
   return (
     <Section title="Usage burn rate" actions={<span className="dim small">{measuredFrom(burn)}</span>}>
       <p className={`burn-verdict ${verdict.tone}`}>{verdict.text}</p>
@@ -20,8 +21,44 @@ export function BurnPanel({ burn, now }: { burn: BurnForecast; now: number }) {
         <BurnRow label="5-hour window" hint="Rolling: each subscription's own window turns over five hours after it opened." w={burn.fiveHour} now={now} />
         <BurnRow label="7-day window" hint="The weekly ceiling. It reaches further out, so it bites on long runs rather than long afternoons." w={burn.sevenDay} now={now} />
       </div>
+      {ceilings.length > 0 && (
+        <p className="burn-scoped">
+          Under the seven-day window, not part of it:{' '}
+          {ceilings.map((c, i) => (
+            <span key={c.label}>
+              {i > 0 && ', '}
+              <strong>{c.label}</strong> {Math.round(c.leftPct)}% left
+            </span>
+          ))}
+          . Work on those models counts against the seven-day window as well; everything else counts only against the
+          seven-day one, so a spent ceiling here stops the sessions running that model and no others.
+        </p>
+      )}
     </Section>
   );
+}
+
+/**
+ * The per-model weekly ceilings, pooled the same way the windows above are.
+ *
+ * Shown apart from them on purpose. They are a second limit under the seven-day window rather than
+ * a slice of it, and reading the two as one number is how a desk with most of its week in hand
+ * looks like a desk that has run out.
+ */
+function scopedCeilings(subs: Subscription[]): Array<{ label: string; leftPct: number }> {
+  const by = new Map<string, { capacity: number; left: number }>();
+  for (const s of subs) {
+    if (!s.enabled || s.status !== 'ready') continue;
+    for (const w of s.usage?.scoped ?? []) {
+      const e = by.get(w.label) ?? { capacity: 0, left: 0 };
+      e.capacity += s.weight;
+      e.left += (s.weight * (100 - w.pct)) / 100;
+      by.set(w.label, e);
+    }
+  }
+  return [...by]
+    .map(([label, e]) => ({ label, leftPct: e.capacity > 0 ? (e.left / e.capacity) * 100 : 0 }))
+    .sort((a, b) => a.leftPct - b.leftPct);
 }
 
 /** Whichever ceiling arrives first is the one that stops the desk; either alone is enough. */

@@ -190,7 +190,12 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
         <UsageBar label="5 hour" window={u?.fiveHour} now={now} />
         <UsageBar label="7 day" window={u?.sevenDay} now={now} />
         {u?.scoped.map((w) => (
-          <UsageBar key={w.label} label={`${w.label} (7d)`} window={w} now={now} />
+          <div
+            key={w.label}
+            title={`A second weekly ceiling, under the 7-day one rather than part of it. ${w.label} work counts against both; everything else counts only against the 7 day. It stops sessions running ${w.label} and no others.`}
+          >
+            <UsageBar label={`${w.label} week`} window={w} now={now} />
+          </div>
         ))}
         <div className="sub-spark">
           <span className="small dim">5h usage, last 48h</span>

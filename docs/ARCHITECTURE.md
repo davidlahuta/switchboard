@@ -365,6 +365,25 @@ night (`scheduleRevive`, `reviveDue`). A stop the operator asked for is never un
 that reconnects on its own cancels its own revive. Runs found disconnected when the daemon starts
 are given the same treatment, which is what recovers a desk after a reboot.
 
+**A ceiling the usage endpoint cannot see.** A session stopped at one in the morning on "You've hit
+your monthly spend limit" and was still stopped at seven. Two things had to be wrong for that. The
+pattern watching the screen knew about five-hour and weekly limits and not about a spend cap, so
+nothing was reported; and had it been reported, the check that confirms a screen-detected limit
+against the subscription's own numbers would have thrown it away, because a spend cap is the
+account's ceiling on what it will pay for beyond the plan and the usage endpoint says nothing about
+it. So a limit now carries what kind it is: a window limit is still checked against the numbers
+before anything moves, and a spend cap is believed on sight — the account it belongs to is the one
+thing a swap can actually change.
+
+**A model-scoped week read as usage in general.** The seven-day window counts every model; a
+`weekly_scoped` limit is a second ceiling under it, naming the model it is about. Spending on that
+model counts against both; spending on anything else counts against the seven-day window alone. A
+gate reading the two as one number keeps a Sonnet session off a subscription whose Fable week is
+spent and whose seven-day allowance is barely touched. `scopedBinds` decides which sessions a scoped
+window is about, and a session whose model is not known is not held to one: the account-wide windows
+are what is actually known, and stranding a session on a guess costs more than moving it if the
+guess was wrong. The burn panel keeps them apart for the same reason, and says so on the page.
+
 **A session moved somewhere it could not work.** Ranking read the five-hour and seven-day windows
 and ignored the model-scoped weekly ones, so a subscription could read 70% overall while the model
 the session runs on had nothing left. Scoped windows now take a subscription out of the running at

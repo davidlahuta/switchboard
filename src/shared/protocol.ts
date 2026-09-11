@@ -1,3 +1,4 @@
+import type { LimitCause } from './limits.ts';
 // Internal WebSocket protocol between the daemon and its helpers (runner, MCP shim).
 
 export interface SpawnSpec {
@@ -31,7 +32,7 @@ export type RunnerToDaemon =
   | { type: 'data'; data: string }
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'exit'; code: number | null; intentional: boolean }
-  | { type: 'limit-detected'; text: string };
+  | { type: 'limit-detected'; text: string; cause: LimitCause };
 
 export type DaemonToRunner =
   | { type: 'spawn'; spec: SpawnSpec }
