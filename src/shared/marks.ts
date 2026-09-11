@@ -34,9 +34,38 @@ export function attentionMark(run: Run): SessionMark | null {
   if (run.status === 'exited') return null;
   const { waiting, unread, unseen } = run.attention;
   if (waiting) return { glyph: '❗', tone: 'blocked', why: 'Waiting for you: it is stopped on a prompt only you can answer' };
+  /*
+   * A session that has been told to carry on as often as it is worth asking is waiting for a person
+   * just as surely as one stopped on a prompt — it has stopped trying, and nothing else is coming
+   * for it. It used to earn the mark for "finished something you have not read", which is what a
+   * session that is done looks like, and sorted accordingly: below every session that had genuinely
+   * finished in the last few minutes.
+   */
+  if (run.stalled && !run.stalled.nextTry) {
+    return { glyph: '❗', tone: 'blocked', why: `Waiting for you: it stopped on ${run.stalled.reason} and has been asked to carry on as often as it is worth asking` };
+  }
   if (unread > 0) return { glyph: '✉', tone: 'message', why: `${unread} message${unread === 1 ? '' : 's'} for you from this session` };
   if (unseen) return { glyph: '✓', tone: 'unseen', why: 'It has done something since you last opened its terminal' };
   return null;
+}
+
+/**
+ * How loudly a session is asking for the operator: the higher, the sooner it wants them.
+ *
+ * The same order attentionMark reads in, as a number the lists can sort on. They used to sort on
+ * "is it asking for me at all", which flattens the three into one group and then orders that group
+ * by whatever moved last — so a session blocked on a question ten minutes ago sat below one that
+ * finished a minute ago. One of those will do nothing whatever until a person answers it; the other
+ * is done. Zero for a session that wants nothing, and for one that has exited: history sorts last
+ * however loudly it was asking when it stopped.
+ */
+export function attentionRank(run: Run): number {
+  if (run.status === 'exited') return 0;
+  if (run.attention.waiting) return 4;
+  if (run.stalled && !run.stalled.nextTry) return 3;
+  if (run.attention.unread > 0) return 2;
+  if (run.attention.unseen) return 1;
+  return 0;
 }
 
 /**
