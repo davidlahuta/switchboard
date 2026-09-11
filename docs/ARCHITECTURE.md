@@ -299,6 +299,12 @@ transcript sat untouched on disk. So the id a `--resume` was sent to fetch is wr
 `runs.resuming` at the spawn and only cleared when the session reports having it; a session that
 reports anything else is stopped, kept off the board, and the run stays pointed at the conversation
 it asked for. The failure is a toast naming the `claude --resume <id>` that still works. See
+The MCP shim is a second witness to the same question, and a better one for a quiet session. A hook
+can only speak while carrying the run id, which means the session has to do something first — and a
+session nobody types into does nothing but come up and wait. The shim connects the moment claude
+starts, carrying both the run id and the session id, so a resume that came up on the wrong
+conversation is caught even if nobody ever types at it, and the promise the spawn made is discharged
+as soon as the session is demonstrably on the id it was sent to fetch.
 `rebindDecision`.
 
 **Swap** = wait until the agent is idle (or it just hit a limit) → kill claude → reset the terminal →

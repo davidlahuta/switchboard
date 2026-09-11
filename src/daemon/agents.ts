@@ -65,6 +65,24 @@ export class AgentHub implements PushTarget {
   ): Promise<void> {
     if (msg.type === 'hello') {
       setSession(msg.sessionId);
+      /*
+       * The second witness of which conversation a run is actually on.
+       *
+       * Until now only a hook could say — and a hook only says it while carrying the run id, which
+       * means the session has to do something first. A session nobody types into does nothing: it
+       * comes up, connects, and waits. So a resume that quietly came up on the wrong conversation
+       * went unnoticed until somebody typed at it, and the promise a spawn makes about which id it
+       * is fetching stayed open for as long as the session stayed quiet.
+       *
+       * This connection carries both ids and arrives the moment claude starts, whoever is or is not
+       * watching. If it says the run is somewhere it should not be, the run disowns it here exactly
+       * as it would on a hook.
+       */
+      if (msg.runId && !this.runs.rebind(msg.runId, msg.sessionId)) {
+        log.warn('a session announced itself on a conversation its run had disowned', { run: msg.runId, session: msg.sessionId });
+        ws.close();
+        return;
+      }
       const run = msg.runId ? this.runs.row(msg.runId) : this.runs.bySession(msg.sessionId);
       const agent = await this.coord.registerAgent({
         sessionId: msg.sessionId,
