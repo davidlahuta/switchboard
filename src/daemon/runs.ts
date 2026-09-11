@@ -88,6 +88,15 @@ interface PendingRespawn {
    * long the turn takes. Only a session that cannot make progress where it is gets a deadline.
    */
   deadline: number | null;
+  /**
+   * A new terminal was asked for, whatever this respawn has since turned into.
+   *
+   * Set when a plan absorbs one: press *new terminal for every session* and then *rebalance*, and
+   * the second would otherwise either queue behind the first or quietly replace it, and one of the
+   * two things asked for would not happen. A swap already opens a new terminal when the host is out
+   * of date, so absorbing the relaunch is a matter of remembering that it was asked for.
+   */
+  fresh?: boolean;
 }
 
 const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
@@ -312,8 +321,8 @@ export function respawnGuard(input: { lastRespawnAt: number | null; now: number;
  * else. That is true whoever asked — an operator, an update, a swap made on a usage limit — so the
  * question is asked here, once, for all of them.
  */
-export function respawnPlacement(input: { kind: RespawnKind; staleHost: boolean }): 'new-terminal' | 'in-place' {
-  return input.kind === 'relaunch' || input.staleHost ? 'new-terminal' : 'in-place';
+export function respawnPlacement(input: { kind: RespawnKind; staleHost: boolean; fresh?: boolean }): 'new-terminal' | 'in-place' {
+  return input.kind === 'relaunch' || input.staleHost || input.fresh === true ? 'new-terminal' : 'in-place';
 }
 
 export function titleDecision(name: string, shadow: string | null, reported: string | null): { adopt?: string; push?: string } {
@@ -1214,7 +1223,7 @@ export class RunManager {
     runId: string,
     targetRef: string,
     reason: string,
-    opts: { force?: boolean; continueAfter?: boolean; deadline?: number | null; atLimit?: boolean; trigger?: RespawnTrigger } = {},
+    opts: { force?: boolean; continueAfter?: boolean; deadline?: number | null; atLimit?: boolean; trigger?: RespawnTrigger; fresh?: boolean } = {},
   ): Run {
     const r = this.liveRun(runId);
     const target = this.resolveSubscription(targetRef, r.subscription_id, r.id, opts.atLimit ?? false);
@@ -1229,6 +1238,7 @@ export class RunManager {
         trigger: opts.trigger ?? 'manual',
         queuedAt: Date.now(),
         deadline: opts.deadline ?? null,
+        fresh: opts.fresh,
       },
       opts.force ?? false,
     );
@@ -1261,6 +1271,9 @@ export class RunManager {
       // A session already on its way to another subscription will come back on the new build anyway;
       // queueing a restart behind that swap would only take the turn twice.
       if (this.pendingRespawn.has(r.id)) continue;
+      // Respawn refuses a session that came back moments ago, and says so rather than throwing, so
+      // the refusal has to be read here or the count is of what was asked rather than what happened.
+      if (!opts.force && this.respawnedRecently(r.id) !== null) continue;
       try {
         if (kind === 'relaunch') this.relaunch(r.id, opts.force ?? false, reason, trigger);
         else this.restart(r.id, reason, opts.force ?? false, trigger);
@@ -1289,21 +1302,40 @@ export class RunManager {
    * and moving for a small margin only means moving back when the two drift the other way. Nothing
    * is interrupted — each move waits for its own session's turn to end, like every other swap.
    */
-  rebalanceAll(force = false): { queued: number; considered: number } {
-    const live = this.db
-      .all<RunRow>(`SELECT * FROM runs WHERE status IN ('running', 'starting', 'swapping')`)
-      .filter((r) => this.conns.has(r.id) && !this.pendingRespawn.has(r.id));
+  rebalanceAll(force = false): { queued: number; considered: number; skipped: number } {
+    const live = this.db.all<RunRow>(`SELECT * FROM runs WHERE status IN ('running', 'starting', 'swapping')`).filter((r) => this.conns.has(r.id));
     // Signed, per subscription: what this pass has already sent somewhere or taken away.
     const pending = new Map<string, number>();
     const worthOf = (r: RunRow): number => this.subs.scoreOf(r.subscription_id, pending);
     const order = [...live].sort((a, b) => worthOf(a) - worthOf(b));
     let queued = 0;
+    let skipped = 0;
     for (const r of order) {
+      /*
+       * A session already on its way somewhere is not one to send somewhere else: that destination
+       * was chosen by a limit or by the proactive swap, which knew something this pass does not.
+       * A session that came back moments ago is not one to take again either — respawn would refuse
+       * it anyway, and counting a refusal as a move would both overstate the answer and tell the
+       * rest of the pass that a subscription has a session it never got.
+       */
+      const waiting = this.pendingRespawn.get(r.id);
+      if (waiting?.kind === 'swap' || (!force && this.respawnedRecently(r.id) !== null)) {
+        skipped++;
+        continue;
+      }
       const best = this.subs.rank({ exclude: r.subscription_id, runId: r.id, model: this.modelOf(r.id), pending });
       if (!best) continue;
       if (best.score < this.subs.scoreOf(r.subscription_id, pending) * SWAP_MARGIN) continue;
+      /*
+       * A restart or a new terminal queued for this session is absorbed rather than fought with:
+       * press the two fleet buttons one after the other and both were asked for, so the session
+       * gets one respawn that does both. The promise of a fresh terminal is carried across, since a
+       * swap only opens one by itself when the host is out of date.
+       */
+      const alsoFresh = waiting?.kind === 'relaunch';
+      const reason = alsoFresh ? 'rebalancing the desk, in the new terminal you asked for' : 'rebalancing the desk';
       try {
-        this.swap(r.id, best.row.id, 'rebalancing the desk', { trigger: 'rebalance', force });
+        this.swap(r.id, best.row.id, reason, { trigger: 'rebalance', force, fresh: alsoFresh });
         pending.set(r.subscription_id, (pending.get(r.subscription_id) ?? 0) - 1);
         pending.set(best.row.id, (pending.get(best.row.id) ?? 0) + 1);
         queued++;
@@ -1311,8 +1343,8 @@ export class RunManager {
         log.warn('could not queue a rebalance swap', { run: r.id, error: err instanceof Error ? err.message : err });
       }
     }
-    if (queued) log.info('rebalanced the desk', { moved: queued, of: live.length });
-    return { queued, considered: live.length };
+    if (queued) log.info('rebalanced the desk', { moved: queued, of: live.length, skipped });
+    return { queued, considered: live.length, skipped };
   }
 
   pendingRestartCount(): number {
@@ -1601,7 +1633,7 @@ export class RunManager {
      * that respawning inside it does not already cost, so a stale host is replaced here, whatever
      * brought the session back: a swap, a restart, an update.
      */
-    const placement = respawnPlacement({ kind, staleHost: this.runnerStale(r.id) });
+    const placement = respawnPlacement({ kind, staleHost: this.runnerStale(r.id), fresh: plan.fresh });
     if (continueAfter) this.armRespawnContinue(r, interrupted);
     if (placement === 'new-terminal') {
       try {

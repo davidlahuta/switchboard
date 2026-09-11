@@ -247,6 +247,19 @@ describe('which terminal a session comes back into', () => {
     assert.equal(respawnPlacement({ kind: 'swap', staleHost: false }), 'in-place');
   });
 
+  it('keeps the new terminal a swap was asked to absorb', () => {
+    /*
+     * Press "new terminal for every session" and then "rebalance": the second turns the first's
+     * queued relaunch into a swap, and both were asked for. On a current host a swap comes back in
+     * place, so without carrying the promise across the terminal the operator asked for would
+     * silently not happen.
+     */
+    assert.equal(respawnPlacement({ kind: 'swap', staleHost: false, fresh: true }), 'new-terminal');
+    assert.equal(respawnPlacement({ kind: 'restart', staleHost: false, fresh: true }), 'new-terminal');
+    // And it is opt-in: nothing that did not absorb a relaunch is moved out of its terminal.
+    assert.equal(respawnPlacement({ kind: 'swap', staleHost: false, fresh: false }), 'in-place');
+  });
+
   it('replaces an out-of-date terminal on every automated way back', () => {
     // An update restart and a subscription swap both bring the session back on a new claude; doing
     // that inside a host that predates the current build is what leaves a session badged old host

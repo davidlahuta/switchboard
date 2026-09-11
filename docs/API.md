@@ -76,7 +76,7 @@ started or swapped onto it until it is logged in again or renamed to the account
 | POST   | `/api/runs/:id/relaunch` | `RelaunchRequest` – opens a terminal on the same session GUID, closing the old one first if there is one. Works on a run in any state: it is both "pick up a change to Switchboard's own runner" and "resume this session after it exited or the machine went down" | `Run` |
 | POST   | `/api/runs/restart-all`  | `{ kind?: 'restart' \| 'relaunch', force? }` – queues one across every live session; `relaunch` gives each a new terminal | `{ queued }` |
 | POST   | `/api/runs/:id/continue` | types the continue message into a session that has stopped, without restarting it | `{ ok }` |
-| POST   | `/api/runs/rebalance`    | `{ force? }` – moves every session that would be clearly better off on another subscription | `{ queued, considered }` |
+| POST   | `/api/runs/rebalance`    | `{ force? }` – moves every session that would be clearly better off on another subscription | `{ queued, considered, skipped }` |
 | POST   | `/api/runs/:id/handoff`  | give the terminal size back to the window the session runs in | `{ ok }` |
 | POST   | `/api/runs/:id/stop`     |                    | `{ ok }`|
 | DELETE | `/api/runs/:id`          | forget an exited run | `{ ok }` |
@@ -85,6 +85,11 @@ started or swapped onto it until it is logged in again or renamed to the account
 A run also carries `revive_after` behaviour of its own: a death nobody asked for schedules another
 attempt, and `status` returns to `running` when it comes back. Nothing takes a run twice inside the
 respawn cooldown except an operator forcing it.
+
+`skipped` counts the sessions a rebalance would not weigh: one already on its way to another
+subscription, and one that came back moments ago. A session with a plain restart or a new terminal
+queued is not skipped — the rebalance absorbs that plan, so pressing `restart-all` and `rebalance`
+one after the other gives each session a single respawn that does both, new terminal included.
 
 Swap, restart and relaunch all take the session down and bring it back on the same conversation, so
 all three behave the same way about timing: a request that lands mid-turn is **queued**, not
