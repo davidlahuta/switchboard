@@ -115,6 +115,11 @@ From there you can:
   spreads out rather than piling up, and a session is not moved for a margin too small to be worth the turn
   it costs — or moved back where it has just come from.
 - Open it in the browser and keep working.
+- Leave it running overnight. A session whose terminal dies — a window closed, a claude that fell
+  over, a resume that collided with a process still shutting down — is reopened and resumed on a
+  backoff that starts at half a minute, and gives up after a few attempts rather than reopening a
+  terminal all night (Settings → *Bring sessions back when their terminal dies*). Stopping a session
+  yourself is never undone.
 - Trust it to wait for **subagents**. A session says it is idle the moment its own turn ends, but a
   subagent launched in the background keeps running — and spending — for minutes after that, so a
   queued restart or swap waits for the subagents too, and the session lists say what it still has

@@ -40,6 +40,9 @@ export async function startDaemon(): Promise<void> {
   // started before that is repaired would report nothing about its subagents.
   void repairIntegration().then(
     (added) => {
+      // Profiles carry their own copy of the settings, so the repair is only half done until they
+      // have it: a session runs under a profile, not under the home directory.
+      subs.syncAllProfiles();
       if (added.length) bus.toast('info', `Claude Code integration updated: now also watching ${added.join(', ')}.`);
     },
     (err) => log.warn('could not update the Claude Code integration', err instanceof Error ? err.message : err),
@@ -59,6 +62,8 @@ export async function startDaemon(): Promise<void> {
   const titles = setInterval(() => {
     runs.pollSessions();
     runs.drainPending();
+    // A session whose terminal died is brought back here, on its own backoff.
+    runs.reviveDue();
   }, 4000);
 
   // One server per bound address: loopback for the desk's own hooks/shims/runners, plus any

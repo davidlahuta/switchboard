@@ -143,6 +143,8 @@ export function subscriptionScore(input: {
   priority: number;
   resetsInMs: number | null;
   recentlyLeft: boolean;
+  /** its numbers could not be refreshed, so they describe some earlier moment */
+  stale?: boolean;
 }): number {
   const share = (h: number): number => h / (1 + 0.5 * input.liveRuns);
   let score = share(input.headroom);
@@ -153,6 +155,7 @@ export function subscriptionScore(input: {
     score = Math.max(score, share(input.fullHeadroom) * (1 - wait));
   }
   if (input.recentlyLeft) score *= 0.5;
+  if (input.stale) score *= 0.75;
   return score + input.priority * 0.01;
 }
 
@@ -343,7 +346,19 @@ export class SubscriptionManager {
       if (!sub.enabled || sub.status !== 'ready') continue;
       const used = Math.max(sub.usage?.fiveHour?.pct ?? ASSUMED_PCT, sub.usage?.sevenDay?.pct ?? ASSUMED_PCT);
       if (used >= Math.min(SPENT_PCT, threshold)) continue;
+      /*
+       * A model-scoped weekly window stops the session just as dead as the account-wide ones, and
+       * it is not part of either of them: a subscription can read 70% overall while the model the
+       * session actually runs on has nothing left. Moving a session onto that is a swap that buys a
+       * limit, so a spent scoped window takes the subscription out of the running.
+       */
+      const scoped = sub.usage?.scoped?.find((w) => w.pct >= SPENT_PCT);
+      if (scoped) continue;
       const score = subscriptionScore({
+        // Numbers nobody could refresh are a guess about the present, and the usage endpoint goes
+        // quiet for minutes at a time when it rate-limits everyone at once. Still usable — a guess
+        // beats a subscription known to be spent — but not preferred over one that is answering.
+        stale: !!sub.usage?.stale,
         headroom: sub.headroom,
         fullHeadroom: weightFor(r.plan, r.rate_tier),
         liveRuns: this.liveRunsFor(r.id),
@@ -360,12 +375,20 @@ export class SubscriptionManager {
     return this.rank(excludeId, runId, atLimit)?.row ?? null;
   }
 
-  /** How much of the binding window a subscription has spent, or the assumption when nothing is known. */
+  /**
+   * How much of the binding window a subscription has spent, or the assumption when nothing is
+   * known. Model-scoped weekly windows count too: whichever ceiling is closest is the one that
+   * decides whether a session can work here.
+   */
   usedPct(id: string): number {
     const r = this.row(id);
     const usage = r ? this.dto(r).usage : null;
     if (!usage) return ASSUMED_PCT;
-    return Math.max(usage.fiveHour?.pct ?? ASSUMED_PCT, usage.sevenDay?.pct ?? ASSUMED_PCT);
+    return Math.max(
+      usage.fiveHour?.pct ?? ASSUMED_PCT,
+      usage.sevenDay?.pct ?? ASSUMED_PCT,
+      ...(usage.scoped ?? []).map((w) => w.pct),
+    );
   }
 
   /** What the subscription a session is on now is worth, to compare a proposed move against. */
@@ -496,6 +519,22 @@ export class SubscriptionManager {
       log.info('registered the MCP server in a profile that was missing it', { subscription: r?.label ?? id });
     } catch (err) {
       log.warn('could not register the MCP server in the profile', err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
+   * Every profile brought up to what the integration now installs. A profile only used to be
+   * synced when a session was about to start on it, so a subscription nobody had used since the
+   * hooks changed kept a settings file without them — and the first session to land there would
+   * have run invisibly.
+   */
+  syncAllProfiles(): void {
+    for (const r of this.rows()) {
+      try {
+        this.syncProfile(r.id);
+      } catch (err) {
+        log.warn('could not sync a profile', { subscription: r.id, error: err instanceof Error ? err.message : err });
+      }
     }
   }
 

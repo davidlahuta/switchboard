@@ -56,6 +56,14 @@ const LIMIT_RE =
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]/g;
 
+/** No more than one limit reported this often, however many times the banner is redrawn. */
+const LIMIT_REPORT_EVERY_MS = 60_000;
+/**
+ * How long after a spawn the terminal's output says nothing about usage. Long enough for a resumed
+ * conversation to finish replaying itself, which is where the old banners live.
+ */
+const LIMIT_QUIET_AFTER_SPAWN_MS = 45_000;
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** This process's start time. The daemon compares it with the source to spot a stale runner. */
@@ -205,7 +213,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
 
   const detectLimit = (data: string): void => {
     tail = (tail + data.replace(ANSI_RE, '')).slice(-2000);
-    if (Date.now() - lastLimitReport < 60_000) return;
+    if (Date.now() - lastLimitReport < LIMIT_REPORT_EVERY_MS) return;
     const m = tail.match(LIMIT_RE);
     if (!m) return;
     lastLimitReport = Date.now();
@@ -237,6 +245,15 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     }
     child = p;
     spawnedAt = Date.now();
+    /*
+     * Resuming replays the conversation, and a conversation that once hit a usage limit replays the
+     * banner saying so. Read as live, that banner moved the session again the instant it arrived on
+     * its new subscription — attributed to whichever one it had just landed on, which was rarely
+     * the one that had actually run out. The tail goes with the old process, and nothing is
+     * believed until the replay is over.
+     */
+    tail = '';
+    lastLimitReport = Date.now() + LIMIT_QUIET_AFTER_SPAWN_MS - LIMIT_REPORT_EVERY_MS;
     childSize = { cols, rows };
     if (webSize && !webSized) {
       // Parked from the moment it starts, rather than painting one frame here first.
@@ -282,21 +299,42 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     }
   };
 
-  const swapTo = async (next: SpawnSpec, banner: string): Promise<void> => {
-    swapping = true;
-    const old = child;
-    if (old) {
-      const exited = new Promise<void>((resolve) => old.onExit(() => resolve()));
-      try {
-        old.kill();
-      } catch {
-        // already gone
+  /*
+   * Respawns run one at a time, however fast they arrive.
+   *
+   * This used to be a plain async function called from an unawaited message handler, so two swaps
+   * milliseconds apart — which is what a usage limit produced when two parts of the daemon answered
+   * it at once — ran concurrently. Both killed the same child, both waited, and both spawned: two
+   * claude processes on one conversation. The second `--resume` then failed because the first still
+   * held the transcript, and when the orphan exited it reported an unexpected exit that took the
+   * whole terminal down with it. That is how a session died overnight rather than swapping.
+   *
+   * The daemon no longer sends them that way, and this makes it impossible to matter.
+   */
+  let respawnQueue: Promise<void> = Promise.resolve();
+
+  const swapTo = (next: SpawnSpec, banner: string): Promise<void> => {
+    respawnQueue = respawnQueue.then(async () => {
+      swapping = true;
+      const old = child;
+      if (old) {
+        const exited = new Promise<void>((resolve) => old.onExit(() => resolve()));
+        try {
+          old.kill();
+        } catch {
+          // already gone
+        }
+        await Promise.race([exited, sleep(5000)]);
       }
-      await Promise.race([exited, sleep(5000)]);
-    }
-    out.write(RESET_TERMINAL + CLEAR + banner);
-    swapping = false;
-    spawnChild(next);
+      out.write(RESET_TERMINAL + CLEAR + banner);
+      swapping = false;
+      spawnChild(next);
+      // Let the new process take hold before another swap can kill it: a respawn that lands during
+      // startup leaves claude half-initialised and the conversation locked by a process that is on
+      // its way out.
+      await sleep(1500);
+    });
+    return respawnQueue;
   };
 
   const handle = async (msg: DaemonToRunner): Promise<void> => {
