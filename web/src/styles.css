@@ -1322,6 +1322,7 @@ a.list-main:hover {
 }
 .list-title {
   font-weight: 550;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1532,10 +1533,20 @@ a.list-main:hover {
   padding: 4px 8px;
   min-width: 170px;
 }
+/*
+ * A name is as long as its session felt like being, and "review protocol optimization" is a real
+ * one. Left to run it pushed the state, the time and the buttons off the end of the row; clipped
+ * without a marker it read as a different, shorter name. So it ends in an ellipsis and carries the
+ * whole thing in its tooltip.
+ */
 .run-name {
   font-weight: 600;
   color: var(--text);
   display: inline !important;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .agent-name {
   display: flex !important;
@@ -3427,10 +3438,15 @@ a.list-main:hover {
 .srow-toggle:focus-visible {
   color: var(--text);
 }
+/*
+ * The name takes what it needs and no more: enough that a session is recognisable, bounded so that
+ * a long one cannot crowd out what the row is for — what the session is doing, and the buttons.
+ */
 .srow .session-name,
 .srow .rename-wrap {
   flex: 0 1 auto;
   min-width: 0;
+  max-width: min(22rem, 45%);
 }
 /* The live half: what it is doing right now, and nothing that sits still. */
 .srow-live {
@@ -3501,6 +3517,7 @@ a.list-main:hover {
   .srow .session-name,
   .srow .rename-wrap {
     flex: 1 1 auto;
+    max-width: none;
   }
   .srow-live {
     order: 3;
