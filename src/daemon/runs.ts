@@ -1069,6 +1069,13 @@ export class RunManager {
         );
         this.mirror(r, msg.cols, msg.rows);
         this.setStatus(runId, 'running');
+        /*
+         * A new process owns nothing the old one started. SessionStart says this too, when it comes
+         * — and it does not always come, which is how a session relaunched at half past seven was
+         * still listing seven background shells it had started at four in the morning, inside a
+         * process that no longer existed. This is the same fact from the side that cannot miss it.
+         */
+        this.coord.endSessionWork(r.session_id, 'a new process started');
         break;
       case 'data':
         this.mirror(r).write(msg.data);
