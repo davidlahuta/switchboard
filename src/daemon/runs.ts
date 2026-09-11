@@ -1272,6 +1272,49 @@ export class RunManager {
     return queued;
   }
 
+  /**
+   * Spread the whole desk out again: every session that would be clearly better off somewhere else
+   * is moved there, and everything else is left where it is.
+   *
+   * The per-session swap already answers this for one session — but asking it nine times in a row
+   * gives nine answers to the same question, because none of them knows about the others. Every
+   * session sees the same emptiest subscription and every one is sent there, and the desk ends up
+   * more lopsided than it started. So this counts its own moves as it makes them: a subscription
+   * that has just been given a session is worth less to the next one, and a subscription that has
+   * just lost one is worth more to the sessions still on it. That is the whole difference between a
+   * rebalance and a loop.
+   *
+   * Worst-off first, so the sessions with the most to gain choose while there is still somewhere to
+   * go. The margin is the proactive swap's: somewhere merely a little better is not worth a resume,
+   * and moving for a small margin only means moving back when the two drift the other way. Nothing
+   * is interrupted — each move waits for its own session's turn to end, like every other swap.
+   */
+  rebalanceAll(force = false): { queued: number; considered: number } {
+    const live = this.db
+      .all<RunRow>(`SELECT * FROM runs WHERE status IN ('running', 'starting', 'swapping')`)
+      .filter((r) => this.conns.has(r.id) && !this.pendingRespawn.has(r.id));
+    // Signed, per subscription: what this pass has already sent somewhere or taken away.
+    const pending = new Map<string, number>();
+    const worthOf = (r: RunRow): number => this.subs.scoreOf(r.subscription_id, pending);
+    const order = [...live].sort((a, b) => worthOf(a) - worthOf(b));
+    let queued = 0;
+    for (const r of order) {
+      const best = this.subs.rank({ exclude: r.subscription_id, runId: r.id, model: this.modelOf(r.id), pending });
+      if (!best) continue;
+      if (best.score < this.subs.scoreOf(r.subscription_id, pending) * SWAP_MARGIN) continue;
+      try {
+        this.swap(r.id, best.row.id, 'rebalancing the desk', { trigger: 'rebalance', force });
+        pending.set(r.subscription_id, (pending.get(r.subscription_id) ?? 0) - 1);
+        pending.set(best.row.id, (pending.get(best.row.id) ?? 0) + 1);
+        queued++;
+      } catch (err) {
+        log.warn('could not queue a rebalance swap', { run: r.id, error: err instanceof Error ? err.message : err });
+      }
+    }
+    if (queued) log.info('rebalanced the desk', { moved: queued, of: live.length });
+    return { queued, considered: live.length };
+  }
+
   pendingRestartCount(): number {
     let n = 0;
     for (const p of this.pendingRespawn.values()) if (p.kind === 'restart') n++;

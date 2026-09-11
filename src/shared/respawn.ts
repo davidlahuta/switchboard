@@ -19,6 +19,8 @@ export function triggerLabel(trigger: RespawnTrigger): string {
       return 'usage came back';
     case 'revive':
       return 'its terminal died';
+    case 'rebalance':
+      return 'rebalancing the desk';
   }
 }
 

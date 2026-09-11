@@ -95,6 +95,15 @@ export interface PickOptions {
   atLimit?: boolean;
   /** what it runs, so a weekly window scoped to another model does not stand in its way */
   model?: string | null;
+  /**
+   * Sessions placed but not yet arrived, per subscription, signed: +1 where one has just been sent,
+   * -1 where one has just been taken from. Only a caller placing several sessions in one pass has
+   * any of this — and it is the whole of what makes such a pass different from running the same
+   * question several times. A swap is queued behind whatever turn the session is in the middle of,
+   * so the live counts do not move for minutes, and a ranking that reads them alone hands every
+   * session on the desk the same answer and piles all of them onto one subscription.
+   */
+  pending?: ReadonlyMap<string, number>;
 }
 
 interface Credentials {
@@ -374,7 +383,7 @@ export class SubscriptionManager {
    * somewhere to send it straight back to.
    */
   rank(opts: PickOptions = {}): { row: SubRow; score: number } | null {
-    const { exclude: excludeId, runId, atLimit = false, model = null } = opts;
+    const { exclude: excludeId, runId, atLimit = false, model = null, pending } = opts;
     // A session that is already stopped is not weighing a move against staying — it has nothing to
     // stay on. So the proactive threshold steps aside and only a spent subscription is refused.
     const threshold = atLimit ? SPENT_PCT : getSettings(this.db).swapThresholdPct;
@@ -402,7 +411,7 @@ export class SubscriptionManager {
         stale: !!sub.usage?.stale,
         headroom: sub.headroom,
         fullHeadroom: weightFor(r.plan, r.rate_tier),
-        liveRuns: this.liveRunsFor(r.id),
+        liveRuns: Math.max(0, this.liveRunsFor(r.id) + (pending?.get(r.id) ?? 0)),
         priority: r.priority,
         resetsInMs: this.resetsInMs(sub),
         recentlyLeft: left.has(r.id),
@@ -433,14 +442,16 @@ export class SubscriptionManager {
   }
 
   /** What the subscription a session is on now is worth, to compare a proposed move against. */
-  scoreOf(id: string): number {
+  scoreOf(id: string, pending?: ReadonlyMap<string, number>): number {
     const r = this.row(id);
     if (!r) return 0;
     const sub = this.dto(r);
     return subscriptionScore({
       headroom: sub.headroom,
       fullHeadroom: weightFor(r.plan, r.rate_tier),
-      liveRuns: Math.max(0, this.liveRunsFor(id) - 1), // not counting the session asking
+      // Not counting the session asking, and counting whatever a rebalance in progress has already
+      // sent here or taken away: staying put gets better as the neighbours leave.
+      liveRuns: Math.max(0, this.liveRunsFor(id) - 1 + (pending?.get(id) ?? 0)),
       priority: r.priority,
       resetsInMs: this.resetsInMs(sub),
       recentlyLeft: false,

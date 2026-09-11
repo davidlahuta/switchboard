@@ -259,7 +259,9 @@ export type RespawnTrigger =
   /** it had stopped on a limit and somewhere got its capacity back */
   | 'rescue'
   /** its terminal died without anybody asking it to, and it is being brought back */
-  | 'revive';
+  | 'revive'
+  /** an operator asked for the whole desk to be spread out again, and this was one of the moves */
+  | 'rebalance';
 
 export interface Swap {
   fromSubscriptionId: string | null;

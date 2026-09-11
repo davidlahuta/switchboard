@@ -158,7 +158,13 @@ From there you can:
   rather than shown a frame drawn for other dimensions. The browser then follows the desktop
   terminal until you ask it to fit again.
 - **Relaunch** it in a new terminal, or give every session one at once from Settings → *All sessions*, alongside
-  *Restart claude in every session*. Both are queued per session, so pressing either on a working desk interrupts
+  *Restart claude in every session* and *Rebalance subscriptions* — which looks at the whole desk in one pass and
+  moves the sessions that would be clearly better off elsewhere. Swapping them one at a time from their own menus
+  cannot do the same thing: each of those answers is given as though it were the only session moving, so every one
+  of them names the same emptiest subscription and they all pile onto it. A rebalance counts its own moves as it
+  makes them — worst-placed session first, each destination worth less once it has been given one, each source
+  worth more to the sessions left on it — and asks the same margin a proactive swap does before moving anything at
+  all. Both are queued per session, so pressing either on a working desk interrupts
   nothing. A restart in place reuses the window Switchboard opened, which
   hosts part of Switchboard itself, so it keeps running the code it started with; sessions in that
   state are badged *old host*. You rarely have to ask for it: a session badged that way gets a new

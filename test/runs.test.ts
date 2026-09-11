@@ -428,6 +428,27 @@ describe('choosing where to put a session', () => {
     assert.ok(subscriptionScore({ ...base, recentlyLeft: true }) < subscriptionScore(base));
   });
 
+  /*
+   * What a rebalance has that a loop of single swaps does not: each move is counted before the next
+   * session is asked. Without it every session on the desk is told the same emptiest subscription,
+   * because a swap is queued behind its own turn and the live counts do not move for minutes.
+   */
+  it('stops a whole desk being sent to the same empty subscription', () => {
+    const roomy = { ...base, headroom: 1.0 };
+    const second = { ...base, headroom: 0.7 };
+    assert.ok(subscriptionScore(roomy) > subscriptionScore(second), 'the first session goes to the roomiest');
+    // Having just been given one, it is worth less to the next session than the runner-up.
+    const afterOne = subscriptionScore({ ...roomy, liveRuns: roomy.liveRuns + 1 });
+    assert.ok(afterOne < subscriptionScore(second), 'the second session goes somewhere else');
+  });
+
+  it('makes staying put worth more as the neighbours leave', () => {
+    // The other half of the same bookkeeping: a subscription a rebalance has taken a session off is
+    // a better place for the sessions still on it, so they are not moved on numbers already stale.
+    const crowded = { ...base, liveRuns: 3 };
+    assert.ok(subscriptionScore({ ...crowded, liveRuns: 2 }) > subscriptionScore(crowded));
+  });
+
   it('asks for a real improvement before moving a session at all', () => {
     // Marginally better is not worth a turn and a resume, and it only has to be moved back later.
     const staying = subscriptionScore(base);
