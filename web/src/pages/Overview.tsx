@@ -66,7 +66,7 @@ export function Overview({ state }: { state: StateSnapshot }) {
         </div>
       </div>
 
-      <BurnPanel burn={state.burn} now={now} />
+      <BurnPanel burn={state.burn} subs={state.subscriptions} now={now} />
 
       <Section
         title="Subscriptions"

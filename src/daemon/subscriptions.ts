@@ -10,6 +10,7 @@ import type { BurnForecast, Subscription, SubscriptionKind, SubscriptionStatus, 
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, mcpServerEntry, readJson, writeJson } from './claude.ts';
 import { forecast, pointsFor } from './burn.ts';
+import { scopedBinds } from '../shared/limits.ts';
 import { bool, type Db, now } from './db.ts';
 import type { Launcher } from './launcher.ts';
 import { getSettings } from './settings.ts';
@@ -69,6 +70,18 @@ interface SubRow {
   last_error: string | null;
   usage_json: string | null;
   created_at: string;
+}
+
+/** What a session needs weighed up before it is put somewhere. */
+export interface PickOptions {
+  /** the subscription it is on now, which is not a destination */
+  exclude?: string | null;
+  /** the session being placed, so where it has just been counts against going back */
+  runId?: string;
+  /** it has already stopped, so the threshold that keeps a working session put does not apply */
+  atLimit?: boolean;
+  /** what it runs, so a weekly window scoped to another model does not stand in its way */
+  model?: string | null;
 }
 
 interface Credentials {
@@ -334,7 +347,8 @@ export class SubscriptionManager {
    * `runId` lets the session's own history count: a subscription it has just been moved off is not
    * somewhere to send it straight back to.
    */
-  rank(excludeId?: string | null, runId?: string, atLimit = false): { row: SubRow; score: number } | null {
+  rank(opts: PickOptions = {}): { row: SubRow; score: number } | null {
+    const { exclude: excludeId, runId, atLimit = false, model = null } = opts;
     // A session that is already stopped is not weighing a move against staying — it has nothing to
     // stay on. So the proactive threshold steps aside and only a spent subscription is refused.
     const threshold = atLimit ? SPENT_PCT : getSettings(this.db).swapThresholdPct;
@@ -347,12 +361,13 @@ export class SubscriptionManager {
       const used = Math.max(sub.usage?.fiveHour?.pct ?? ASSUMED_PCT, sub.usage?.sevenDay?.pct ?? ASSUMED_PCT);
       if (used >= Math.min(SPENT_PCT, threshold)) continue;
       /*
-       * A model-scoped weekly window stops the session just as dead as the account-wide ones, and
-       * it is not part of either of them: a subscription can read 70% overall while the model the
-       * session actually runs on has nothing left. Moving a session onto that is a swap that buys a
-       * limit, so a spent scoped window takes the subscription out of the running.
+       * A weekly window scoped to one model is a second ceiling under the account-wide week, not a
+       * share of it: spending on that model counts against both, and spending on any other model
+       * counts against the seven-day window alone. So it takes a subscription out of the running
+       * only for a session that actually runs that model — reading it as usage in general is how a
+       * desk with most of its week still in hand refuses to place anything.
        */
-      const scoped = sub.usage?.scoped?.find((w) => w.pct >= SPENT_PCT);
+      const scoped = sub.usage?.scoped?.find((w) => w.pct >= SPENT_PCT && scopedBinds(w.label, model));
       if (scoped) continue;
       const score = subscriptionScore({
         // Numbers nobody could refresh are a guess about the present, and the usage endpoint goes
@@ -371,24 +386,24 @@ export class SubscriptionManager {
     return best;
   }
 
-  pickBest(excludeId?: string | null, runId?: string, atLimit = false): SubRow | null {
-    return this.rank(excludeId, runId, atLimit)?.row ?? null;
+  pickBest(opts: PickOptions = {}): SubRow | null {
+    return this.rank(opts)?.row ?? null;
   }
 
   /**
-   * How much of the binding window a subscription has spent, or the assumption when nothing is
-   * known. Model-scoped weekly windows count too: whichever ceiling is closest is the one that
-   * decides whether a session can work here.
+   * How much of the binding window a subscription has spent for a session running `model`, or the
+   * assumption when nothing is known.
+   *
+   * The account-wide windows always bind. A model-scoped week binds only a session on that model —
+   * for anything else it is somebody else's ceiling, and counting it would make a subscription look
+   * spent to a session that could work there all day.
    */
-  usedPct(id: string): number {
+  usedPct(id: string, model: string | null = null): number {
     const r = this.row(id);
     const usage = r ? this.dto(r).usage : null;
     if (!usage) return ASSUMED_PCT;
-    return Math.max(
-      usage.fiveHour?.pct ?? ASSUMED_PCT,
-      usage.sevenDay?.pct ?? ASSUMED_PCT,
-      ...(usage.scoped ?? []).map((w) => w.pct),
-    );
+    const mine = (usage.scoped ?? []).filter((w) => scopedBinds(w.label, model)).map((w) => w.pct);
+    return Math.max(usage.fiveHour?.pct ?? ASSUMED_PCT, usage.sevenDay?.pct ?? ASSUMED_PCT, ...mine);
   }
 
   /** What the subscription a session is on now is worth, to compare a proposed move against. */

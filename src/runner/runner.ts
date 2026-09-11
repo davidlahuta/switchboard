@@ -223,7 +223,7 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     }
     lastLimitReport = Date.now();
     tail = '';
-    send({ type: 'limit-detected', text: found.text });
+    send({ type: 'limit-detected', text: found.text, cause: found.cause });
   };
 
   const spawnChild = (s: SpawnSpec): void => {

@@ -3332,3 +3332,13 @@ a.list-main:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+.burn-scoped {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.burn-scoped strong {
+  color: var(--text-2);
+  font-weight: 600;
+}

@@ -6,6 +6,7 @@ import { DAEMON_URL, HOME_CLAUDE_DIR } from '../config.ts';
 import { logger } from '../log.ts';
 import { tabTitle } from '../shared/marks.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
+import { type LimitCause, scopedBinds } from '../shared/limits.ts';
 import { readyForRespawn } from '../shared/respawn.ts';
 import type {
   AgentStatus,
@@ -731,7 +732,7 @@ export class RunManager {
 
   private resolveSubscription(ref: string, exclude?: string | null, runId?: string, atLimit = false): string {
     if (ref === 'auto') {
-      const best = this.subs.pickBest(exclude, runId, atLimit);
+      const best = this.subs.pickBest({ exclude, runId, atLimit, model: runId ? this.modelOf(runId) : null });
       if (!best) throw httpError(409, 'No enabled, logged-in subscription with headroom is available.');
       return best.id;
     }
@@ -1025,7 +1026,7 @@ export class RunManager {
         if (!msg.intentional && !this.stopping.has(runId)) this.scheduleRevive(r, `it exited on its own (${msg.code})`);
         break;
       case 'limit-detected':
-        this.onLimit(r.session_id, msg.text, 'pty');
+        this.onLimit(r.session_id, msg.text, 'pty', msg.cause);
         break;
       default:
         break;
@@ -1191,6 +1192,16 @@ export class RunManager {
       this.operatorUnread = { at: Date.now(), by: this.coord.humanUnreadBySession() };
     }
     return this.operatorUnread.by.get(sessionId) ?? 0;
+  }
+
+  /**
+   * The model a session runs, as far as anything here knows: its own override, else the default a
+   * new session would be started with. Null when neither says — claude's own default, which is not
+   * something to hold a scoped weekly window against.
+   */
+  private modelOf(runId: string): string | null {
+    const r = this.row(runId);
+    return r?.model ?? getSettings(this.db).defaultModel ?? null;
   }
 
   private busy(r: RunRow): boolean {
@@ -1683,7 +1694,7 @@ export class RunManager {
     if (sub) this.maybeProactive(sub, [r]);
   }
 
-  onLimit(sessionId: string, detail: string, source: 'hook' | 'pty'): void {
+  onLimit(sessionId: string, detail: string, source: 'hook' | 'pty', cause: LimitCause = 'window'): void {
     const r = this.bySession(sessionId);
     if (!r || r.status === 'exited') return;
     if (Date.now() - (this.lastLimit.get(r.id) ?? 0) < LIMIT_DEBOUNCE_MS) return;
@@ -1726,10 +1737,19 @@ export class RunManager {
         return;
       }
       if (this.respawnedRecently(r.id) !== null) return;
-      if (source === 'pty') {
-        // Text detection is a fallback; make sure the subscription really is at its limit.
+      if (source === 'pty' && cause === 'window') {
+        /*
+         * Text detection is a fallback, so a window limit is checked against the numbers before it
+         * is acted on. A spend cap cannot be: it is the account's own ceiling on what it will pay
+         * for beyond the plan, the usage endpoint says nothing about it, and checking one here
+         * would throw away every report of it — which is how a session sat stopped from one in the
+         * morning until seven with its windows full and nothing to spend them on.
+         */
         const u = sub?.usage;
-        const used = Math.max(u?.fiveHour?.pct ?? 0, u?.sevenDay?.pct ?? 0, ...(u?.scoped ?? []).map((w) => w.pct));
+        // The same rule the placement uses: this session's own ceilings, not every ceiling there is.
+        const model = this.modelOf(r.id);
+        const mine = (u?.scoped ?? []).filter((w) => scopedBinds(w.label, model)).map((w) => w.pct);
+        const used = Math.max(u?.fiveHour?.pct ?? 0, u?.sevenDay?.pct ?? 0, ...mine);
         if (u && !u.stale && used < 90) {
           log.info('a limit on screen that the numbers do not agree with', { run: r.id, subscription: subAtLimit, used, detail });
           this.lastLimit.delete(r.id);
@@ -1796,10 +1816,11 @@ export class RunManager {
       // that is still just as stuck.
       if (!own?.usage || own.usage.stale) continue;
       const canMove = settings.autoSwap && bool(r.auto_swap);
-      const best = canMove ? this.subs.rank(r.subscription_id, r.id, true) : null;
+      const model = this.modelOf(r.id);
+      const best = canMove ? this.subs.rank({ exclude: r.subscription_id, runId: r.id, atLimit: true, model }) : null;
       const decision = rescueDecision({
-        ownUsedPct: this.subs.usedPct(r.subscription_id),
-        bestElsewherePct: best ? this.subs.usedPct(best.row.id) : null,
+        ownUsedPct: this.subs.usedPct(r.subscription_id, model),
+        bestElsewherePct: best ? this.subs.usedPct(best.row.id, model) : null,
         threshold: settings.swapThresholdPct,
       });
       if (decision === 'wait') continue;
@@ -1847,7 +1868,7 @@ export class RunManager {
        * candidate has to be clearly better than staying, counting where this session has already
        * been so a pair of subscriptions cannot pass it between them.
        */
-      const best = this.subs.rank(r.subscription_id, r.id);
+      const best = this.subs.rank({ exclude: r.subscription_id, runId: r.id, model: this.modelOf(r.id) });
       if (!best) continue;
       const staying = this.subs.scoreOf(r.subscription_id);
       if (best.score < staying * SWAP_MARGIN) continue;
