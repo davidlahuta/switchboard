@@ -187,7 +187,9 @@ function fmtUnits(n: number): string {
 
 function SubUsageCard({ sub, now, rank }: { sub: Subscription; now: number; rank: number }) {
   const u = sub.usage;
-  const usable = sub.enabled && sub.status === 'ready';
+  // The same answer the daemon gives: a subscription signed into another account has headroom
+  // that belongs to that account, so this card shows none and says why instead.
+  const usable = sub.enabled && sub.status === 'ready' && !sub.accountMismatch;
   return (
     <a className={sub.enabled ? 'card sub-card' : 'card sub-card disabled'} href={href.subscriptions()}>
       <div className="card-head">
@@ -206,7 +208,11 @@ function SubUsageCard({ sub, now, rank }: { sub: Subscription; now: number; rank
         <span className="sub-headroom-label">of {fmtUnits(sub.weight)} units free</span>
       </div>
       <div className="card-meta">
-        {sub.status !== 'ready' ? (
+        {sub.accountMismatch ? (
+          <Badge tone="crit" title={`This subscription is for ${sub.email}, but its token is for ${sub.accountEmail}. These numbers are ${sub.accountEmail}'s.`}>
+            wrong account
+          </Badge>
+        ) : sub.status !== 'ready' ? (
           <Badge tone={sub.status === 'error' ? 'crit' : 'warn'}>{subStatusLabel(sub.status)}</Badge>
         ) : !sub.enabled ? (
           <Badge tone="muted">disabled</Badge>

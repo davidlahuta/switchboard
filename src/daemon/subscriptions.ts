@@ -55,12 +55,25 @@ const BURN_CACHE_MS = 30_000;
 const BURN_LOOKBACK_H = 6;
 const LOGIN_WATCH_MS = 20 * 60_000;
 
+/**
+ * Whether a subscription's token belongs to an account other than the one it is for.
+ *
+ * Both have to be known to say anything: a subscription created without an address is for whatever
+ * it was logged into, and one that has not been polled yet has nothing to compare. Addresses are
+ * compared case-blind because that is how they are issued and not how they are typed.
+ */
+export function accountMismatch(configured: string | null, account: string | null): boolean {
+  if (!configured || !account) return false;
+  return configured.trim().toLowerCase() !== account.trim().toLowerCase();
+}
+
 interface SubRow {
   id: string;
   label: string;
   kind: SubscriptionKind;
   config_dir: string;
   email: string | null;
+  account_email: string | null;
   display_name: string | null;
   plan: string | null;
   rate_tier: string | null;
@@ -246,7 +259,15 @@ export class SubscriptionManager {
       usage = null;
     }
     const weight = weightFor(r.plan, r.rate_tier);
-    const usable = bool(r.enabled) && r.status === 'ready';
+    /*
+     * A subscription signed into the wrong account is not a subscription with a cosmetic label
+     * problem. Its usage is another account's usage, so its headroom is a number about somebody
+     * else — and when the account it is really on is also here under its own name, the desk sees
+     * one pool twice and spreads work across it as though there were two. Nothing is chosen from a
+     * subscription in that state until it is logged in again or renamed to what it is.
+     */
+    const mismatch = accountMismatch(r.email, r.account_email);
+    const usable = bool(r.enabled) && r.status === 'ready' && !mismatch;
     const { headroom, bindingWindow } = headroomOf(usage, weight);
     return {
       id: r.id,
@@ -254,6 +275,8 @@ export class SubscriptionManager {
       kind: r.kind,
       configDir: r.config_dir,
       email: r.email,
+      accountEmail: r.account_email,
+      accountMismatch: mismatch,
       displayName: r.display_name,
       plan: r.plan,
       rateTier: r.rate_tier,
@@ -291,7 +314,10 @@ export class SubscriptionManager {
     const subs = [];
     for (const r of this.rows()) {
       const dto = this.dto(r);
-      if (!dto.enabled || dto.status !== 'ready') continue;
+      // A subscription on the wrong account is left out for the same reason it is never chosen: its
+      // history is the other account's history, and pooling it adds a plan's worth of capacity that
+      // does not exist — twice over, when that account is also here under its own name.
+      if (!dto.enabled || dto.status !== 'ready' || dto.accountMismatch) continue;
       const history = this.history(r.id, BURN_LOOKBACK_H);
       subs.push({
         id: r.id,
@@ -727,7 +753,13 @@ export class SubscriptionManager {
         this.watchers.delete(id);
         await this.refreshIdentity(id);
         const s = this.get(id);
-        this.bus.toast('info', `Logged in: ${s?.label} (${s?.email ?? 'unknown account'})`);
+        // The gate on a new subscription: it is not "logged in" until it is logged into the right
+        // account, and saying so here is the one moment the person who typed the address is watching.
+        if (s?.accountMismatch) {
+          this.bus.toast('error', `${s.label}: signed in as ${s.accountEmail}, not ${s.email}. Log in again with the right account, or rename it.`);
+        } else {
+          this.bus.toast('info', `Logged in: ${s?.label} (${s?.accountEmail ?? 'unknown account'})`);
+        }
       } catch {
         // not yet
       }
@@ -823,10 +855,31 @@ export class SubscriptionManager {
         const res = await this.oauthGet(token, '/api/oauth/profile');
         if (res.ok && this.db.open) {
           const p = (await res.json()) as { account?: { email?: string; display_name?: string; full_name?: string } };
-          const email = p.account?.email ?? null;
-          this.db.run('UPDATE subscriptions SET email = COALESCE(?, email), display_name = ? WHERE id = ?', email, p.account?.display_name ?? p.account?.full_name ?? null, id);
-          const dup = email ? this.db.get<{ label: string }>('SELECT label FROM subscriptions WHERE id <> ? AND lower(email) = lower(?)', id, email) : undefined;
-          if (dup) {
+          const account = p.account?.email ?? null;
+          /*
+           * What the token says goes in its own column, and the account this subscription is for is
+           * only filled in from it when nothing said otherwise. Writing one over the other is what
+           * let a subscription quietly become the account it was mistakenly logged into.
+           */
+          this.db.run(
+            'UPDATE subscriptions SET account_email = COALESCE(?, account_email), email = COALESCE(email, ?), display_name = ? WHERE id = ?',
+            account,
+            account,
+            p.account?.display_name ?? p.account?.full_name ?? null,
+            id,
+          );
+          const fresh = this.row(id);
+          const wrong = fresh ? accountMismatch(fresh.email, fresh.account_email) : false;
+          if (wrong && fresh) {
+            const msg = `Signed in as ${fresh.account_email}, but this subscription is for ${fresh.email}.`;
+            this.db.run('UPDATE subscriptions SET last_error = ? WHERE id = ?', msg, id);
+            this.bus.toast('warn', `${r.label}: ${msg}`);
+          }
+          // Two labels, one account: each one's usage is the same pool, so neither is a second one.
+          const dup = account
+            ? this.db.get<{ label: string }>('SELECT label FROM subscriptions WHERE id <> ? AND lower(account_email) = lower(?)', id, account)
+            : undefined;
+          if (dup && !wrong) {
             this.db.run('UPDATE subscriptions SET last_error = ? WHERE id = ?', `Same account as "${dup.label}"`, id);
             this.bus.toast('warn', `${r.label} is logged into the same account as ${dup.label}.`);
           }

@@ -304,6 +304,8 @@ export class Coordinator {
   private readonly replacing = new Map<string, { startedAt: string; readThrough: number }>();
   /** Whether a session Switchboard hosts has ended. Unhosted sessions answer false: not "alive". */
   private sessionGone: (sessionId: string) => boolean = () => false;
+  /** Told when the sweep gives up on work, since nothing else will say that it ended. */
+  private workSwept: (sessionId: string) => void = () => {};
 
   constructor(db: Db, bus: Bus) {
     this.db = db;
@@ -320,6 +322,18 @@ export class Coordinator {
    */
   setSessionGone(fn: (sessionId: string) => boolean): void {
     this.sessionGone = fn;
+  }
+
+  /**
+   * Tell RunManager when work is given up on rather than finished.
+   *
+   * Every other way work ends arrives as a hook, and a hook is what anything waiting behind it
+   * listens for. This one does not: the sweep is the daemon noticing that nothing has been heard
+   * for half an hour, and a session whose last subagent ends that way would otherwise keep a
+   * respawn queued behind work that no longer exists, and keep drawing the mark for it.
+   */
+  setWorkSwept(fn: (sessionId: string) => void): void {
+    this.workSwept = fn;
   }
 
   /**
@@ -656,11 +670,14 @@ export class Coordinator {
 
   /** Work whose end was never announced, given up on so it cannot hold a session for ever. */
   private sweepWork(): void {
+    const touched = new Set<string>();
     for (const r of this.db.all<WorkRow>('SELECT * FROM session_work WHERE ended_at IS NULL')) {
       if (Date.now() - Date.parse(r.last_seen) < WORK_SILENT_MS[r.kind]) continue;
       this.workEnded(r.id, 'no sign of life');
+      touched.add(r.session_id);
       log.info('gave up on session work that went silent', { session: r.session_id, kind: r.kind, id: r.id });
     }
+    for (const sessionId of touched) this.workSwept(sessionId);
   }
 
   /**

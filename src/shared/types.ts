@@ -31,7 +31,16 @@ export interface Subscription {
   label: string;
   kind: SubscriptionKind;
   configDir: string;
+  /** The account this subscription is for: what was typed when it was created. */
   email: string | null;
+  /** The account its token actually belongs to, as the profile endpoint reports it. */
+  accountEmail: string | null;
+  /**
+   * Its token is for a different account than the one it is for. Nothing is chosen from it while
+   * that is true: its usage is another account's usage, and if that account is also here under its
+   * own name, the two of them are one pool being counted twice.
+   */
+  accountMismatch: boolean;
   displayName: string | null;
   /** 'max' | 'pro' | 'team' | ... as reported by the credentials */
   plan: string | null;

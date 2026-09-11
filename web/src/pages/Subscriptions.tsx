@@ -135,12 +135,20 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
             </Badge>
             {sub.kind === 'default' && <Badge tone="muted">~/.claude</Badge>}
             <Badge tone={sub.status === 'ready' ? 'ok' : sub.status === 'error' ? 'crit' : 'warn'}>{subStatusLabel(sub.status)}</Badge>
+            {sub.accountMismatch && (
+              <Badge tone="crit" title={`Its token is for ${sub.accountEmail}. Nothing is started on it while that is true.`}>
+                wrong account
+              </Badge>
+            )}
             <StaleBadge usage={u} now={now} />
             {sub.liveRuns > 0 && <Badge tone="accent">{sub.liveRuns} live</Badge>}
           </div>
           <div className="sub-account">
-            {sub.email ?? <span className="dim">no account yet</span>}
-            {sub.displayName && sub.displayName !== sub.email && <span className="dim"> · {sub.displayName}</span>}
+            {/* The account it is signed into is the one whose usage these bars are, so that is the
+                one on the face of the card; what it is meant to be only shows when they differ. */}
+            {sub.accountEmail ?? sub.email ?? <span className="dim">no account yet</span>}
+            {sub.accountMismatch && <span className="dim"> · for {sub.email}</span>}
+            {sub.displayName && sub.displayName !== (sub.accountEmail ?? sub.email) && <span className="dim"> · {sub.displayName}</span>}
           </div>
         </div>
         <div className="sub-controls">
@@ -174,6 +182,17 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
           account you want for this subscription.{' '}
           <button type="button" className="link-btn" onClick={() => void relogin()}>
             Re-open login window
+          </button>
+        </div>
+      )}
+      {sub.accountMismatch && (
+        <div className="callout callout-crit">
+          This subscription is for <strong>{sub.email}</strong>, but the token in its profile belongs to{' '}
+          <strong>{sub.accountEmail}</strong>. Every number below is {sub.accountEmail}'s, so nothing is started or
+          swapped here until it is put right — log in again with the right account, or rename this subscription to the
+          account it is actually on.{' '}
+          <button type="button" className="link-btn" onClick={() => void relogin()}>
+            Log in again
           </button>
         </div>
       )}

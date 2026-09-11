@@ -42,6 +42,13 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | POST   | `/api/subscriptions/:id/refresh`       | poll usage now                         | `Subscription`   |
 | GET    | `/api/subscriptions/:id/history?hours=48` |                                     | `UsagePoint[]`   |
 
+A `Subscription` carries two addresses. `email` is the account it is **for** — what was typed when
+it was created, and what the login window is opened with. `accountEmail` is the account its token is
+**on**, read from `/api/oauth/profile` at every login and identity refresh. When both are known and
+they differ, `accountMismatch` is true: the usage on that subscription is another account's usage,
+so its `headroom` is reported as 0, it is left out of the pooled burn forecast, and nothing is
+started or swapped onto it until it is logged in again or renamed to the account it is actually on.
+
 ## Repos & coordination
 
 | Method | Path                                  | Body                                   | Returns        |

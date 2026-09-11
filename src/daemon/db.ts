@@ -297,6 +297,22 @@ const MIGRATIONS: string[] = [
   ALTER TABLE runs ADD COLUMN stall_after TEXT;
   ALTER TABLE runs ADD COLUMN stall_tries INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Which account a subscription's token actually belongs to, kept apart from the one it is for.
+  --
+  -- These were one column, and the profile fetch wrote the token's account over it. A subscription
+  -- logged into the wrong account therefore rewrote its own expectation to match and went on
+  -- reporting that account's usage under the label of the account it was meant to be — while the
+  -- desk read two subscriptions, ranked them separately, and spread work across what was one pool
+  -- counted twice. The usage was never wrong; it was answering about somebody else.
+  ALTER TABLE subscriptions ADD COLUMN account_email TEXT;
+  UPDATE subscriptions SET account_email = email WHERE email IS NOT NULL;
+  -- For rows written before the two were told apart, the label is the only surviving statement of
+  -- which account the operator meant, so it is read back where it looks like an address.
+  UPDATE subscriptions
+     SET email = lower(substr(label, 1, instr(label || ' ', ' ') - 1))
+   WHERE lower(substr(label, 1, instr(label || ' ', ' ') - 1)) LIKE '%_@_%._%';
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;
