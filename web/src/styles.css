@@ -3373,3 +3373,151 @@ a.list-main:hover {
   color: var(--text-2);
   font-weight: 600;
 }
+
+/*
+ * Sessions, one line each.
+ *
+ * A desk runs nine of these and a phone shows one screen, so the row carries what changes — the
+ * mark, the name, what it is doing, and the few actions worth taking on a session you are only
+ * glancing at. Everything that does not change minute to minute is behind the disclosure, which is
+ * also why the row can afford to be this short.
+ */
+.srows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.srow + .srow {
+  border-top: 1px solid var(--border);
+}
+.srow-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px 5px 4px;
+  min-height: 38px;
+  cursor: pointer;
+}
+.srow-head:hover {
+  background: var(--surface-2);
+}
+.srow-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.srow-toggle:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.srow .session-name,
+.srow .rename-wrap {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+/* The live half: what it is doing right now, and nothing that sits still. */
+.srow-live {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.srow-live .run-tags {
+  display: flex;
+  gap: 5px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.srow-time {
+  flex: none;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.srow-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.srow-actions .btn > span:not(.sr-only) {
+  display: none;
+}
+.srow-actions .btn-icon,
+.srow-actions .btn-sm {
+  padding: 4px 6px;
+  min-height: 28px;
+}
+.srow-detail {
+  padding: 2px 12px 12px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.srow-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+.srow-facts dt {
+  color: var(--muted);
+  font-weight: 550;
+}
+.srow-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 820px) {
+  /* Two lines rather than one: the name and its actions, then what it is doing underneath. */
+  .srow-head {
+    flex-wrap: wrap;
+    row-gap: 4px;
+    padding: 6px 8px 6px 2px;
+  }
+  .srow .session-name,
+  .srow .rename-wrap {
+    flex: 1 1 auto;
+  }
+  .srow-live {
+    order: 3;
+    flex-basis: 100%;
+    padding-left: 24px;
+  }
+  .srow-time {
+    order: 2;
+  }
+  .srow-actions .btn-sm,
+  .srow-actions .btn-icon {
+    min-height: 34px;
+    padding: 6px 8px;
+  }
+  .srow-detail {
+    padding-left: 10px;
+  }
+  .srow-facts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0 0;
+  }
+  .srow-facts dt {
+    margin-top: 6px;
+  }
+}
