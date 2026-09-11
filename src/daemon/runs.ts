@@ -2028,6 +2028,30 @@ export class RunManager {
     this.markStalled(r, reason);
   }
 
+  /**
+   * A session that has stopped on a limit has no work left running, so say so.
+   *
+   * A subagent is not a separate claim on the account — it is the same one — so when the session
+   * runs out, so have they, and none of them will ever send the SubagentStop that says so. Left in
+   * the table they are ghosts, and the first thing they do is hold up the swap the limit is asking
+   * for: the respawn falls due, sees a subagent, and waits politely for work that died with the
+   * turn. One session sat on a spent subscription for half an hour that way.
+   *
+   * Gated on the session being *marked* limited rather than on a limit having been seen, and the
+   * difference matters. A limit is marked when Claude Code reports it through StopFailure, or when
+   * a window limit read off the screen is corroborated by usage that is genuinely spent — both of
+   * which mean nothing on that account can run. A spend cap read off the screen means no such
+   * thing: it may be a subagent's own failure while the parent carries on, and it was — a subagent
+   * three seconds old was written off that way, and the session started another one half a second
+   * later. Losing track of a live subagent is how a respawn takes a session out from under one.
+   */
+  private dropWorkOfStoppedSession(sessionId: string): number {
+    if (this.coord.agent(sessionId)?.status !== 'limited') return 0;
+    const dead = this.coord.endSessionWork(sessionId, 'the session stopped on a usage limit');
+    if (dead) this.onWorkSettled(sessionId);
+    return dead;
+  }
+
   onLimit(sessionId: string, detail: string, source: 'hook' | 'pty', cause: LimitCause = 'window'): void {
     const r = this.bySession(sessionId);
     if (!r || r.status === 'exited') return;
@@ -2042,10 +2066,10 @@ export class RunManager {
      */
     const already = this.pendingRespawn.get(r.id);
     if (already?.kind === 'swap' && already.trigger === 'limit') {
-      // Not news, but still evidence: the session is at the limit as we speak, so anything the work
-      // table still credits it with died with the turn. Saying so is what lets the queued swap go.
-      const dead = this.coord.endSessionWork(sessionId, 'the session stopped on a usage limit');
-      if (dead) this.onWorkSettled(sessionId);
+      // Not news, but still evidence: if the session is marked limited then it is stopped as we
+      // speak, and anything the work table still credits it with died with the turn. Saying so is
+      // what lets the queued swap go.
+      const dead = this.dropWorkOfStoppedSession(sessionId);
       log.info('the limit is already answered and the swap for it is still queued', { run: r.id, detail, cleared: dead });
       return;
     }
@@ -2115,15 +2139,7 @@ export class RunManager {
        * has to come back to it. A spend cap especially: no usage number will ever move to say it is
        * over, so the only way back is to try again later.
        */
-      /*
-       * Everything the session had running stops with it. A subagent is not a separate claim on the
-       * account — it is the same one — so a limit that ends the parent's turn ends theirs, and they
-       * will never send the SubagentStop that says so. Left in the table they are ghosts, and the
-       * first thing they do is hold up the swap this very limit is asking for: the respawn falls
-       * due, sees a subagent, and politely waits for work that died twenty minutes ago.
-       */
-      const stopped = this.coord.endSessionWork(sessionId, 'the session stopped on a usage limit');
-      if (stopped) this.onWorkSettled(sessionId);
+      this.dropWorkOfStoppedSession(sessionId);
       this.markStalled(this.row(r.id) ?? r, cause === 'spend' ? 'a spend cap' : 'rate_limit');
       const settings = getSettings(this.db);
       if (!settings.autoSwap || !bool(r.auto_swap)) {
