@@ -38,6 +38,12 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
 **Subscriptions and sessions**
 
 - Each subscription gets its own isolated `CLAUDE_CONFIG_DIR` profile. Transcripts, plugins, skills and settings are shared with `~/.claude`.
+- A subscription knows which account it is **for** as well as which account it is **on**, and says so when
+  they differ. A login that lands on the wrong account is otherwise invisible: the usage that comes back is
+  real, it is simply somebody else's, and where both accounts are on the desk one pool gets ranked twice and
+  work is spread across capacity that does not exist. Such a subscription is badged *wrong account*, reports
+  no headroom, is left out of the burn forecast and is never chosen — until you log in again or rename it to
+  what it is.
 - Live usage per subscription (5‑hour, weekly, per-model weekly) with reset countdowns and 48 h history, plus aggregate capacity across all plans.
 - Subscriptions are ranked by what you can actually use **right now**: plan size scaled by whichever window is tighter, so the one to start on is always first.
 - One-click launch into a Windows Terminal tab, optionally in a fresh worktree or resuming an older session (including one started before Switchboard existed).

@@ -408,6 +408,8 @@ export class RunManager {
   private readonly lastRescue = new Map<string, number>();
   /** Runs whose due respawn is being held for a subagent, so that is said once rather than every sweep. */
   private readonly subagentHeld = new Set<string>();
+  /** When the drain first saw a queued session free, so "ready" has to hold rather than flicker. */
+  private readonly readySince = new Map<string, number>();
   /** Runs the operator has asked to stop, so the death that follows is not treated as an accident. */
   private readonly stopping = new Set<string>();
   /** When each run was last taken down and brought back, so nothing takes it again mid-flight. */
@@ -629,29 +631,59 @@ export class RunManager {
    */
   drainPending(): void {
     for (const [runId, plan] of [...this.pendingRespawn]) {
-      if (plan.deadline === null || Date.now() < plan.deadline) continue;
       const r = this.row(runId);
       if (!r || r.status === 'exited') {
         this.pendingRespawn.delete(runId);
         this.savePending(runId, null);
+        this.readySince.delete(runId);
         continue;
       }
       /*
-       * A deadline exists to stop a session waiting for a turn that never ends, and a subagent is
-       * not that: it announces its own end, and what it has spent is lost with it. So the deadline
-       * gives way to a live subagent — up to a bound, because a SubagentStop that never arrives
-       * must not turn a bounded wait into an unbounded one.
+       * There are two ways a queued respawn comes due, and only one of them is an event.
+       *
+       * The ordinary way is a hook: the Stop that ends the turn, or the SubagentStop that ends the
+       * last thing the session had running. Both are prompt and both are how this normally happens.
+       * Neither is promised, though — work whose end is never announced is given up on by a sweep
+       * rather than by a hook, and a session can go quiet for hours without ending another turn —
+       * and a plan with no deadline has nothing else to fall back on. A relaunch asked for by hand
+       * sat queued for four hours that way. So this tick asks the question too: a session that is
+       * simply ready, and has stayed ready, is taken here.
+       *
+       * Ready for a moment is not ready: a subagent finishing is normally followed within seconds
+       * by the session waking up to read its report, and a respawn landing in that gap throws away
+       * the result the wait was for. Hence the same settle window onWorkSettled uses, measured from
+       * when this loop first saw the session free rather than from any one event.
        */
-      if (this.coord.liveSubagents(r.session_id) > 0 && Date.now() < plan.deadline + SUBAGENT_GRACE_MS) {
-        if (!this.subagentHeld.has(runId)) {
-          this.subagentHeld.add(runId);
-          log.info('holding a due respawn while a subagent finishes', { run: runId, kind: plan.kind });
-          this.bus.toast('info', `${r.name}: ${plan.kind} is due, but a subagent is still running — waiting for it.`);
+      const free = !this.busy(r) && this.respawnedRecently(runId) === null;
+      if (!free) this.readySince.delete(runId);
+      else if (!this.readySince.has(runId)) this.readySince.set(runId, Date.now());
+      const readyAt = this.readySince.get(runId);
+      const settled = readyAt !== undefined && Date.now() - readyAt >= WORK_SETTLED_MS;
+      const due = plan.deadline !== null && Date.now() >= plan.deadline;
+      if (!settled) {
+        if (!due) continue;
+        /*
+         * A deadline exists to stop a session waiting for a turn that never ends, and a subagent is
+         * not that: it announces its own end, and what it has spent is lost with it. So the deadline
+         * gives way to a live subagent — up to a bound, because a SubagentStop that never arrives
+         * must not turn a bounded wait into an unbounded one.
+         */
+        if (this.coord.liveSubagents(r.session_id) > 0 && Date.now() < plan.deadline! + SUBAGENT_GRACE_MS) {
+          if (!this.subagentHeld.has(runId)) {
+            this.subagentHeld.add(runId);
+            log.info('holding a due respawn while a subagent finishes', { run: runId, kind: plan.kind });
+            this.bus.toast('info', `${r.name}: ${plan.kind} is due, but a subagent is still running — waiting for it.`);
+          }
+          continue;
         }
-        continue;
       }
       this.subagentHeld.delete(runId);
-      log.info('respawning on deadline', { run: runId, kind: plan.kind, waitedMs: Date.now() - plan.queuedAt });
+      this.readySince.delete(runId);
+      log.info(settled ? 'taking a queued respawn: the session is ready' : 'respawning on deadline', {
+        run: runId,
+        kind: plan.kind,
+        waitedMs: Date.now() - plan.queuedAt,
+      });
       try {
         this.executeRespawn(r, plan);
       } catch (err) {
