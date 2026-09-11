@@ -321,6 +321,20 @@ export function respawnGuard(input: { lastRespawnAt: number | null; now: number;
  * else. That is true whoever asked — an operator, an update, a swap made on a usage limit — so the
  * question is asked here, once, for all of them.
  */
+/**
+ * The sooner of two deadlines, where null means "however long the turn takes".
+ *
+ * Used when a queued respawn is replaced by another: the replacement inherits the patience already
+ * running rather than starting it again. One limit is read off the screen many times — Claude Code
+ * reprints the banner as it retries, and a terminal repaints — and each reading used to restart the
+ * clock on the swap the first one asked for.
+ */
+export function earlierDeadline(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+
 export function respawnPlacement(input: { kind: RespawnKind; staleHost: boolean; fresh?: boolean }): 'new-terminal' | 'in-place' {
   return input.kind === 'relaunch' || input.staleHost || input.fresh === true ? 'new-terminal' : 'in-place';
 }
@@ -1576,15 +1590,20 @@ export class RunManager {
       return this.dto(r);
     }
     if (!force && this.busy(r)) {
-      this.pendingRespawn.set(r.id, plan);
-      this.savePending(r.id, plan);
+      // Replacing a plan that is already waiting does not restart its clock: whatever asked first
+      // set the patience, and asking again — the same limit, read off the screen a second time —
+      // is not a reason to give the session longer. See earlierDeadline.
+      const had = this.pendingRespawn.get(r.id);
+      const queued: PendingRespawn = had ? { ...plan, deadline: earlierDeadline(had.deadline, plan.deadline) } : plan;
+      this.pendingRespawn.set(r.id, queued);
+      this.savePending(r.id, queued);
       const what =
-        plan.kind === 'swap'
-          ? `switch to ${this.subs.row(plan.target)?.label}`
-          : plan.kind === 'relaunch'
-            ? `open a new terminal (${plan.reason})`
-            : `restart (${plan.reason})`;
-      const patience = plan.deadline ? ` (at the latest in ${Math.round((plan.deadline - Date.now()) / 60_000)} min)` : '';
+        queued.kind === 'swap'
+          ? `switch to ${this.subs.row(queued.target)?.label}`
+          : queued.kind === 'relaunch'
+            ? `open a new terminal (${queued.reason})`
+            : `restart (${queued.reason})`;
+      const patience = queued.deadline ? ` (at the latest in ${Math.round((queued.deadline - Date.now()) / 60_000)} min)` : '';
       this.bus.toast('info', `${r.name}: will ${what} when the current turn ends${patience}`);
       this.bus.invalidate('state');
       return this.dto(r);
@@ -2006,6 +2025,19 @@ export class RunManager {
     if (!r || r.status === 'exited') return;
     if (Date.now() - (this.lastLimit.get(r.id) ?? 0) < LIMIT_DEBOUNCE_MS) return;
     /*
+     * The same limit, arriving again. A limit is not an event that happens once: the banner is
+     * reprinted every time Claude Code retries and every time the terminal repaints, minutes apart,
+     * so the debounce above does not catch it. The first one queued the swap, marked the session and
+     * started both of their clocks; answering the rest only pushes those clocks back — which is how
+     * a session limited at 13:13 was still sitting there at 13:37, its swap three minutes away for
+     * the fourth time.
+     */
+    const already = this.pendingRespawn.get(r.id);
+    if (already?.kind === 'swap' && already.trigger === 'limit') {
+      log.info('the limit is already answered and the swap for it is still queued', { run: r.id, detail });
+      return;
+    }
+    /*
      * A limit seen in the terminal just after a respawn is almost always the last one, arriving
      * late or replayed by the resume — and it would be blamed on the subscription the session has
      * only just moved to. A limit reported through StopFailure is a fact about the turn that just
@@ -2071,6 +2103,15 @@ export class RunManager {
        * has to come back to it. A spend cap especially: no usage number will ever move to say it is
        * over, so the only way back is to try again later.
        */
+      /*
+       * Everything the session had running stops with it. A subagent is not a separate claim on the
+       * account — it is the same one — so a limit that ends the parent's turn ends theirs, and they
+       * will never send the SubagentStop that says so. Left in the table they are ghosts, and the
+       * first thing they do is hold up the swap this very limit is asking for: the respawn falls
+       * due, sees a subagent, and politely waits for work that died twenty minutes ago.
+       */
+      const stopped = this.coord.endSessionWork(sessionId, 'the session stopped on a usage limit');
+      if (stopped) this.onWorkSettled(sessionId);
       this.markStalled(this.row(r.id) ?? r, cause === 'spend' ? 'a spend cap' : 'rate_limit');
       const settings = getSettings(this.db);
       if (!settings.autoSwap || !bool(r.auto_swap)) {
