@@ -1391,6 +1391,11 @@ export class RunManager {
   }
 
   /** It is alive and answering, so the next death starts counting from nothing again. */
+  /** Its terminal is up and talking, so the next death starts counting from nothing again. */
+  cameBack(runId: string): void {
+    this.reviveSucceeded(runId);
+  }
+
   private reviveSucceeded(runId: string): void {
     const r = this.row(runId);
     if (!r || (r.revive_after === null && (r.revive_tries ?? 0) === 0)) return;

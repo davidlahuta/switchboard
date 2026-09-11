@@ -90,3 +90,29 @@ export function tabTitle(run: Run, name: string): string {
   const mark = sessionMark(run);
   return mark ? `${mark.glyph} ${name}` : name;
 }
+
+/**
+ * Everything about a session worth noticing a change in, as one string.
+ *
+ * The mark answers "what does it want"; this answers "is anything happening at all". A session that
+ * starts working, picks up a subagent, stalls, or has a restart queued behind it may carry the same
+ * mark throughout and still be the most interesting row on the page — which is what a glance at a
+ * list of nine sessions is for.
+ */
+export function liveState(run: Run): string {
+  return [
+    run.status,
+    run.agentStatus ?? '-',
+    run.subscriptionId,
+    run.waiting?.kind ?? '-',
+    run.stalled ? `stalled:${run.stalled.tries}` : '-',
+    (run.work ?? []).length,
+    run.attention.unread,
+    run.staleRunner ? 'old' : '-',
+  ].join('/');
+}
+
+/** How to colour a row that has just changed: the same vocabulary its mark uses. */
+export function liveTone(run: Run): MarkTone | 'quiet' {
+  return sessionMark(run)?.tone ?? 'quiet';
+}

@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import type { Run, StateSnapshot, Subscription } from '@shared/types.ts';
 import { AttentionDot, byAttention } from '../components/AttentionDot.tsx';
 import { BurnPanel } from '../components/BurnPanel.tsx';
-import { sessionMark } from '@shared/marks.ts';
+import { liveState, liveTone, sessionMark } from '@shared/marks.ts';
 import { orderOf, useReorder } from '../lib/reorder.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { PageHead } from '../components/PageHead.tsx';
@@ -21,7 +21,7 @@ export function Overview({ state }: { state: StateSnapshot }) {
   const liveRuns = state.runs.filter((r) => r.status !== 'exited').sort(byAttention);
   // Rows slide to their new places rather than jumping there; see lib/reorder.ts.
   const liveList = useRef<HTMLUListElement>(null);
-  useReorder(liveList, orderOf(liveRuns.map((r) => ({ id: r.id, mark: sessionMark(r)?.glyph ?? '' }))));
+  useReorder(liveList, orderOf(liveRuns.map((r) => ({ id: r.id, mark: sessionMark(r)?.glyph ?? '', state: liveState(r) }))));
   // Most immediately usable first: headroom already accounts for both windows and plan size.
   // Exhausted ones tie at zero, so break that by which frees up soonest — a spent 5-hour window
   // is back in hours, a spent weekly one in days.
@@ -224,7 +224,13 @@ function SubUsageCard({ sub, now, rank }: { sub: Subscription; now: number; rank
 function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
   const repo = run.repoId ? state.repos.find((r) => r.id === run.repoId) : undefined;
   return (
-    <li className="list-row run-row" data-reorder-key={run.id} data-mark={sessionMark(run)?.glyph ?? ''}>
+    <li
+      className="list-row run-row"
+      data-reorder-key={run.id}
+      data-mark={sessionMark(run)?.glyph ?? ''}
+      data-state={liveState(run)}
+      data-tone={liveTone(run)}
+    >
       <a className="list-main" href={href.terminal(run.id)}>
         <span className="list-title">
           <AttentionDot run={run} />
