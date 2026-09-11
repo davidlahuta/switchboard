@@ -691,7 +691,15 @@ export class RunManager {
          * gives way to a live subagent — up to a bound, because a SubagentStop that never arrives
          * must not turn a bounded wait into an unbounded one.
          */
-        if (this.coord.liveSubagents(r.session_id) > 0 && Date.now() < plan.deadline! + SUBAGENT_GRACE_MS) {
+        /*
+         * A session that has stopped on a limit is the exception. The grace exists because a
+         * subagent is worth waiting for — it announces its own end, and what it has spent is lost
+         * with it — but a subagent under a session that has run out of usage has run out too, on
+         * the same account, and will never announce anything. Waiting for it is waiting for nothing
+         * while the session sits on a subscription it cannot use.
+         */
+        const limited = this.coord.agent(r.session_id)?.status === 'limited';
+        if (!limited && this.coord.liveSubagents(r.session_id) > 0 && Date.now() < plan.deadline! + SUBAGENT_GRACE_MS) {
           if (!this.subagentHeld.has(runId)) {
             this.subagentHeld.add(runId);
             log.info('holding a due respawn while a subagent finishes', { run: runId, kind: plan.kind });
@@ -2034,7 +2042,11 @@ export class RunManager {
      */
     const already = this.pendingRespawn.get(r.id);
     if (already?.kind === 'swap' && already.trigger === 'limit') {
-      log.info('the limit is already answered and the swap for it is still queued', { run: r.id, detail });
+      // Not news, but still evidence: the session is at the limit as we speak, so anything the work
+      // table still credits it with died with the turn. Saying so is what lets the queued swap go.
+      const dead = this.coord.endSessionWork(sessionId, 'the session stopped on a usage limit');
+      if (dead) this.onWorkSettled(sessionId);
+      log.info('the limit is already answered and the swap for it is still queued', { run: r.id, detail, cleared: dead });
       return;
     }
     /*
