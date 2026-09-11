@@ -192,14 +192,17 @@ const RECENTLY_SEEN_MS = 2 * 60_000;
  * enough that no real subagent is dropped while it is still thinking, and short enough that a lost
  * SubagentStop cannot hold a queued restart for the rest of the day.
  *
- * A background shell or a monitor announces nothing at all: a dev server started this morning is
- * still running this afternoon with no hook to say so, so these are believed for much longer and
- * are cleared wholesale when the session that owns them restarts or ends.
+ * A background shell or a monitor announces nothing at all — not when it starts, which is why it is
+ * read out of a tool result, and not when it ends. Most of them are a build or a test run that was
+ * over in minutes and never mentioned again, so believing them for hours meant a session that had
+ * finished everything still claimed to be running seven things. Three quarters of an hour is longer
+ * than the runs that produce these and short enough that the count means something; the price is a
+ * genuinely long-lived one, a dev server say, quietly dropping off the list.
  */
 const WORK_SILENT_MS: Record<SessionWorkKind, number> = {
   subagent: 30 * 60_000,
-  shell: 6 * 3600_000,
-  monitor: 6 * 3600_000,
+  shell: 45 * 60_000,
+  monitor: 45 * 60_000,
 };
 
 interface WorkRow {
