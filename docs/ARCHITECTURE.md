@@ -347,6 +347,15 @@ and stays quiet about usage for `LIMIT_QUIET_AFTER_SPAWN_MS` after every spawn, 
 ignores a screen-detected limit for a minute after a respawn. A `StopFailure` limit is still
 believed whenever it arrives: that one is a fact about the turn that just ended.
 
+**A session reported a limit it had only read about.** The screen belongs to the session, and an
+agent reading a log, grepping source or printing the pattern itself puts "usage limit reached" in
+front of the scanner. Worse, the session was marked `limited` before the numbers were checked, so a
+guess that turned out wrong still left the label behind — and the rescue sweep looks for exactly
+that label. Now a screen-detected limit marks nothing until the subscription's own numbers agree,
+and the scanner ignores a match on a line that looks like machine output rather than prose somebody
+was shown (`scanForLimit`). A `StopFailure` limit still marks the session at once: that one is
+Claude Code saying why it stopped.
+
 **Nothing brought a dead session back.** A terminal that died at eleven at night was still down at
 seven in the morning. The conversation was on disk the whole time, addressed by GUID, in a directory
 the run knows. So a death nobody chose — the runner's socket gone, claude exiting on its own, a

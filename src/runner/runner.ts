@@ -1,6 +1,7 @@
 import pty from '@lydell/node-pty';
 import WebSocket from 'ws';
 import { DAEMON_URL, DAEMON_WS, PTY_TERM, withoutParentSession } from '../config.ts';
+import { scanForLimit } from '../shared/limits.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
 
 type IPty = ReturnType<typeof pty.spawn>;
@@ -51,8 +52,6 @@ const TRUST_PROMPT = 'Accessingworkspace:';
 const TRUST_ACCEPT = 'Yes,Itrustthisfolder';
 const DOWN = '\x1b[B';
 
-const LIMIT_RE =
-  /(usage limit reached|you['’]ve (hit|reached) your (usage |session |weekly |5-hour )?limit|(5-hour|weekly|session) limit reached|limit reached[^\n]{0,40}resets)/i;
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]/g;
 
@@ -214,11 +213,17 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
   const detectLimit = (data: string): void => {
     tail = (tail + data.replace(ANSI_RE, '')).slice(-2000);
     if (Date.now() - lastLimitReport < LIMIT_REPORT_EVERY_MS) return;
-    const m = tail.match(LIMIT_RE);
-    if (!m) return;
+    const found = scanForLimit(tail);
+    if (found.kind === 'none') return;
+    if (found.kind === 'ignored') {
+      // The session printed the words rather than being shown them. Drop that line and keep
+      // reading, because the next thing on screen may be the real thing.
+      tail = tail.slice(found.restFrom);
+      return;
+    }
     lastLimitReport = Date.now();
     tail = '';
-    send({ type: 'limit-detected', text: m[0] });
+    send({ type: 'limit-detected', text: found.text });
   };
 
   const spawnChild = (s: SpawnSpec): void => {

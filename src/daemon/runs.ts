@@ -1702,7 +1702,14 @@ export class RunManager {
     }
     this.lastLimit.set(r.id, Date.now());
     const subAtLimit = r.subscription_id;
-    this.coord.setStatus(sessionId, 'limited');
+    /*
+     * A limit reported through StopFailure is Claude Code saying why it stopped, so the session is
+     * marked at once. Text on a screen is a guess, and marking the session first and checking after
+     * meant a guess that turned out wrong still left it labelled — and the rescue sweep looks for
+     * exactly that label. A session reading a log full of the word "limit" could be moved off a
+     * subscription that was never at one.
+     */
+    if (source === 'hook') this.coord.setStatus(sessionId, 'limited');
     const label = this.subs.row(r.subscription_id)?.label ?? r.subscription_id;
     log.warn('usage limit', { run: r.id, subscription: r.subscription_id, source, detail });
     void (async () => {
@@ -1722,11 +1729,14 @@ export class RunManager {
       if (source === 'pty') {
         // Text detection is a fallback; make sure the subscription really is at its limit.
         const u = sub?.usage;
-        const used = Math.max(u?.fiveHour?.pct ?? 0, u?.sevenDay?.pct ?? 0);
+        const used = Math.max(u?.fiveHour?.pct ?? 0, u?.sevenDay?.pct ?? 0, ...(u?.scoped ?? []).map((w) => w.pct));
         if (u && !u.stale && used < 90) {
+          log.info('a limit on screen that the numbers do not agree with', { run: r.id, subscription: subAtLimit, used, detail });
           this.lastLimit.delete(r.id);
           return;
         }
+        // Corroborated: now it is worth saying so, and worth the rescue sweep watching it.
+        this.coord.setStatus(sessionId, 'limited');
       }
       const settings = getSettings(this.db);
       if (!settings.autoSwap || !bool(r.auto_swap)) {
