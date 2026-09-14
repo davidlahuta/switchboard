@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { RunStatus, StateSnapshot, TermClientFrame, TermServerFrame } from '@shared/types.ts';
+import { sessionMark, tabTitle } from '@shared/marks.ts';
 import { RestartMenu } from '../components/RestartMenu.tsx';
 import { ResumeButton } from '../components/ResumeButton.tsx';
 import { HandoffButton } from '../components/HandoffButton.tsx';
@@ -14,6 +15,7 @@ import { Icon, StatusPill } from '../components/ui.tsx';
 import { api, wsUrl } from '../lib/api.ts';
 import { href, navigate } from '../lib/router.ts';
 import { emitToast } from '../lib/toast.ts';
+import { faviconFor, resetTab, setFavicon } from '../lib/tabmark.ts';
 
 const FONT = '"Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace';
 const FONT_KEY = 'sb.term.fontSize';
@@ -509,13 +511,26 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   }, []);
 
   // ---- misc ----
+  /*
+   * The browser tab carries the same mark as this session's row in the list and as its native
+   * terminal tab: the glyph in the title, from the one definition in shared/marks.ts, and the tone
+   * as the icon's colour for when a wall of tabs has squeezed the title away. It follows the mark
+   * and not only the name, because what a session wants is the half that changes while you are
+   * looking somewhere else.
+   */
+  const mark = run ? sessionMark(run) : null;
   useEffect(() => {
-    const prev = document.title;
-    document.title = `${run?.name ?? 'Session'} · Switchboard`;
-    return () => {
-      document.title = prev;
-    };
-  }, [run?.name]);
+    document.title = run ? `${tabTitle(run, run.name)} · Switchboard` : 'Session · Switchboard';
+    setFavicon(faviconFor(mark));
+  }, [run?.name, mark?.glyph, mark?.tone]);
+  /*
+   * Putting the tab back is its own effect, and runs on the way out only. As the cleanup of the
+   * one above it would also run on every mark change — blanking the title and the icon a frame
+   * before they were set again, which in a row of tabs is a visible twitch every time a session
+   * picks up a subagent. And it puts back what index.html ships with rather than whatever the tab
+   * happened to say on mount, which after the first change is this page's own title.
+   */
+  useEffect(() => resetTab, []);
 
   useEffect(() => {
     try {
