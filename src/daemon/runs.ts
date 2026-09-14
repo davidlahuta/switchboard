@@ -368,6 +368,20 @@ export type Reporter = 'hosted' | 'cleared' | 'elsewhere';
  */
 export type RebindWitness = { kind: 'hook'; event: string; source: string | null } | { kind: 'shim'; pid: number | null };
 
+/**
+ * Where a file Claude Code keeps for a session is remembered, once found.
+ *
+ * It has to name the session, not just the run. A run outlives its conversations — a relaunch, a
+ * `/clear`, a resume that came up somewhere new — and the lookup itself is by session id, so a key
+ * that said only "this run's custom-title.json" went on answering with the dead conversation's
+ * file for as long as that file existed. The poll then read a title nobody had asked for since,
+ * and put it back over the one the operator had just typed: a rename would take, and be undone a
+ * second or two later, every time. Two runs were sitting in that loop for hours.
+ */
+export function sessionFileKey(runId: string, sessionId: string, name: string): string {
+  return `${runId}:${sessionId}:${name}`;
+}
+
 /** Whether a hook says the process changed conversations without restarting: `/clear`, `/compact`. */
 export function clearedInPlace(event: string, source: string | null): boolean {
   return event === 'SessionStart' && (source === 'clear' || source === 'compact');
@@ -666,7 +680,7 @@ export class RunManager {
   /** Runs that have already had a stray claude reported for them, so it is said once. */
   private readonly straysSeen = new Set<string>();
 
-  /** Files Claude Code keeps for a session, once found: keyed by run id and file name. */
+  /** Files Claude Code keeps for a session, once found; see sessionFileKey. */
   private readonly sessionFiles = new Map<string, string>();
   /** Size and mtime of each transcript when it was last read, so an unchanged one is not reread. */
   private readonly transcriptSeen = new Map<string, string>();
@@ -677,7 +691,7 @@ export class RunManager {
    * `<session>.jsonl`, next to the `<session>/` directory).
    */
   private sessionFile(r: RunRow, name: string): string | null {
-    const key = `${r.id}:${name}`;
+    const key = sessionFileKey(r.id, r.session_id, name);
     const cached = this.sessionFiles.get(key);
     if (cached && fs.existsSync(cached)) return cached;
     const roots = [this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR].filter((x): x is string => !!x);
@@ -826,7 +840,7 @@ export class RunManager {
         this.pushTitle(this.row(r.id)!);
         this.coord.renameAgent(r.session_id, title);
         this.bus.invalidate('state');
-        log.info('session renamed in claude', { run: r.id, name: title });
+        log.info('session renamed in claude', { run: r.id, name: title, seen: 'on disk', was: r.claude_title });
       }
       const transcript = this.sessionFile(r, path.join('..', `${r.session_id}.jsonl`));
       if (transcript && this.transcriptChanged(r.id, transcript)) this.syncModel(r.session_id, transcript);
@@ -862,7 +876,7 @@ export class RunManager {
       this.pushTitle(this.row(r.id)!);
       this.coord.renameAgent(sessionId, adopt);
       this.bus.invalidate('state');
-      log.info('session renamed in claude', { run: r.id, name: adopt });
+      log.info('session renamed in claude', { run: r.id, name: adopt, seen: 'on a hook', was: r.claude_title });
       return null;
     }
     if (push) this.db.run('UPDATE runs SET claude_title = ? WHERE id = ?', push, r.id);
