@@ -10,6 +10,7 @@ import {
   rebindDecision,
   rejectReservedArgs,
   reporterOf,
+  sessionFileKey,
   rescueDecision,
   respawnGuard,
   stallDecision,
@@ -401,6 +402,31 @@ describe('the session id a hosted process reports for itself', () => {
     // Calling it a failed resume stops the session and says so, and the conversation survives that;
     // calling it a stranger leaves a terminal running a conversation the run has quietly disowned.
     assert.equal(rebindDecision(OLD, NEW, OLD, 'elsewhere'), 'lost');
+  });
+});
+
+describe('remembering where Claude Code keeps a session’s files', () => {
+  const RUN = '29e12d39';
+  const WAS = '2448f413-bf27-4558-a496-6d47eecb0549';
+  const NOW = '2cd9f4ad-4326-4355-911c-bfd0ed7ff94a';
+
+  it('forgets the file when the run changes conversations', () => {
+    /*
+     * A run outlives its conversations, and every one of them has its own `custom-title.json`. A
+     * key that named only the run went on answering with the dead conversation's file for as long
+     * as that file existed — so the poll kept reading a title from a session that had been offline
+     * since morning and writing it back over the one the operator had just typed. Every rename took
+     * and was undone a second later, in both directions, for hours.
+     */
+    assert.notEqual(sessionFileKey(RUN, WAS, 'custom-title.json'), sessionFileKey(RUN, NOW, 'custom-title.json'));
+  });
+
+  it('keeps answering for the same session and file', () => {
+    assert.equal(sessionFileKey(RUN, NOW, 'custom-title.json'), sessionFileKey(RUN, NOW, 'custom-title.json'));
+  });
+
+  it('does not confuse two runs that are somehow on one conversation', () => {
+    assert.notEqual(sessionFileKey('29e12d39', NOW, 'custom-title.json'), sessionFileKey('f43be2f0', NOW, 'custom-title.json'));
   });
 });
 
