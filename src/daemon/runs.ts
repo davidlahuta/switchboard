@@ -134,12 +134,14 @@ export interface PendingRespawn {
 const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
 const CONTINUE_DELAY_MS = 2500;
 /**
- * How long a resumed session is given to say it is at a prompt before the message is typed anyway.
+ * How long a resumed session is given to reach its prompt before the message is typed anyway.
  *
- * SessionStart releases it 2.5 s after arriving (see onSessionStart), so this is only the fallback
- * for a session whose hook never comes. It was nine seconds, which is less than resuming a long
- * conversation takes: Chores, 84,000 records, reported SessionStart a second after its message had
- * been typed into a terminal that was not reading yet, and the message was lost without a trace.
+ * Only the last resort: the message goes a moment after the prompt shows on the mirrored screen
+ * (see waitForPrompt), or after SessionStart if that comes first. It used to go on a nine-second
+ * clock, which is less than resuming a long conversation takes — Chores, 84,000 records, had its
+ * message typed into a terminal that was not reading yet, and it was lost without a trace. The
+ * SessionStart release that was meant to make that clock a fallback did not fire for any resumed
+ * session checked on 2026-09-15, so it cannot be what decides.
  */
 const CONTINUE_SPAWN_DELAY_MS = 90_000;
 /**
@@ -147,6 +149,19 @@ const CONTINUE_SPAWN_DELAY_MS = 90_000;
  * option it starts on is often the one that exits — so nothing may be typed while it is on screen.
  */
 const CONFIRM_FOOTER = /Enter\s*to\s*confirm/i;
+/**
+ * The footer Claude Code draws under its input box, which exists only once the box does: the
+ * permission-mode hint (bypass permissions, accept edits and plan mode all end in it) or the plain
+ * shortcuts hint.
+ */
+const PROMPT_FOOTER = /\(shift\+tab to cycle\)|\?\s*for shortcuts/i;
+/** How often a resuming session's screen is looked at for its prompt. */
+const CONTINUE_POLL_MS = 1000;
+
+/** Whether a session's screen shows it at its prompt and not asking anything; see waitForPrompt. */
+export function atPrompt(screen: string): boolean {
+  return PROMPT_FOOTER.test(screen) && !CONFIRM_FOOTER.test(screen);
+}
 const CONTINUE_RETRY_MS = 4000;
 const CONTINUE_RETRIES = 15;
 const CONTINUE_FALLBACK_MS = 25_000;
@@ -1359,6 +1374,9 @@ export class RunManager {
     if (!r) return;
     switch (msg.type) {
       case 'spawned':
+        // A new claude is drawing a new screen. Left in the mirror, the last process's prompt would
+        // read as this one being ready before it has loaded anything; see waitForPrompt.
+        if (this.resumedSpawn.get(r.id)) this.mirrors.get(r.id)?.reset();
         this.armContinue(r);
         this.db.run(
           'UPDATE runs SET pid = ?, cols = ?, rows = ?, version = ?, ended_at = NULL, exit_code = NULL WHERE id = ?',
@@ -1827,7 +1845,8 @@ export class RunManager {
     if (!text) return;
     const old = this.pendingContinue.get(r.id);
     if (old) clearTimeout(old.timer);
-    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), 0) });
+    // Already at its prompt: this is a person pressing the button, or a turn that failed in front of us.
+    this.pendingContinue.set(r.id, { text, released: true, timer: setTimeout(() => this.typeContinue(r.id), 0) });
     this.bus.toast('info', `${r.name}: ${why} — telling it to carry on.`);
   }
 
@@ -2077,11 +2096,45 @@ export class RunManager {
   private armContinue(r: RunRow): void {
     if (!this.resumedSpawn.get(r.id)) return;
     this.resumedSpawn.delete(r.id);
-    if (this.pendingContinue.has(r.id)) return;
+    const armedAt = Date.now();
+    // A swap armed its own message before the process existed, waiting on a SessionStart that does
+    // not come for a resume; it waits for this process's prompt instead, like the rest.
+    const existing = this.pendingContinue.get(r.id);
+    if (existing) {
+      if (!existing.released) {
+        clearTimeout(existing.timer);
+        existing.timer = setTimeout(() => this.waitForPrompt(r.id, armedAt), CONTINUE_POLL_MS);
+      }
+      return;
+    }
     if (!this.dto(r).continueOnResume) return;
     const text = getSettings(this.db).continueMessage.trim();
     if (!text) return;
-    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), CONTINUE_SPAWN_DELAY_MS) });
+    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.waitForPrompt(r.id, armedAt), CONTINUE_POLL_MS) });
+  }
+
+  /**
+   * Hold a queued continue message until the session's prompt is on screen, then type it.
+   *
+   * The screen is the one witness that is always there: the runner mirrors every byte, and Claude
+   * Code draws the footer under its input box only once the conversation has loaded. The message goes
+   * a moment after the prompt appears, so the box is taking keys, and is typed anyway after
+   * CONTINUE_SPAWN_DELAY_MS, with a warning, for a screen that never shows one.
+   */
+  private waitForPrompt(runId: string, armedAt: number): void {
+    const pending = this.pendingContinue.get(runId);
+    if (!pending || pending.released) return;
+    if (atPrompt(this.mirrors.get(runId)?.screenText() ?? '')) {
+      pending.released = true;
+      pending.timer = setTimeout(() => this.typeContinue(runId), CONTINUE_DELAY_MS);
+      log.debug('continue message released: the prompt is on screen', { run: runId, afterMs: Date.now() - armedAt });
+      return;
+    }
+    if (Date.now() - armedAt >= CONTINUE_SPAWN_DELAY_MS) {
+      this.typeContinue(runId);
+      return;
+    }
+    pending.timer = setTimeout(() => this.waitForPrompt(runId, armedAt), CONTINUE_POLL_MS);
   }
 
   /**
@@ -2678,7 +2731,8 @@ export class RunManager {
     if (!this.dto(r).continueOnResume) return;
     const text = getSettings(this.db).continueMessage.trim();
     if (!text || this.pendingContinue.has(r.id)) return;
-    this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.typeContinue(r.id), CONTINUE_DELAY_MS) });
+    // A session waiting out a limit is sitting at its prompt, so this is not typed on a guess.
+    this.pendingContinue.set(r.id, { text, released: true, timer: setTimeout(() => this.typeContinue(r.id), CONTINUE_DELAY_MS) });
     log.info('a session waiting out a limit can carry on', { run: r.id, why });
     this.bus.toast('info', `${r.name}: ${why} — telling it to carry on.`);
   }
