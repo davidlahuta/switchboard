@@ -721,13 +721,19 @@ select.input {
 /* The mark a session carries, in the same characters its terminal tab uses; see shared/marks.ts.
    Colour is what this surface can add and a tab title cannot. */
 .attention {
-  display: inline-block;
+  /* One column wide, whatever is in it — including nothing. ❗ and ⏳ are emoji, ✓ ● ◐ ◌ ✉ are text
+     glyphs, and none of them are the same width, so a slot sized to its contents left the names
+     stepping in and out by a few pixels down the list. Centred rather than left-aligned so the
+     marks line up with each other as well as the names do. */
+  display: inline-flex;
   flex: none;
   align-self: center;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
   margin-right: 6px;
   font-size: 12px;
   line-height: 1;
-  vertical-align: baseline;
   color: var(--ok);
 }
 .attention-blocked {

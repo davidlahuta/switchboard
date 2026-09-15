@@ -11,7 +11,11 @@ import { sessionMark } from '@shared/marks.ts';
  */
 export function AttentionDot({ run }: { run: Run }) {
   const mark = sessionMark(run);
-  if (!mark) return null;
+  // A session with nothing to say still holds the column. The marks are a mix of emoji and text
+  // glyphs and no two are the same width, so the names only line up if the slot is the same size
+  // whatever is in it — and an empty one has to be there at all, or an unmarked row starts further
+  // left than every marked one and the list reads as ragged.
+  if (!mark) return <span className="attention attention-empty" aria-hidden="true" />;
 
   return (
     <span className={`attention attention-${mark.tone}`} role="status" title={mark.why} aria-label={mark.why}>
