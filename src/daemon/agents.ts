@@ -79,7 +79,10 @@ export class AgentHub implements PushTarget {
        * as it would on a hook.
        */
       if (msg.runId && !this.runs.rebind(msg.runId, msg.sessionId, { kind: 'shim', pid: msg.pid })) {
-        log.warn('a session announced itself on a conversation its run had disowned', { run: msg.runId, session: msg.sessionId });
+        log.debug('a session announced itself on a conversation its run had disowned', { run: msg.runId, session: msg.sessionId });
+        // Told, not just dropped: a shim that is only hung up on comes straight back. RunManager
+        // has already said what happened at warn level, once.
+        reply({ type: 'disowned', reason: `${msg.runId} is not on this conversation` });
         ws.close();
         return;
       }
