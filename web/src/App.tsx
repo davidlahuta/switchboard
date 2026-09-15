@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import type { AuthStatus } from '@shared/types.ts';
 import { request, UNAUTHORIZED_EVENT } from './lib/api.ts';
 import { useRoute, type Route } from './lib/router.ts';
+import { pageTitle } from './lib/title.ts';
 import { StoreProvider, useStore } from './lib/store.tsx';
 import { Layout } from './components/Layout.tsx';
 import { Toasts } from './components/Toasts.tsx';
@@ -36,6 +37,11 @@ export function App() {
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
   }, [checkAuth]);
+
+  const unpaired = auth.kind === 'ok' && !auth.status.local && !auth.status.paired;
+  useEffect(() => {
+    if (unpaired) document.title = pageTitle({ name: 'pair', code: null }, () => undefined)!;
+  }, [unpaired]);
 
   let body;
   if (auth.kind === 'loading') {
@@ -76,6 +82,12 @@ export function App() {
 
 function Routed({ route, auth }: { route: Route; auth: AuthStatus }) {
   const { state, loadError, refresh } = useStore();
+  const repos = state?.repos;
+  const title = pageTitle(route, (id) => repos?.find((r) => r.id === id)?.name);
+  // After a terminal page's own cleanup has put the tab back, since React runs unmounts first.
+  useEffect(() => {
+    if (title) document.title = title;
+  }, [title]);
 
   if (route.name === 'pair') {
     return (
