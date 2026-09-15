@@ -1392,6 +1392,14 @@ export class RunManager {
           break;
         }
         if (msg.intentional && r.status === 'swapping') break;
+        {
+          // Every way a session ends up exited, said once. 0376 literal reader went down at 17:21 on a
+          // respawn into a folder that had just been deleted, and the only trace was an exit code in its row.
+          const asked = msg.intentional || this.stopping.has(runId);
+          const entry = { run: runId, session: r.session_id, code: msg.code, status: r.status };
+          if (asked) log.info('a session exited as asked', entry);
+          else log.warn('a session exited on its own', entry);
+        }
         this.db.run('UPDATE runs SET ended_at = ?, exit_code = ? WHERE id = ?', now(), msg.code, runId);
         this.setStatus(runId, 'exited');
         this.coord.markOffline(r.session_id, 'session exited');
@@ -2096,6 +2104,12 @@ export class RunManager {
     const pending = this.pendingContinue.get(runId);
     if (!pending) return;
     clearTimeout(pending.timer);
+    // A session whose terminal is gone has nothing to type into; saying it was typed would be a lie.
+    if (!this.conns.has(runId)) {
+      this.pendingContinue.delete(runId);
+      log.warn('continue message not sent: the session has no terminal attached', { run: runId });
+      return;
+    }
 
     // Never type at a session that is asking something. The continue message ends in a carriage
     // return, and on the folder trust dialog that answers "No, exit" — which is exactly how a
