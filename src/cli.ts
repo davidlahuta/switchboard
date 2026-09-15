@@ -24,6 +24,7 @@ Usage:
   switchboard service status         Show the scheduled task and whether the daemon answers
   switchboard status                 Print a short summary from the running daemon
   switchboard diag [--json]          Why every session is where it is: host, work, queued respawns
+      --screen                       Show every session's screen, not only the ones asking something
 `;
 
 function flags(argv: string[]): Record<string, string | true> {
@@ -107,7 +108,7 @@ async function status(): Promise<void> {
  * One block per live session: what hosts it, what it is doing, what is queued for it and what that
  * waits on. Anything that needs a person is in capitals, so a glance down the left margin finds it.
  */
-async function diag(asJson: boolean): Promise<void> {
+async function diag(asJson: boolean, screen: boolean): Promise<void> {
   const res = await fetch(`${DAEMON_URL}/api/diagnostics`).catch(() => null);
   if (!res?.ok) {
     console.error(`Daemon not reachable at ${DAEMON_URL}${res ? ` (HTTP ${res.status})` : ''}`);
@@ -143,6 +144,11 @@ async function diag(asJson: boolean): Promise<void> {
       console.log(`  queued ${q.kind} (${q.trigger})${where} for ${dur(q.waitedMs)} · ${state}${q.deadline ? ` · deadline ${q.deadline.slice(11, 19)}Z` : ''}`);
     }
     for (const w of r.work) console.log(`  ${w.kind.padEnd(8)} ${(w.label ?? '').slice(0, 58).padEnd(58)} started ${since(w.since)}, silent ${dur(w.silentMs)}`);
+    // A session asking something shows the question: "waiting" alone cannot be acted on.
+    if (screen || r.agent?.status === 'waiting' || r.stalled) {
+      if (!r.screen.length) console.log('  screen   (nothing drawn since the daemon started)');
+      for (const line of r.screen) console.log(`  │ ${line.slice(0, 110)}`);
+    }
   }
 }
 
@@ -217,7 +223,7 @@ async function main(): Promise<void> {
     case 'status':
       return status();
     case 'diag':
-      return diag(f.json === true);
+      return diag(f.json === true, f.screen === true);
     case 'version':
     case '--version':
       console.log(VERSION);

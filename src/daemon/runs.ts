@@ -98,7 +98,12 @@ export interface RunDiagnostics {
   revive: { tries: number; after: string | null; heldSince: string | null } | null;
   stalled: { since: string; reason: string | null } | null;
   lastRespawnAt: string | null;
+  /** The last non-blank lines of its screen, as the daemon's mirror of it has them. */
+  screen: string[];
 }
+
+/** How much of a screen diagnostics repeat: enough for a question and its options. */
+const DIAG_SCREEN_LINES = 14;
 
 /** A respawn waiting for the session to finish its turn. */
 export interface PendingRespawn {
@@ -1683,6 +1688,17 @@ export class RunManager {
         revive: r.revive_after || r.revive_tries ? { tries: r.revive_tries, after: r.revive_after, heldSince: iso(this.reviveHeldSince.get(r.id)) } : null,
         stalled: r.stalled_since ? { since: r.stalled_since, reason: r.stall_reason } : null,
         lastRespawnAt: iso(this.lastRespawn.get(r.id)),
+        /*
+         * "Waiting" says a session is asking something and never what. The transcript does not have
+         * it until it is answered, and the board only has the status, so a queued respawn held by a
+         * question looked exactly like one held by nothing. The screen is where the question is.
+         * Empty until the terminal draws something after a daemon restart.
+         */
+        screen: (this.mirrors.get(r.id)?.screenText() ?? '')
+          .split('\n')
+          .map((l) => l.trimEnd())
+          .filter((l) => l.trim() !== '')
+          .slice(-DIAG_SCREEN_LINES),
       };
     });
   }
