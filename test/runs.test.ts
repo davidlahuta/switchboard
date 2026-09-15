@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  atPrompt,
   attentionFor,
   clearedInPlace,
   limitSwapPlan,
@@ -353,6 +354,30 @@ describe('a second respawn asked for while one waits', () => {
   it('is the new plan unchanged when nothing was waiting', () => {
     const next = plan({ kind: 'swap', target: 'there' });
     assert.equal(mergePending(undefined, next), next);
+  });
+});
+
+describe('when a resumed session is ready to be told to carry on', () => {
+  const rule = '─'.repeat(60);
+
+  it('is ready once the input box and its footer are drawn', () => {
+    // As 0376 literal reader's screen read at 17:32, after its resume.
+    const screen = ['  ✻ Cogitated for 4m 17s · done 7:21 PM', rule, '❯', rule, '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'].join('\n');
+    assert.equal(atPrompt(screen), true);
+  });
+
+  it('is ready in the default permission mode too', () => {
+    assert.equal(atPrompt([rule, '> ', rule, '  ? for shortcuts'].join('\n')), true);
+  });
+
+  it('is not ready while the conversation is still loading', () => {
+    assert.equal(atPrompt(['Resuming conversation…', '', ''].join('\n')), false);
+  });
+
+  it('is not ready while a dialog is asking something, even with a footer on screen', () => {
+    // A carriage return here answers the dialog, which on the trust prompt means "No, exit".
+    const screen = ['Do you trust the files in this folder?', '❯ 1. Yes, proceed', '  2. No, exit', 'Enter to confirm · Esc to cancel', '(shift+tab to cycle)'].join('\n');
+    assert.equal(atPrompt(screen), false);
   });
 });
 
