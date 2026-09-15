@@ -4,7 +4,7 @@ import { ApiError, request } from '../lib/api.ts';
 import { parseArgv, reservedArgs } from '../lib/argv.ts';
 import { contextLabel, subUsageShort, tokensShort, usableSubs } from '../lib/format.ts';
 import { fetchDiscoveredRepos, matchRepo, mergeRepoChoices, samePath } from '../lib/repos.ts';
-import { navigate, href } from '../lib/router.ts';
+import { href, openTerminal } from '../lib/router.ts';
 import { timeAgo } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
 import { Badge, Dialog } from './ui.tsx';
@@ -162,7 +162,7 @@ export function NewSessionDialog({
       const run = await request<Run>('POST', '/api/runs', body);
       emitToast('success', `Started ${run.name} on ${run.subscriptionLabel}`);
       onClose();
-      navigate(href.terminal(run.id));
+      openTerminal(run.id);
     } catch (err) {
       // The daemon rejects arguments it manages itself with a 400 that explains which ones and
       // which control to use instead; that message is far more useful than a generic toast, so it

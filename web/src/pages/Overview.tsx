@@ -11,7 +11,7 @@ import { RunTags } from '../components/RunTags.tsx';
 import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Badge, Empty, Icon, Section, StaleBadge, StatusPill, UsageBar } from '../components/ui.tsx';
 import { planLabel, shortPath, subStatusLabel, usageLevel } from '../lib/format.ts';
-import { href } from '../lib/router.ts';
+import { href, terminalLink } from '../lib/router.ts';
 import { timeAgo, useNow } from '../lib/time.ts';
 
 export function Overview({ state }: { state: StateSnapshot }) {
@@ -242,7 +242,7 @@ function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
       data-state={liveState(run)}
       data-tone={liveTone(run)}
     >
-      <a className="list-main" href={href.terminal(run.id)}>
+      <a className="list-main" {...terminalLink(run.id)}>
         <span className="list-title">
           <AttentionDot run={run} />
           {run.name}
@@ -263,7 +263,7 @@ function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
       {/* The same icon-only actions the sessions table uses: labels stay in the markup for screen
           readers and come back inside the menus, where there is room to read them. */}
       <span className="row-actions">
-        <a className="btn btn-sm" href={href.terminal(run.id)} aria-label={`Open terminal for ${run.name}`} title="Terminal">
+        <a className="btn btn-sm" {...terminalLink(run.id)} aria-label={`Open terminal for ${run.name}`} title="Terminal">
           <Icon name="terminal" size={16} />
           <span>Terminal</span>
         </a>
