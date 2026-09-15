@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CLI_PATH, IS_WINDOWS } from '../config.ts';
 import { logger } from '../log.ts';
+import { keepFocus } from './focus.ts';
 
 const log = logger('launcher');
 
@@ -57,7 +58,9 @@ export class Launcher {
       // a session reaches its tab instead of leaving the name it was opened with.
       const args = ['-w', spec.window ?? this.windowName, 'new-tab', '--title', esc(spec.title), '-d', esc(cwd), esc(node), esc(CLI_PATH), ...spec.args.map(esc)];
       log.info('opening Windows Terminal tab', { title: spec.title, cwd });
-      spawn(this.wtPath, args, { detached: true, stdio: 'ignore' }).unref();
+      const wt = this.wtPath;
+      // Windows Terminal brings its window to the front for every new tab; see keepFocus.
+      keepFocus(() => spawn(wt, args, { detached: true, stdio: 'ignore' }).unref(), `opening ${spec.title}`);
       return;
     }
     if (IS_WINDOWS) {

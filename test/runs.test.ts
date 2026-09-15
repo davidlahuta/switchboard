@@ -395,6 +395,20 @@ describe('the folder a session comes back in', () => {
     assert.equal(sessionDir(repo, scratchpad, all), repo);
   });
 
+  it('opens a plain subfolder at the root of the working tree it belongs to', () => {
+    // .docs/specs is the repository's folder, not a project of its own.
+    const specs = path.join(repo, '.docs', 'specs');
+    const exists = (d: string): boolean => d === specs || d === path.join(repo, '.git');
+    assert.equal(sessionDir(repo, specs, exists), repo);
+  });
+
+  it('opens a subfolder of a worktree at that worktree', () => {
+    const worktree = path.join(repo, '.claude', 'worktrees', 'spec-0071');
+    const deep = path.join(worktree, 'src', 'lib');
+    const exists = (d: string): boolean => d === deep || d === path.join(worktree, '.git') || d === path.join(repo, '.git');
+    assert.equal(sessionDir(repo, deep, exists), worktree);
+  });
+
   it('does not mistake a sibling that shares the name for a subfolder', () => {
     assert.equal(sessionDir(repo, `${repo}-old`, all), repo);
   });
