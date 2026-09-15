@@ -12,6 +12,7 @@ import { repairIntegration } from './integration.ts';
 import { Launcher } from './launcher.ts';
 import { getSettings } from './settings.ts';
 import { ModelCatalog } from './models.ts';
+import { ensureNormalPriority } from './priority.ts';
 import { RunManager } from './runs.ts';
 import { createServer } from './server.ts';
 import { SubscriptionManager } from './subscriptions.ts';
@@ -31,6 +32,8 @@ export async function startDaemon(): Promise<void> {
    * daemon starts by some other route.
    */
   delete process.env.SWITCHBOARD_RUN_ID;
+  // Before anything that has to be quick: see ensureNormalPriority.
+  ensureNormalPriority();
   ensureDirs();
   const db = new Db();
   const bus = new Bus();
