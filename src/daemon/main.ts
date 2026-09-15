@@ -91,7 +91,11 @@ export async function startDaemon(): Promise<void> {
       else log.error('server error', err);
       process.exit(1);
     });
-    server.listen(PORT, host, () => log.info(`Switchboard ${VERSION} listening on http://${host}:${PORT}`));
+    server.listen(PORT, host, () => {
+      log.info(`Switchboard ${VERSION} listening on http://${host}:${PORT}`);
+      // Only now can a runner reconnect, so only now does its thirty seconds start; see armStartupRevives.
+      runs.armStartupRevives();
+    });
     servers.push(server);
   }
   log.info(`data: ${DATA_DIR}`);
