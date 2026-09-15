@@ -17,7 +17,7 @@ import { PageHead } from '../components/PageHead.tsx';
 import { Badge, Empty, Icon, IconButton, Section, Spinner, StatusPill } from '../components/ui.tsx';
 import { api } from '../lib/api.ts';
 import { basename, plural } from '../lib/format.ts';
-import { href } from '../lib/router.ts';
+import { href, terminalLink } from '../lib/router.ts';
 import { useStore } from '../lib/store.tsx';
 import { absTime, clockTime, timeAgo, useNow } from '../lib/time.ts';
 
@@ -203,7 +203,7 @@ function AgentTable({ agents, subLabel, now }: { agents: Agent[]; subLabel: (id:
                     </Badge>
                   )}
                   {a.runId && (
-                    <a className="inline-link" href={href.terminal(a.runId)} aria-label={`Open terminal for ${a.name}`} title="Open terminal">
+                    <a className="inline-link" {...terminalLink(a.runId)} aria-label={`Open terminal for ${a.name}`} title="Open terminal">
                       <Icon name="terminal" size={14} />
                     </a>
                   )}

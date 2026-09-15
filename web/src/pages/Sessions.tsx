@@ -15,7 +15,7 @@ import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Badge, ConfirmDialog, Empty, Icon, StatusPill } from '../components/ui.tsx';
 import { api } from '../lib/api.ts';
 import { shortPath } from '../lib/format.ts';
-import { href, navigate, REPO_ALL, repoFilterOf } from '../lib/router.ts';
+import { href, navigate, REPO_ALL, repoFilterOf, terminalLink } from '../lib/router.ts';
 import { absTime, timeAgo, useNow } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
 
@@ -276,7 +276,7 @@ function SessionRow({
           <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={14} />
         </button>
 
-        <SessionName run={r} href={href.terminal(r.id)} dot />
+        <SessionName run={r} linked dot />
 
         <span className="srow-live">
           {r.agentStatus && !exited && <StatusPill status={r.agentStatus} title="Agent status" />}
@@ -290,7 +290,7 @@ function SessionRow({
         </span>
 
         <span className="srow-actions">
-          <a className="btn btn-sm btn-icon" href={href.terminal(r.id)} aria-label={`Open terminal for ${r.name}`} title="Terminal">
+          <a className="btn btn-sm btn-icon" {...terminalLink(r.id)} aria-label={`Open terminal for ${r.name}`} title="Terminal">
             <Icon name="terminal" size={16} />
           </a>
           {/* No terminal of its own: exited on its own, or the machine was off. */}

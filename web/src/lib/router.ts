@@ -78,6 +78,32 @@ export function repoFilterOf(param: string | null): string {
   return param === 'none' ? REPO_NONE : param;
 }
 
+/**
+ * A link into a session's terminal, which always opens a tab of its own.
+ *
+ * A terminal is somewhere the operator stays — typing into it, watching a turn — while the list it
+ * was picked from keeps moving, and sessions are worked on side by side. Opened in place, it took the
+ * list away and made Back the way between sessions. noopener, because the terminal tab has no
+ * business with the window that opened it.
+ */
+export function terminalLink(runId: string): { href: string; target: '_blank'; rel: 'noopener' } {
+  return { href: href.terminal(runId), target: '_blank', rel: 'noopener' };
+}
+
+/**
+ * The same, from code rather than a click on a link: after starting a session, say.
+ *
+ * A browser only lets a page open a tab close to a click, and a request in between can use that up,
+ * so a tab that was refused is not the end of it — the terminal opens here instead of not at all.
+ * The opener is cut by hand rather than with the noopener feature, which makes window.open return
+ * null whether the tab opened or not, and so hides exactly the refusal this has to notice.
+ */
+export function openTerminal(runId: string): void {
+  const tab = window.open(href.terminal(runId), '_blank');
+  if (tab) tab.opener = null;
+  else navigate(href.terminal(runId));
+}
+
 export const href = {
   overview: () => '#/',
   repo: (id: string) => `#/repos/${encodeURIComponent(id)}`,
