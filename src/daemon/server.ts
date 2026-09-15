@@ -17,7 +17,7 @@ import { createHookHandler } from './hooks.ts';
 import { installIntegration, integrationStatus, uninstallIntegration } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import type { ModelCatalog } from './models.ts';
-import type { RunManager } from './runs.ts';
+import type { RunDiagnostics, RunManager } from './runs.ts';
 import { installService, isSupervised, serviceStatus, startService, uninstallService } from './service.ts';
 import { newestSourceMtime } from './source.ts';
 import { getSettings, updateSettings } from './settings.ts';
@@ -44,6 +44,25 @@ function webBuildId(): string {
   }
   webBuild = { at: Date.now(), value };
   return value;
+}
+
+/** GET /api/diagnostics, as `switchboard diag` reads it. */
+export interface Diagnostics {
+  daemon: {
+    version: string;
+    pid: number;
+    startedAt: string;
+    uptimeS: number;
+    rssMb: number;
+    heapMb: number;
+    staleCode: boolean;
+    sourceChangedAt: string | null;
+    claude: string | null;
+    logLevel: string;
+    dataDir: string;
+    supervised: boolean;
+  };
+  runs: RunDiagnostics[];
 }
 
 export interface Services {
@@ -97,6 +116,22 @@ function json(res: ServerResponse, status: number, data: unknown): void {
   const body = JSON.stringify(data ?? { ok: true });
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(body);
+}
+
+/**
+ * A request body as far as a log may repeat it: which fields were sent, with flags and numbers as
+ * they were and anything else only as its type. Bodies carry pairing codes, message text and
+ * subscription settings, none of which belongs in a file that is read when something goes wrong.
+ */
+export function bodyShape(body: Body): Record<string, unknown> | undefined {
+  const keys = Object.keys(body);
+  if (!keys.length) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const k of keys) {
+    const v = body[k];
+    out[k] = typeof v === 'boolean' || typeof v === 'number' || v === null ? v : typeof v;
+  }
+  return out;
 }
 
 async function readBody(req: IncomingMessage): Promise<Body> {
@@ -170,6 +205,34 @@ export function createServer(s: Services): http.Server {
   };
 
   route('GET', '/healthz', () => ({ ok: true, version: VERSION }), 'public');
+
+  // Desk only: it names processes, folders and what every session is in the middle of.
+  route(
+    'GET',
+    '/api/diagnostics',
+    (): Diagnostics => {
+      const sourceChanged = newestSourceMtime();
+      const mem = process.memoryUsage();
+      return {
+        daemon: {
+          version: VERSION,
+          pid: process.pid,
+          startedAt: STARTED_AT,
+          uptimeS: Math.round(process.uptime()),
+          rssMb: Math.round(mem.rss / 1048576),
+          heapMb: Math.round(mem.heapUsed / 1048576),
+          staleCode: sourceChanged > Date.parse(STARTED_AT),
+          sourceChangedAt: sourceChanged ? new Date(sourceChanged).toISOString() : null,
+          claude: s.updater.status().currentVersion ?? null,
+          logLevel: process.env.SWITCHBOARD_LOG_LEVEL ?? 'info',
+          dataDir: DATA_DIR,
+          supervised: isSupervised(),
+        },
+        runs: s.runs.diagnostics(),
+      };
+    },
+    'local',
+  );
 
   // auth
   route('GET', '/api/auth/status', ({ req }) => s.auth.status(req), 'public');
@@ -371,8 +434,18 @@ export function createServer(s: Services): http.Server {
     else fs.createReadStream(file).pipe(res);
   };
 
+  /**
+   * Who made a request, in words a log reader can act on: the desk itself, or the paired device's
+   * name. Nothing that identifies a person beyond what the operator named the device.
+   */
+  const who = (req: IncomingMessage): string => (s.auth.isLocal(req) ? 'desk' : (s.auth.device(req)?.name ?? 'unpaired'));
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
+    const started = Date.now();
+    let status = 200;
+    let body: Body = {};
+    let error: string | undefined;
     try {
       const isApi = url.pathname.startsWith('/api/') || url.pathname.startsWith('/hooks/') || url.pathname === '/healthz';
       if (!isApi) {
@@ -386,15 +459,28 @@ export function createServer(s: Services): http.Server {
       if (match!.access === 'local' && !s.auth.isLocal(req)) fail(403, 'Only available on the desk itself');
       if (!match!.access && !s.auth.allowed(req)) fail(401, 'Pair this device first');
       const params = (url.pathname.match(match!.pattern) ?? []).slice(1).map(decodeURIComponent);
-      const body = await readBody(req);
+      body = await readBody(req);
       const out = await match!.handler({ req, res, params, url, body });
       if (!res.headersSent) json(res, 200, out);
     } catch (err) {
-      const status = (err as { status?: number }).status ?? 500;
+      status = (err as { status?: number }).status ?? 500;
       const message = err instanceof Error ? err.message : String(err);
+      error = message;
       if (status >= 500) log.error(`${req.method} ${url.pathname}`, err);
       if (!res.headersSent) json(res, status, { error: message });
       else res.end();
+    } finally {
+      /*
+       * Every button pressed, and every one refused. A session that moved, restarted or opened a new
+       * terminal was usually told to by someone, and without this the log shows what the daemon did
+       * but never that it was asked — or that it said no, which only ever reached a toast. Hooks are
+       * left out: they arrive by the thousand and log what they mean where they are handled.
+       */
+      if (url.pathname.startsWith('/api/') && status < 500) {
+        const entry = { status, ms: Date.now() - started, by: who(req), body: bodyShape(body), error };
+        if (req.method !== 'GET') log.info(`${req.method} ${url.pathname}`, entry);
+        else if (status >= 400) log.debug(`${req.method} ${url.pathname}`, entry);
+      }
     }
   });
 
