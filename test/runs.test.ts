@@ -19,6 +19,7 @@ import {
   earlierDeadline,
   mergePending,
   respawnPlacement,
+  sessionDir,
   titleDecision,
   type PendingRespawn,
 } from '../src/daemon/runs.ts';
@@ -352,6 +353,34 @@ describe('a second respawn asked for while one waits', () => {
   it('is the new plan unchanged when nothing was waiting', () => {
     const next = plan({ kind: 'swap', target: 'there' });
     assert.equal(mergePending(undefined, next), next);
+  });
+});
+
+describe('the folder a session comes back in', () => {
+  const all = (): boolean => true;
+  const repo = path.resolve('/repos/harnesty');
+
+  it('keeps a worktree inside the folder it was started in', () => {
+    const worktree = path.join(repo, '.claude', 'worktrees', 'spec-0071');
+    assert.equal(sessionDir(repo, worktree, all), worktree);
+  });
+
+  it('does not follow the session into a folder outside it, such as its temp scratchpad', () => {
+    const scratchpad = path.resolve('/Users/d/AppData/Local/Temp/claude/x/scratchpad');
+    assert.equal(sessionDir(repo, scratchpad, all), repo);
+  });
+
+  it('does not mistake a sibling that shares the name for a subfolder', () => {
+    assert.equal(sessionDir(repo, `${repo}-old`, all), repo);
+  });
+
+  it('opens where it started when the last folder is gone, rather than nowhere', () => {
+    const gone = path.join(repo, '.claude', 'worktrees', 'deleted');
+    assert.equal(sessionDir(repo, gone, (d) => d !== gone), repo);
+  });
+
+  it('opens where it started when nothing else is known', () => {
+    assert.equal(sessionDir(repo, null, all), repo);
   });
 });
 

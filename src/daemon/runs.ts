@@ -381,6 +381,27 @@ export function respawnPlacement(input: { kind: RespawnKind; staleHost: boolean;
 }
 
 /**
+ * The folder a session is opened in when it comes back: where it last was, while that is still part
+ * of the folder it was started in, and otherwise the folder it was started in.
+ *
+ * `last_cwd` follows the session's shell wherever it goes, and sessions go to odd places. serensia
+ * and agent loop rename had wandered into their own temp scratchpads, and the next terminal opened
+ * there: Claude Code took that folder's settings instead of the repository's, and a scratchpad
+ * cleaned up by Windows would have left the session impossible to open anywhere. A worktree inside
+ * the repository is where a session genuinely works, so that is kept.
+ */
+export function sessionDir(cwd: string, lastCwd: string | null, exists: (dir: string) => boolean): string {
+  if (!lastCwd || !exists(lastCwd)) return cwd;
+  const norm = (p: string): string => {
+    const resolved = path.resolve(p).replace(/[\\/]+$/, '');
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  const root = norm(cwd);
+  const last = norm(lastCwd);
+  return last === root || last.startsWith(root + path.sep) ? lastCwd : cwd;
+}
+
+/**
  * The one plan a session is left with when a second respawn is asked for while the first waits.
  *
  * Replacing the plan used to be the whole answer, and it lost whichever ask came first: press
@@ -747,7 +768,7 @@ export class RunManager {
       args: parseArgs(r.extra_args),
       version: r.version,
       staleRunner: this.runnerStale(r.id),
-      cwdMissing: !fs.existsSync(r.last_cwd ?? r.cwd),
+      cwdMissing: !this.workDir(r),
       model: r.model,
       autoCompact: r.auto_compact === null ? getSettings(this.db).defaultAutoCompact : bool(r.auto_compact),
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
@@ -1166,7 +1187,7 @@ export class RunManager {
     this.resumeLostReported.delete(r.id);
     const args: string[] = canResume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
     // Before the process exists, so it never reaches the trust dialog: the folder was chosen here.
-    this.subs.trustFolder(subscriptionId, r.last_cwd ?? r.cwd);
+    this.subs.trustFolder(subscriptionId, this.homeDir(r));
     // And so the channel this session is about to ask for resolves to something.
     this.subs.ensureMcpRegistered(subscriptionId);
     /*
@@ -1205,7 +1226,7 @@ export class RunManager {
       runId: r.id,
       sessionId: r.session_id,
       resume,
-      cwd: resume ? (r.last_cwd ?? r.cwd) : r.cwd,
+      cwd: resume ? this.homeDir(r) : r.cwd,
       file: cmd.file,
       args: cmd.args,
       env: { ...this.subs.envFor(subscriptionId), SWITCHBOARD_RUN_ID: r.id, SWITCHBOARD_URL: DAEMON_URL },
@@ -1964,7 +1985,7 @@ export class RunManager {
     let banner: string;
     if (kind === 'swap') {
       this.subs.syncProfile(target);
-      this.subs.propagateTrust(from, target, r.last_cwd ?? r.cwd);
+      this.subs.propagateTrust(from, target, this.homeDir(r));
       this.db.run(
         'INSERT INTO swaps (run_id, from_sub, to_sub, reason, trigger_kind, ts) VALUES (?, ?, ?, ?, ?, ?)',
         r.id,
@@ -2115,8 +2136,13 @@ export class RunManager {
    */
   /** The folder a session works in, or nothing if it has since been moved or deleted. */
   private workDir(r: RunRow): string | null {
-    const dir = r.last_cwd ?? r.cwd;
+    const dir = this.homeDir(r);
     return fs.existsSync(dir) ? dir : null;
+  }
+
+  /** Where the session is opened, whether or not it still exists; see sessionDir. */
+  private homeDir(r: RunRow): string {
+    return sessionDir(r.cwd, r.last_cwd, fs.existsSync);
   }
 
   private openTerminalFor(r: RunRow): void {
@@ -2125,7 +2151,7 @@ export class RunManager {
       // Launching anyway gives a terminal that exits on a Win32 error code and nothing else.
       this.db.run('UPDATE runs SET ended_at = ? WHERE id = ?', now(), r.id);
       this.setStatus(r.id, 'exited');
-      this.bus.toast('error', `${r.name}: ${r.last_cwd ?? r.cwd} no longer exists, so it cannot be opened there.`);
+      this.bus.toast('error', `${r.name}: ${this.homeDir(r)} no longer exists, so it cannot be opened there.`);
       return;
     }
     this.db.run('UPDATE runs SET resume = 1 WHERE id = ?', r.id);
@@ -2135,8 +2161,11 @@ export class RunManager {
     // brand new one does.
     this.subs.syncProfile(r.subscription_id);
     // The launcher logs the tab by title, which two sessions can share; this ties it to the run.
-    log.info('opening a terminal for a session', { run: r.id, session: r.session_id, subscription: r.subscription_id, cwd: r.last_cwd ?? r.cwd });
-    this.launcher.openTerminal({ title: r.name, cwd: r.last_cwd ?? r.cwd, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
+    const dir = this.homeDir(r);
+    // Names where the session was last seen when that is not where it is being opened, so the choice is visible.
+    const lastCwd = r.last_cwd && r.last_cwd !== dir ? r.last_cwd : undefined;
+    log.info('opening a terminal for a session', { run: r.id, session: r.session_id, subscription: r.subscription_id, cwd: dir, lastCwd });
+    this.launcher.openTerminal({ title: r.name, cwd: dir, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
   }
 
   /**
@@ -2152,7 +2181,7 @@ export class RunManager {
     const r = this.row(runId);
     if (!r) throw httpError(404, 'Unknown run');
     if (!this.workDir(r)) {
-      throw httpError(409, `${r.last_cwd ?? r.cwd} no longer exists. Start a session in another folder and resume ${r.session_id} there.`);
+      throw httpError(409, `${this.homeDir(r)} no longer exists. Start a session in another folder and resume ${r.session_id} there.`);
     }
     // Mid-turn, this is queued rather than refused, exactly as a swap or a restart is: the operator
     // asked for a new terminal, not for a decision about whether now is a good moment, and being
