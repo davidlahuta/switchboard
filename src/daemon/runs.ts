@@ -133,8 +133,15 @@ export interface PendingRespawn {
 
 const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
 const CONTINUE_DELAY_MS = 2500;
-/** Without a hook to say the session is at a prompt, long enough for it to have got there. */
-const CONTINUE_SPAWN_DELAY_MS = 9000;
+/**
+ * How long a resumed session is given to say it is at a prompt before the message is typed anyway.
+ *
+ * SessionStart releases it 2.5 s after arriving (see onSessionStart), so this is only the fallback
+ * for a session whose hook never comes. It was nine seconds, which is less than resuming a long
+ * conversation takes: Chores, 84,000 records, reported SessionStart a second after its message had
+ * been typed into a terminal that was not reading yet, and the message was lost without a trace.
+ */
+const CONTINUE_SPAWN_DELAY_MS = 90_000;
 /**
  * A confirmation waiting for an answer. Claude Code footers every one of them with this, and the
  * option it starts on is often the one that exits — so nothing may be typed while it is on screen.
@@ -611,7 +618,8 @@ export class RunManager {
   private workCache: { at: number; by: Map<string, SessionWork[]> } | null = null;
   /** Set by the daemon once the updater knows which claude version is installed. */
   versionProvider: () => string | null = () => null;
-  private readonly pendingContinue = new Map<string, { text: string; timer: NodeJS.Timeout }>();
+  /** `released`: the session said it reached a prompt, so the message is not typed on a guess. */
+  private readonly pendingContinue = new Map<string, { text: string; timer: NodeJS.Timeout; released?: boolean }>();
   /** When each session was last picked up off a limit, so a poll every few seconds does it once. */
   private readonly lastRescue = new Map<string, number>();
   /** Runs whose due respawn is being held for a subagent, so that is said once rather than every sweep. */
@@ -2085,7 +2093,10 @@ export class RunManager {
     }
 
     this.pendingContinue.delete(runId);
-    log.info('typing the continue message', { run: runId, text: pending.text });
+    // Whether it went on the session's word or on the clock: a message typed on the clock and never
+    // seen in the transcript is the one to suspect.
+    if (pending.released) log.info('typing the continue message', { run: runId, text: pending.text, released: 'the session reached a prompt' });
+    else log.warn('typing the continue message without the session having said it reached a prompt', { run: runId, text: pending.text });
     this.send(runId, { type: 'type', text: pending.text });
   }
 
@@ -2342,6 +2353,7 @@ export class RunManager {
     const pending = this.pendingContinue.get(r.id);
     if (pending) {
       clearTimeout(pending.timer);
+      pending.released = true;
       pending.timer = setTimeout(() => this.typeContinue(r.id), CONTINUE_DELAY_MS);
     }
   }
