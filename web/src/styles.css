@@ -3406,6 +3406,64 @@ a.list-main:hover {
   border-top: 1px solid var(--border);
 }
 /*
+ * The heading that opens each group of sessions.
+ *
+ * The order is the page's answer to "what should I look at first"; without these it is a rule the
+ * reader has to infer from the marks, and a row that moves looks like the list being restless
+ * rather than a session changing what it wants. Quiet on purpose — it is scaffolding for the rows,
+ * not a thing to read in its own right.
+ */
+.srow-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px 6px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.srow-group:first-child {
+  border-top: 0;
+}
+.srow-group-label {
+  font-weight: 600;
+  color: var(--text-2);
+}
+.srow-group-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* Only the group that wants a person is coloured: colouring all five would spend the one bit of
+   attention the page has on saying that groups exist. */
+.srow-group-label.group-needs-you {
+  color: var(--warn);
+}
+.srow-group-label.group-messages {
+  color: var(--accent);
+}
+/* Parked and exited read as background: still here, not part of today's work. */
+.srow-group-label.group-parked,
+.srow-group-label.group-done {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* A filter that is on has to look on, or a list of three sessions out of nine reads as six that
+   have died. The select carries it, and the clear button only exists while there is one to clear. */
+.filter-pick {
+  gap: 4px;
+}
+.filter-pick.is-on .select-inline {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.filter-clear {
+  padding-inline: 6px;
+}
+
+/*
  * No hover or tap highlight on the row itself. This list paints itself when something changes, and
  * a background that also lights up under the pointer competes with that — on a desk of nine
  * sessions the eye learns to read the light as news, and a row lighting up because the mouse
