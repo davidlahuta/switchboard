@@ -104,8 +104,9 @@ export function keepFocus(action: () => void, what: string): void {
     clearTimeout(timer);
     act();
     const said = out.trim().split(/\r?\n/).pop() ?? '';
+    // Every outcome at info: whether this works is only visible after the fact, one line per tab.
     if (said.startsWith('restored')) log.info('put the foreground back after Windows Terminal took it', { what, to: said.slice('restored '.length) });
     else if (said.startsWith('refused')) log.warn('Windows Terminal took the foreground and Windows would not give it back', { what });
-    else log.debug('focus watcher finished', { what, said });
+    else log.info('left the foreground alone', { what, why: said || 'the watcher said nothing' });
   });
 }
