@@ -677,7 +677,7 @@ export class RunManager {
    */
   private readonly resumeLostReported = new Set<string>();
 
-  /** Runs that have already had a stray claude reported for them, so it is said once. */
+  /** Run and session pairs already reported as strays, so each is said once rather than per try. */
   private readonly straysSeen = new Set<string>();
 
   /** Files Claude Code keeps for a session, once found; see sessionFileKey. */
@@ -2029,9 +2029,16 @@ export class RunManager {
    * saying out loud once rather than leaving as a silence.
    */
   private strayReported(r: RunRow, sessionId: string, via: string): void {
+    /*
+     * Once per pair, not once per attempt. A stray that is a live process asks again — an orphaned
+     * MCP shim whose claude has exited keeps asking for as long as it runs — and a line for every
+     * attempt buried a day of the log under two of them. The pair is the key rather than the run,
+     * so a second stray on the same run is still heard.
+     */
+    const pair = `${r.id}:${sessionId}`;
+    if (this.straysSeen.has(pair)) return;
+    this.straysSeen.add(pair);
     log.warn('a claude that is not this session reported itself under its run id', { run: r.id, via, session: sessionId, hosting: r.session_id });
-    if (this.straysSeen.has(r.id)) return;
-    this.straysSeen.add(r.id);
     this.bus.toast('warn', `${r.name}: another claude process reported itself as this session and was ignored — something is passing SWITCHBOARD_RUN_ID on to a claude it should not.`);
   }
 

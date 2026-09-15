@@ -10,6 +10,12 @@ import { SERVER_INSTRUCTIONS, TOOLS } from '../shared/tools.ts';
 
 const log = logger('mcp');
 
+/** First wait before reconnecting to the daemon, doubling up to MAX_RETRY_MS while it is down. */
+const RETRY_MS = 500;
+const MAX_RETRY_MS = 10_000;
+/** How long a shim the daemon has disowned waits before asking again; see DaemonLink.disowned. */
+const DISOWNED_RETRY_MS = 60_000;
+
 interface Result {
   text: string;
   isError: boolean;
@@ -20,7 +26,16 @@ class DaemonLink {
   private ws: WebSocket | null = null;
   private seq = 0;
   private readonly pending = new Map<number, (r: Result) => void>();
-  private backoff = 500;
+  private backoff = RETRY_MS;
+  /**
+   * The daemon has said this connection is not the run it claims to be.
+   *
+   * Retrying is still right — a run's pid can be momentarily out of date, and a session that was
+   * refused once may be perfectly welcome a minute later — but retrying every half second is not.
+   * The backoff is driven by how the handshake went rather than by whether the socket opened,
+   * because a refusal opens a socket too, and resetting on `open` is what made the refusal free.
+   */
+  private disowned = false;
   private readonly hello: ShimToDaemon;
   private readonly onPush: (content: string, meta: Record<string, string>) => void;
   private readyWaiters: Array<() => void> = [];
@@ -35,7 +50,6 @@ class DaemonLink {
     const ws = new WebSocket(`${DAEMON_WS}/ws/agent`);
     ws.on('open', () => {
       this.ws = ws;
-      this.backoff = 500;
       ws.send(JSON.stringify(this.hello));
       for (const w of this.readyWaiters) w();
       this.readyWaiters = [];
@@ -47,7 +61,14 @@ class DaemonLink {
       } catch {
         return;
       }
-      if (msg.type === 'result') {
+      if (msg.type === 'welcome') {
+        this.disowned = false;
+        this.backoff = RETRY_MS;
+      } else if (msg.type === 'disowned') {
+        this.disowned = true;
+        this.backoff = DISOWNED_RETRY_MS;
+        log.debug('the daemon says this session is not its run', msg.reason);
+      } else if (msg.type === 'result') {
         this.pending.get(msg.id)?.({ text: msg.text, isError: msg.isError });
         this.pending.delete(msg.id);
       } else if (msg.type === 'push') {
@@ -61,7 +82,7 @@ class DaemonLink {
         this.pending.delete(id);
       }
       setTimeout(() => this.connect(), this.backoff);
-      this.backoff = Math.min(this.backoff * 2, 10_000);
+      if (!this.disowned) this.backoff = Math.min(this.backoff * 2, MAX_RETRY_MS);
     });
     ws.on('error', () => {
       // 'close' follows and schedules the reconnect

@@ -54,5 +54,12 @@ export type ShimToDaemon =
 
 export type DaemonToShim =
   | { type: 'welcome'; agentName: string }
+  /*
+   * This connection is not the run it says it is, so it is being closed. Sent rather than simply
+   * hanging up because the shim cannot tell a refusal from a daemon restart, and answered a
+   * hang-up by reconnecting half a second later — for as long as the process lived. Two orphaned
+   * shims, whose claude had exited without them, did that twice a second for hours.
+   */
+  | { type: 'disowned'; reason: string }
   | { type: 'result'; id: number; text: string; isError: boolean }
   | { type: 'push'; content: string; meta: Record<string, string> };
