@@ -11,6 +11,7 @@ import {
   rejectReservedArgs,
   processIsHost,
   reporterOf,
+  reviveDecision,
   sessionFileKey,
   rescueDecision,
   respawnGuard,
@@ -481,6 +482,34 @@ describe('whether the claude reporting an id is the one the run is hosting', () 
 
   it('asks nothing of the registry when there is no pid to ask about', () => {
     assert.equal(reporterOf({ kind: 'hook', event: 'Stop', source: null }, THEIRS, null, never), 'elsewhere');
+  });
+});
+
+describe('whether a session whose terminal seems gone is brought back', () => {
+  it('opens nothing for a run whose runner has already said hello', () => {
+    assert.equal(reviveDecision({ connected: true, claudeAlive: true, heldForMs: null }), 'already-back');
+    assert.equal(reviveDecision({ connected: true, claudeAlive: false, heldForMs: null }), 'already-back');
+  });
+
+  it('holds a revive while the run’s claude is still running', () => {
+    /*
+     * A daemon restarted on a machine short of memory took eighteen of the revive's thirty seconds
+     * to start listening, and every run was relaunched while every runner was still reconnecting:
+     * ten new terminals for ten conversations that were each still live in their own. A running
+     * claude is a terminal that still exists.
+     */
+    assert.equal(reviveDecision({ connected: false, claudeAlive: true, heldForMs: null }), 'hold');
+    assert.equal(reviveDecision({ connected: false, claudeAlive: true, heldForMs: 60_000 }), 'hold');
+  });
+
+  it('stops holding once the runner has had long enough to come back', () => {
+    // A runner that died can leave its claude running with nothing attached, and that session still
+    // has to come back.
+    assert.equal(reviveDecision({ connected: false, claudeAlive: true, heldForMs: 6 * 60_000 }), 'revive');
+  });
+
+  it('brings back a session whose claude is gone', () => {
+    assert.equal(reviveDecision({ connected: false, claudeAlive: false, heldForMs: null }), 'revive');
   });
 });
 

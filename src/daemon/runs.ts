@@ -134,6 +134,8 @@ const RESPAWN_COOLDOWN_MS = 30_000;
  * worse than one that stopped.
  */
 const REVIVE_BACKOFF_MS = [30_000, 2 * 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000];
+/** How long a revive waits on a claude that is still running before deciding its runner is gone; see reviveDecision. */
+const REVIVE_HOLD_MAX_MS = 5 * 60_000;
 /**
  * How long after a respawn the terminal's output says nothing about usage limits.
  *
@@ -414,6 +416,37 @@ export function reporterOf(witness: RebindWitness, reported: string, hostPid: nu
  * 29e12d39 moved back onto the conversation it had cleared that morning, and the relaunch resumed
  * that instead of the one that had been working for three hours.
  */
+/**
+ * What to do with a run whose revive has fallen due.
+ *
+ * A revive exists for a session whose terminal has gone. The evidence it used to act on was only
+ * that no runner had said hello within thirty seconds — and on a machine short of memory the daemon
+ * itself took eighteen of those to start listening after it had set the clock. Every runner was
+ * still alive, still reconnecting, and every run was relaunched anyway: ten new terminals opened
+ * for ten conversations that were each still running in the terminal they already had.
+ *
+ * So a revive asks the question it is really about. A run whose claude is still running has a
+ * terminal — the process is that terminal's child — and its runner is on its way back; opening
+ * another can only put a second process on the same conversation. It waits instead. Not for ever:
+ * a runner that has genuinely died can leave its claude running with nothing attached to it, so
+ * after a bounded hold the revive goes ahead.
+ */
+export function reviveDecision(input: { connected: boolean; claudeAlive: boolean; heldForMs: number | null }): 'already-back' | 'hold' | 'revive' {
+  if (input.connected) return 'already-back';
+  if (input.claudeAlive && (input.heldForMs === null || input.heldForMs < REVIVE_HOLD_MAX_MS)) return 'hold';
+  return 'revive';
+}
+
+/** Whether a process with this pid exists. EPERM means it exists and belongs to someone else. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 export function processIsHost(input: {
   claimedPid: number | null;
   hostPid: number | null;
@@ -542,6 +575,22 @@ export class RunManager {
 
   start(): void {
     this.db.run("UPDATE runs SET status = 'disconnected' WHERE status IN ('starting', 'running', 'swapping')");
+    this.subs.liveRunsFor = (id) => this.liveCount(id);
+    this.subs.onUsage = (s) => this.onUsage(s);
+  }
+
+  /**
+   * Give every session that was live when the daemon went down its turn at coming back.
+   *
+   * Called once the daemon is listening, not from start(). The revive clock is thirty seconds, and
+   * it measures how long a runner has had to reconnect — which it cannot do until there is something
+   * to reconnect to. Armed from start(), on a machine short of memory, eighteen of those seconds went
+   * on the daemon loading itself before it listened, and every runner lost the race while still
+   * reconnecting: ten terminals were opened for ten conversations that were each still running.
+   */
+  armStartupRevives(): void {
+    if (this.startupRevivesArmed) return;
+    this.startupRevivesArmed = true;
     /*
      * Everything live is disconnected until its runner says otherwise, and most of them will within
      * seconds. The ones that do not are sessions whose terminal is genuinely gone — the desk was
@@ -553,8 +602,6 @@ export class RunManager {
       if (r.revive_after) continue;
       this.scheduleRevive(r, 'its terminal was not there when the daemon started');
     }
-    this.subs.liveRunsFor = (id) => this.liveCount(id);
-    this.subs.onUsage = (s) => this.onUsage(s);
   }
 
   // ---------------------------------------------------------------- reads
@@ -692,6 +739,12 @@ export class RunManager {
 
   /** Run and session pairs already reported as strays, so each is said once rather than per try. */
   private readonly straysSeen = new Set<string>();
+
+  /** Set once the startup revives have been armed, so several listening servers arm them once. */
+  private startupRevivesArmed = false;
+
+  /** When a due revive first found the run's claude still running; see reviveDecision. */
+  private readonly reviveHeldSince = new Map<string, number>();
 
   /** Files Claude Code keeps for a session, once found; see sessionFileKey. */
   private readonly sessionFiles = new Map<string, string>();
@@ -1653,13 +1706,30 @@ export class RunManager {
       now(),
     );
     for (const r of due) {
-      const tries = (r.revive_tries ?? 0) + 1;
-      this.db.run('UPDATE runs SET revive_tries = ?, revive_after = NULL WHERE id = ?', tries, r.id);
-      if (this.conns.has(r.id)) {
-        // Its runner came back on its own; nothing to open.
+      const held = this.reviveHeldSince.get(r.id);
+      const decision = reviveDecision({
+        connected: this.conns.has(r.id),
+        claudeAlive: r.pid !== null && processAlive(r.pid),
+        heldForMs: held === undefined ? null : Date.now() - held,
+      });
+      if (decision === 'already-back') {
+        // Its runner came back on its own; nothing to open, and no attempt spent.
+        this.reviveHeldSince.delete(r.id);
         this.reviveSucceeded(r.id);
         continue;
       }
+      if (decision === 'hold') {
+        // Asked again shortly, on the first step of the backoff, without spending an attempt.
+        if (held === undefined) {
+          this.reviveHeldSince.set(r.id, Date.now());
+          log.info('not bringing back a session whose claude is still running', { run: r.id, pid: r.pid });
+        }
+        this.db.run('UPDATE runs SET revive_after = ? WHERE id = ?', new Date(Date.now() + REVIVE_BACKOFF_MS[0]).toISOString(), r.id);
+        continue;
+      }
+      this.reviveHeldSince.delete(r.id);
+      const tries = (r.revive_tries ?? 0) + 1;
+      this.db.run('UPDATE runs SET revive_tries = ?, revive_after = NULL WHERE id = ?', tries, r.id);
       try {
         log.info('bringing a session back', { run: r.id, session: r.session_id, attempt: tries });
         this.relaunch(r.id, true, `bringing it back (attempt ${tries})`, 'revive');
