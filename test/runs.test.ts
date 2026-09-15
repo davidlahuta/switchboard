@@ -17,8 +17,10 @@ import {
   respawnGuard,
   stallDecision,
   earlierDeadline,
+  mergePending,
   respawnPlacement,
   titleDecision,
+  type PendingRespawn,
 } from '../src/daemon/runs.ts';
 import { readyForRespawn, safeToRespawn, waitsForShells, workSummary } from '../src/shared/respawn.ts';
 import { looksFinished, startedWork, taskIdOf } from '../src/daemon/hooks.ts';
@@ -293,6 +295,63 @@ describe('which terminal a session comes back into', () => {
     for (const kind of ['restart', 'swap'] as const) {
       assert.equal(respawnPlacement({ kind, staleHost: true }), 'new-terminal', kind);
     }
+  });
+});
+
+describe('a second respawn asked for while one waits', () => {
+  const plan = (over: Partial<PendingRespawn>): PendingRespawn => ({
+    target: 'here',
+    reason: 'r',
+    continueAfter: false,
+    kind: 'restart',
+    trigger: 'manual',
+    queuedAt: 1000,
+    deadline: null,
+    ...over,
+  });
+  const place = (p: PendingRespawn) => respawnPlacement({ kind: p.kind, staleHost: false, fresh: p.fresh });
+
+  it('keeps a queued move when a new terminal is asked for, and opens the terminal too', () => {
+    // Rebalance, then "new terminal for every session": both were asked for.
+    const merged = mergePending(plan({ kind: 'swap', target: 'there', trigger: 'rebalance' }), plan({ kind: 'relaunch', queuedAt: 2000 }));
+    assert.equal(merged.kind, 'swap');
+    assert.equal(merged.target, 'there');
+    assert.equal(merged.trigger, 'rebalance');
+    assert.equal(place(merged), 'new-terminal', 'on a current host too');
+  });
+
+  it('turns a queued new terminal into a move that still opens one', () => {
+    const merged = mergePending(plan({ kind: 'relaunch' }), plan({ kind: 'swap', target: 'there', trigger: 'rebalance' }));
+    assert.equal(merged.kind, 'swap');
+    assert.equal(place(merged), 'new-terminal');
+  });
+
+  it('does not let a restart cancel a move', () => {
+    const merged = mergePending(plan({ kind: 'swap', target: 'there' }), plan({ kind: 'restart', trigger: 'update' }));
+    assert.equal(merged.kind, 'swap');
+    assert.equal(merged.target, 'there');
+    assert.equal(place(merged), 'in-place', 'nobody asked for a terminal');
+  });
+
+  it('lets a later move replace an earlier one', () => {
+    const merged = mergePending(plan({ kind: 'swap', target: 'there' }), plan({ kind: 'swap', target: 'elsewhere', trigger: 'limit' }));
+    assert.equal(merged.target, 'elsewhere');
+    assert.equal(merged.trigger, 'limit');
+  });
+
+  it('keeps the shorter patience, the first ask time and any promised continue', () => {
+    const merged = mergePending(
+      plan({ kind: 'swap', deadline: 9000, continueAfter: true, queuedAt: 1000 }),
+      plan({ kind: 'swap', deadline: null, continueAfter: false, queuedAt: 5000 }),
+    );
+    assert.equal(merged.deadline, 9000);
+    assert.equal(merged.queuedAt, 1000);
+    assert.equal(merged.continueAfter, true);
+  });
+
+  it('is the new plan unchanged when nothing was waiting', () => {
+    const next = plan({ kind: 'swap', target: 'there' });
+    assert.equal(mergePending(undefined, next), next);
   });
 });
 

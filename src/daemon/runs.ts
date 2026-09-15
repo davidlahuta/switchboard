@@ -7,7 +7,7 @@ import { logger } from '../log.ts';
 import { tabTitle } from '../shared/marks.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
 import { type LimitCause, scopedBinds } from '../shared/limits.ts';
-import { readyForRespawn } from '../shared/respawn.ts';
+import { readyForRespawn, workSummary } from '../shared/respawn.ts';
 import type {
   AgentStatus,
   Attention,
@@ -73,8 +73,35 @@ interface RunRow {
   last_viewed_at: string | null;
 }
 
+/** One session as `switchboard diag` shows it; see RunManager.diagnostics. */
+export interface RunDiagnostics {
+  run: string;
+  name: string;
+  status: string;
+  session: string;
+  subscription: string;
+  runner: { attached: boolean; startedAt: string | null; stale: boolean; relaunching: boolean };
+  claude: { pid: number | null; alive: boolean };
+  agent: { status: string; pid: number | null; lastSeen: string } | null;
+  work: { kind: string; label: string | null; since: string; silentMs: number }[];
+  queued: {
+    kind: string;
+    trigger: string;
+    target: string;
+    reason: string;
+    fresh: boolean;
+    waitedMs: number;
+    deadline: string | null;
+    ready: boolean;
+    holding: string;
+  } | null;
+  revive: { tries: number; after: string | null; heldSince: string | null } | null;
+  stalled: { since: string; reason: string | null } | null;
+  lastRespawnAt: string | null;
+}
+
 /** A respawn waiting for the session to finish its turn. */
-interface PendingRespawn {
+export interface PendingRespawn {
   /** subscription to come back on; equal to the current one for a plain restart */
   target: string;
   reason: string;
@@ -339,6 +366,35 @@ export function earlierDeadline(a: number | null, b: number | null): number | nu
 
 export function respawnPlacement(input: { kind: RespawnKind; staleHost: boolean; fresh?: boolean }): 'new-terminal' | 'in-place' {
   return input.kind === 'relaunch' || input.staleHost || input.fresh === true ? 'new-terminal' : 'in-place';
+}
+
+/**
+ * The one plan a session is left with when a second respawn is asked for while the first waits.
+ *
+ * Replacing the plan used to be the whole answer, and it lost whichever ask came first: press
+ * *rebalance* and then *new terminal for every session*, and the new terminal overwrote the move to
+ * another subscription — or, from the fleet button, was skipped outright for every session that
+ * already had something queued. On an out-of-date host nobody noticed, because a swap opens a new
+ * terminal there anyway; on a current one the terminal that was asked for never came.
+ *
+ * A move to another subscription is the one thing a restart or a new terminal cannot also do, so it
+ * survives them; otherwise whatever asked last decides. A new terminal asked for by either is carried
+ * as `fresh`. The patience is the shorter of the two (see earlierDeadline), the wait is counted from
+ * the first ask, and a session promised a continue message keeps that promise.
+ */
+export function mergePending(had: PendingRespawn | undefined, next: PendingRespawn): PendingRespawn {
+  if (!had) return next;
+  const kept = had.kind === 'swap' && next.kind !== 'swap' ? had : next;
+  const fresh = had.kind === 'relaunch' || had.fresh === true || next.kind === 'relaunch' || next.fresh === true;
+  const merged: PendingRespawn = {
+    ...kept,
+    continueAfter: had.continueAfter || next.continueAfter,
+    queuedAt: Math.min(had.queuedAt, next.queuedAt),
+    deadline: earlierDeadline(had.deadline, next.deadline),
+  };
+  if (merged.kind === 'relaunch') delete merged.fresh;
+  else merged.fresh = fresh;
+  return merged;
 }
 
 export function titleDecision(name: string, shadow: string | null, reported: string | null): { adopt?: string; push?: string } {
@@ -1437,9 +1493,10 @@ export class RunManager {
     let queued = 0;
     for (const r of this.db.all<RunRow>(`SELECT * FROM runs WHERE status IN ('running', 'starting', 'swapping')`)) {
       if (!this.conns.has(r.id)) continue;
-      // A session already on its way to another subscription will come back on the new build anyway;
-      // queueing a restart behind that swap would only take the turn twice.
-      if (this.pendingRespawn.has(r.id)) continue;
+      // A session already queued to come back will come back on the new build anyway; a restart
+      // behind that would only take the turn twice. A new terminal is not implied by what is waiting,
+      // so it is folded into it instead of skipped. See mergePending.
+      if (this.pendingRespawn.has(r.id) && kind !== 'relaunch') continue;
       // Respawn refuses a session that came back moments ago, and says so rather than throwing, so
       // the refusal has to be read here or the count is of what was asked rather than what happened.
       if (!opts.force && this.respawnedRecently(r.id) !== null) continue;
@@ -1490,11 +1547,18 @@ export class RunManager {
       const waiting = this.pendingRespawn.get(r.id);
       if (waiting?.kind === 'swap' || (!force && this.respawnedRecently(r.id) !== null)) {
         skipped++;
+        log.info('rebalance is leaving a session where it is', {
+          run: r.id,
+          why: waiting?.kind === 'swap' ? `it is already queued to move to ${waiting.target}` : 'it came back moments ago',
+        });
         continue;
       }
       const best = this.subs.rank({ exclude: r.subscription_id, runId: r.id, model: this.modelOf(r.id), pending });
-      if (!best) continue;
-      if (best.score < this.subs.scoreOf(r.subscription_id, pending) * SWAP_MARGIN) continue;
+      const current = this.subs.scoreOf(r.subscription_id, pending);
+      if (!best || best.score < current * SWAP_MARGIN) {
+        log.debug('rebalance found nowhere clearly better', { run: r.id, on: r.subscription_id, score: current, best: best?.row.id, bestScore: best?.score });
+        continue;
+      }
       /*
        * A restart or a new terminal queued for this session is absorbed rather than fought with:
        * press the two fleet buttons one after the other and both were asked for, so the session
@@ -1504,6 +1568,7 @@ export class RunManager {
       const alsoFresh = waiting?.kind === 'relaunch';
       const reason = alsoFresh ? 'rebalancing the desk, in the new terminal you asked for' : 'rebalancing the desk';
       try {
+        log.info('rebalance is moving a session', { run: r.id, from: r.subscription_id, to: best.row.id, score: current, targetScore: best.score, fresh: alsoFresh });
         this.swap(r.id, best.row.id, reason, { trigger: 'rebalance', force, fresh: alsoFresh });
         pending.set(r.subscription_id, (pending.get(r.subscription_id) ?? 0) - 1);
         pending.set(best.row.id, (pending.get(best.row.id) ?? 0) + 1);
@@ -1512,7 +1577,8 @@ export class RunManager {
         log.warn('could not queue a rebalance swap', { run: r.id, error: err instanceof Error ? err.message : err });
       }
     }
-    if (queued) log.info('rebalanced the desk', { moved: queued, of: live.length, skipped });
+    // Said even when nothing moved: "I pressed rebalance and nothing happened" is a question too.
+    log.info('rebalanced the desk', { moved: queued, of: live.length, skipped });
     return { queued, considered: live.length, skipped };
   }
 
@@ -1561,6 +1627,63 @@ export class RunManager {
    */
   private busy(r: RunRow, trigger?: RespawnTrigger): boolean {
     return !readyForRespawn({ status: this.coord.agent(r.session_id)?.status, work: this.coord.liveWork(r.session_id), trigger });
+  }
+
+  /** What a session is doing that a respawn waits on, in words: "agent working, 2 background shells". */
+  private holding(r: RunRow): string {
+    const status = this.coord.agent(r.session_id)?.status ?? 'unknown';
+    const work = workSummary(this.coord.liveWork(r.session_id));
+    return work ? `agent ${status}, ${work}` : `agent ${status}`;
+  }
+
+  /**
+   * Why every live session is where it is, in one read: what hosts it, what it is doing, what is
+   * queued for it and what that waits on.
+   *
+   * Answering "is the rollout going through" used to mean joining the process table, the database,
+   * the transcripts and the log by hand — and half of what decides it, the runner's start time, a
+   * revive held back, whether a queued plan is ready, lives only in this process's memory, where
+   * nothing outside it could look. See `switchboard diag`.
+   */
+  diagnostics(): RunDiagnostics[] {
+    const at = Date.now();
+    const iso = (ms: number | undefined | null): string | null => (ms ? new Date(ms).toISOString() : null);
+    return this.db.all<RunRow>("SELECT * FROM runs WHERE status <> 'exited' ORDER BY name").map((r) => {
+      const agent = this.coord.agent(r.session_id);
+      const plan = this.pendingRespawn.get(r.id);
+      return {
+        run: r.id,
+        name: r.name,
+        status: r.status,
+        session: r.session_id,
+        subscription: r.subscription_id,
+        runner: {
+          attached: this.conns.has(r.id),
+          startedAt: iso(this.runnerStartedAt.get(r.id)),
+          stale: this.runnerStale(r.id),
+          relaunching: this.relaunching.has(r.id),
+        },
+        claude: { pid: r.pid, alive: r.pid !== null && processAlive(r.pid) },
+        agent: agent ? { status: agent.status, pid: agent.pid, lastSeen: agent.last_seen } : null,
+        work: this.coord.liveWork(r.session_id).map((w) => ({ kind: w.kind, label: w.label, since: w.since, silentMs: at - Date.parse(w.lastSeen) })),
+        queued: plan
+          ? {
+              kind: plan.kind,
+              trigger: plan.trigger,
+              target: plan.target,
+              reason: plan.reason,
+              fresh: plan.fresh === true,
+              waitedMs: at - plan.queuedAt,
+              deadline: iso(plan.deadline),
+              ready: !this.busy(r, plan.trigger),
+              holding: this.holding(r),
+            }
+          : null,
+        revive: r.revive_after || r.revive_tries ? { tries: r.revive_tries, after: r.revive_after, heldSince: iso(this.reviveHeldSince.get(r.id)) } : null,
+        stalled: r.stalled_since ? { since: r.stalled_since, reason: r.stall_reason } : null,
+        lastRespawnAt: iso(this.lastRespawn.get(r.id)),
+      };
+    });
   }
 
   /**
@@ -1766,14 +1889,26 @@ export class RunManager {
       });
       return this.dto(r);
     }
-    if (!force && this.busy(r, plan.trigger)) {
-      // Replacing a plan that is already waiting does not restart its clock: whatever asked first
-      // set the patience, and asking again — the same limit, read off the screen a second time —
-      // is not a reason to give the session longer. See earlierDeadline.
-      const had = this.pendingRespawn.get(r.id);
-      const queued: PendingRespawn = had ? { ...plan, deadline: earlierDeadline(had.deadline, plan.deadline) } : plan;
+    // Folded into whatever is already waiting rather than replacing it, so neither ask is lost and
+    // asking again — the same limit, read off the screen a second time — does not give the session
+    // longer. See mergePending.
+    const had = this.pendingRespawn.get(r.id);
+    const queued = mergePending(had, plan);
+    if (!force && this.busy(r, queued.trigger)) {
       this.pendingRespawn.set(r.id, queued);
       this.savePending(r.id, queued);
+      // The toast fades; this is what says, an hour later, why a session has not come back yet.
+      log.info('queued a respawn until the session is free', {
+        run: r.id,
+        kind: queued.kind,
+        trigger: queued.trigger,
+        target: queued.target,
+        fresh: queued.fresh,
+        reason: queued.reason,
+        asked: plan.kind,
+        mergedWith: had?.kind,
+        holding: this.holding(r),
+      });
       const what =
         queued.kind === 'swap'
           ? `switch to ${this.subs.row(queued.target)?.label}`
@@ -1785,7 +1920,7 @@ export class RunManager {
       this.bus.invalidate('state');
       return this.dto(r);
     }
-    this.executeRespawn(r, plan);
+    this.executeRespawn(r, queued);
     return this.dto(this.row(r.id)!);
   }
 
@@ -1967,6 +2102,8 @@ export class RunManager {
     // revive, a stale host being replaced — is a session starting, so it gets the same treatment a
     // brand new one does.
     this.subs.syncProfile(r.subscription_id);
+    // The launcher logs the tab by title, which two sessions can share; this ties it to the run.
+    log.info('opening a terminal for a session', { run: r.id, session: r.session_id, subscription: r.subscription_id, cwd: r.last_cwd ?? r.cwd });
     this.launcher.openTerminal({ title: r.name, cwd: r.last_cwd ?? r.cwd, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
   }
 
@@ -1987,8 +2124,10 @@ export class RunManager {
     }
     // Mid-turn, this is queued rather than refused, exactly as a swap or a restart is: the operator
     // asked for a new terminal, not for a decision about whether now is a good moment, and being
-    // told "not now" only leaves them to come back and ask again later.
-    if (!force && r.status === 'running' && this.busy(r, trigger)) {
+    // told "not now" only leaves them to come back and ask again later. It goes the same way when
+    // something is already queued, even for a session that is free, so the two are taken together
+    // instead of this one now and the queued one straight after.
+    if (!force && r.status === 'running' && (this.busy(r, trigger) || this.pendingRespawn.has(r.id))) {
       return this.respawn(
         r,
         { target: r.subscription_id, reason, continueAfter: false, kind: 'relaunch', trigger, queuedAt: Date.now(), deadline: null },
@@ -1998,6 +2137,7 @@ export class RunManager {
     // Past the queue, this is a session going down and coming back, so it starts the same clock a
     // swap does: nothing else takes it while it is coming up, and the screen it comes up with is
     // not read as news about usage.
+    log.info('relaunching', { run: r.id, session: r.session_id, reason, trigger, force, status: r.status, attached: this.conns.has(r.id) });
     this.lastRespawn.set(r.id, Date.now());
     if (r.status === 'exited') {
       // It ended — on its own, or because the machine did. Clear that so it is a live run again.

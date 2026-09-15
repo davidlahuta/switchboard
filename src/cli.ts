@@ -23,6 +23,7 @@ Usage:
   switchboard service uninstall      Remove the automatic start
   switchboard service status         Show the scheduled task and whether the daemon answers
   switchboard status                 Print a short summary from the running daemon
+  switchboard diag [--json]          Why every session is where it is: host, work, queued respawns
 `;
 
 function flags(argv: string[]): Record<string, string | true> {
@@ -102,6 +103,49 @@ async function status(): Promise<void> {
   console.log(`claude ${s.update.currentVersion ?? '?'}${s.update.lastError ? ` · update issue: ${s.update.lastError}` : ''}`);
 }
 
+/**
+ * One block per live session: what hosts it, what it is doing, what is queued for it and what that
+ * waits on. Anything that needs a person is in capitals, so a glance down the left margin finds it.
+ */
+async function diag(asJson: boolean): Promise<void> {
+  const res = await fetch(`${DAEMON_URL}/api/diagnostics`).catch(() => null);
+  if (!res?.ok) {
+    console.error(`Daemon not reachable at ${DAEMON_URL}${res ? ` (HTTP ${res.status})` : ''}`);
+    process.exit(1);
+  }
+  const d = (await res.json()) as import('./daemon/server.ts').Diagnostics;
+  if (asJson) {
+    console.log(JSON.stringify(d, null, 2));
+    return;
+  }
+  const dur = (ms: number): string => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${(ms / 3_600_000).toFixed(1)}h`);
+  const since = (iso: string | null): string => (iso ? `${dur(Date.now() - Date.parse(iso))} ago` : '—');
+  const k = d.daemon;
+  console.log(
+    `daemon ${k.version} pid ${k.pid} · up ${dur(k.uptimeS * 1000)} · ${k.rssMb} MB · claude ${k.claude ?? '?'}` +
+      `${k.staleCode ? ' · CODE CHANGED SINCE START' : ''}${k.supervised ? '' : ' · not supervised'}`,
+  );
+  for (const r of d.runs) {
+    const notes: string[] = [];
+    if (!r.runner.attached) notes.push('RUNNER NOT ATTACHED');
+    if (r.claude.pid !== null && !r.claude.alive) notes.push(`CLAUDE ${r.claude.pid} GONE`);
+    if (r.agent && r.claude.pid !== null && r.agent.pid !== r.claude.pid) notes.push(`BOARD HAS PID ${r.agent.pid}`);
+    if (r.stalled) notes.push(`STALLED: ${r.stalled.reason ?? 'unknown'}`);
+    if (r.revive) notes.push(`REVIVE try ${r.revive.tries}${r.revive.after ? ` due ${r.revive.after.slice(11, 19)}Z` : ''}`);
+    if (r.runner.stale) notes.push('old host');
+    if (r.runner.relaunching) notes.push('relaunching');
+    console.log(`\n${r.name}  [${r.run.slice(0, 8)}]  ${r.status} · agent ${r.agent?.status ?? '—'}, seen ${since(r.agent?.lastSeen ?? null)} · session ${r.session.slice(0, 8)} · ${r.subscription}`);
+    console.log(`  runner up ${since(r.runner.startedAt)} · claude ${r.claude.pid ?? '—'}${notes.length ? ` · ${notes.join(' · ')}` : ''}`);
+    if (r.queued) {
+      const q = r.queued;
+      const where = `${q.kind === 'swap' ? ` → ${q.target}` : ''}${q.fresh ? ', new terminal' : ''}`;
+      const state = q.ready ? 'ready, taken within seconds' : `waiting on ${q.holding}`;
+      console.log(`  queued ${q.kind} (${q.trigger})${where} for ${dur(q.waitedMs)} · ${state}${q.deadline ? ` · deadline ${q.deadline.slice(11, 19)}Z` : ''}`);
+    }
+    for (const w of r.work) console.log(`  ${w.kind.padEnd(8)} ${(w.label ?? '').slice(0, 58).padEnd(58)} started ${since(w.since)}, silent ${dur(w.silentMs)}`);
+  }
+}
+
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
   const f = flags(rest);
@@ -172,6 +216,8 @@ async function main(): Promise<void> {
     }
     case 'status':
       return status();
+    case 'diag':
+      return diag(f.json === true);
     case 'version':
     case '--version':
       console.log(VERSION);
