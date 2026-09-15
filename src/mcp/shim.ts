@@ -129,6 +129,7 @@ export async function runShim(): Promise<void> {
     type: 'hello',
     sessionId: process.env.CLAUDE_CODE_SESSION_ID || `mcp-${crypto.randomUUID()}`,
     pid: Number(process.env.CLAUDE_PID) || process.ppid || null,
+    ppid: process.ppid || null,
     cwd: process.env.CLAUDE_PROJECT_DIR || process.cwd(),
     runId,
     // Sessions launched by Switchboard always load the channel; others can opt in explicitly.

@@ -37,7 +37,7 @@ export class AgentHub implements PushTarget {
       } catch {
         return;
       }
-      queue = queue.then(() => this.onMessage(ws, msg, reply, (id) => (sessionId = id), () => sessionId)).catch((err) => {
+      queue = queue.then(() => this.onMessage(ws, msg, reply, (id) => (sessionId = id), () => this.sessionOf(ws) ?? sessionId)).catch((err) => {
         log.warn('shim message failed', err instanceof Error ? err.message : err);
       });
     });
@@ -64,47 +64,53 @@ export class AgentHub implements PushTarget {
     getSession: () => string | null,
   ): Promise<void> {
     if (msg.type === 'hello') {
-      setSession(msg.sessionId);
       /*
-       * The second witness of which conversation a run is actually on.
+       * Which conversation this connection belongs to is the run's to say, never the shim's.
        *
-       * Until now only a hook could say — and a hook only says it while carrying the run id, which
-       * means the session has to do something first. A session nobody types into does nothing: it
-       * comes up, connects, and waits. So a resume that quietly came up on the wrong conversation
-       * went unnoticed until somebody typed at it, and the promise a spawn makes about which id it
-       * is fetching stayed open for as long as the session stayed quiet.
+       * The shim takes its session id from CLAUDE_CODE_SESSION_ID, which Claude Code sets once, when
+       * it starts its MCP servers — and a `/clear` starts a new conversation without restarting them.
+       * So after a clear the shim announces the conversation its process *started* with, on every
+       * reconnect, for as long as the process lives. It used to be asked to rebind the run on the
+       * strength of that. The guard refused it, until the second its claude was killed for a swap and
+       * no registry file was left to contradict it: run 29e12d39 moved back onto the conversation it
+       * had cleared that morning, and the relaunch resumed that instead of the one that was working.
        *
-       * This connection carries both ids and arrives the moment claude starts, whoever is or is not
-       * watching. If it says the run is somewhere it should not be, the run disowns it here exactly
-       * as it would on a hook.
+       * What a shim can say honestly is which process started it. If that is the process the run
+       * hosts, it is the run's channel, filed under whatever conversation the run's hooks say is live
+       * and moved with it by rekey. If it is not, it is some other claude carrying the run id, and is
+       * told so. A failed resume is still caught — by the hooks, which come from the conversation
+       * itself.
        */
-      if (msg.runId && !this.runs.rebind(msg.runId, msg.sessionId, { kind: 'shim', pid: msg.pid })) {
-        log.debug('a session announced itself on a conversation its run had disowned', { run: msg.runId, session: msg.sessionId });
-        // Told, not just dropped: a shim that is only hung up on comes straight back. RunManager
-        // has already said what happened at warn level, once.
-        reply({ type: 'disowned', reason: `${msg.runId} is not on this conversation` });
+      const hosted = msg.runId ? this.runs.row(msg.runId) : undefined;
+      const parent = msg.ppid ?? msg.pid;
+      if (hosted && !this.runs.hostsProcess(hosted.id, parent)) {
+        log.debug('a claude that is not this run announced itself under its id', { run: hosted.id, pid: parent, claimed: msg.sessionId });
+        // Told, not just dropped: a shim that is only hung up on comes straight back.
+        reply({ type: 'disowned', reason: `${hosted.id} is hosted by another process` });
         ws.close();
         return;
       }
+      const sessionId = hosted ? hosted.session_id : msg.sessionId;
+      setSession(sessionId);
       // A session announcing itself is a terminal that came up, which is the thing a revive was
       // waiting to see. SessionStart would say so too, when it fires; this does not depend on it.
-      if (msg.runId) this.runs.cameBack(msg.runId);
-      const run = msg.runId ? this.runs.row(msg.runId) : this.runs.bySession(msg.sessionId);
+      if (hosted) this.runs.cameBack(hosted.id);
+      const run = hosted ?? (msg.runId ? undefined : this.runs.bySession(msg.sessionId));
       const agent = await this.coord.registerAgent({
-        sessionId: msg.sessionId,
+        sessionId,
         cwd: msg.cwd,
-        pid: msg.pid,
+        pid: parent,
         runId: run?.id ?? null,
         subscriptionId: run?.subscription_id ?? null,
         hasChannel: msg.channel,
-        name: this.coord.agent(msg.sessionId) ? null : (run?.name ?? null),
+        name: this.coord.agent(sessionId) ? null : (run?.name ?? null),
       });
-      const previous = this.conns.get(msg.sessionId);
+      const previous = this.conns.get(sessionId);
       if (previous && previous.ws !== ws) previous.ws.close();
-      this.conns.set(msg.sessionId, { ws, channel: msg.channel });
+      this.conns.set(sessionId, { ws, channel: msg.channel });
       reply({ type: 'welcome', agentName: agent.name });
-      if (msg.channel) this.coord.flushPushQueue(msg.sessionId);
-      log.debug('shim connected', { session: msg.sessionId, channel: msg.channel });
+      if (msg.channel) this.coord.flushPushQueue(sessionId);
+      log.debug('shim connected', { session: sessionId, claimed: msg.sessionId, channel: msg.channel });
       return;
     }
     if (msg.type === 'call') {
@@ -116,6 +122,18 @@ export class AgentHub implements PushTarget {
       const r = await this.coord.runTool(sid, msg.tool, msg.args ?? {});
       reply({ type: 'result', id: msg.id, text: r.text, isError: r.isError });
     }
+  }
+
+  /**
+   * The session a socket is filed under now.
+   *
+   * Not the id it said hello with: a `/clear` re-keys the connection to the new conversation (see
+   * rekey), and tool calls read from here, so a claim or an intent made after a clear is the new
+   * conversation's rather than the one that has ended.
+   */
+  private sessionOf(ws: WebSocket): string | null {
+    for (const [id, conn] of this.conns) if (conn.ws === ws) return id;
+    return null;
   }
 
   push(agentId: string, content: string, meta: Record<string, string>): boolean {
