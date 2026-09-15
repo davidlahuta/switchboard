@@ -48,19 +48,41 @@ export function safeToRespawn(status: AgentStatus | undefined | null): boolean {
 }
 
 /**
+ * Whether a respawn for this reason should wait for the session's background shells and monitors.
+ *
+ * A shell is cheap to re-run and expensive to lose at the wrong moment, and which of the two it is
+ * depends on why the session is being taken. A session that has run out of usage, or whose terminal
+ * has died, cannot make progress where it is — its shell is doing it no good, and waiting would only
+ * keep it stuck. Everything else is a respawn nobody needed this minute: a rebalance, an update, a
+ * swap chasing headroom, a new terminal asked for by hand. Those wait.
+ *
+ * They wait because a session that has started a long run in the background and ended its turn is
+ * not finished; it is waiting to be woken when the run reports, and only the process that started
+ * the run can be woken. A rebalance taken the second a turn ended killed a recipe six minutes into a
+ * twelve-minute run, and the session came back with a plan that depended on a result nobody would
+ * ever deliver. The wait is bounded all the same: a shell nothing mentions is given up on after
+ * three quarters of an hour of silence, so a dev server left running holds nothing off for ever.
+ */
+export function waitsForShells(trigger: RespawnTrigger): boolean {
+  return trigger !== 'limit' && trigger !== 'rescue' && trigger !== 'revive';
+}
+
+/**
  * Whether the session can be taken down now, turn and everything it started included.
  *
  * The turn ending is only half of it. A subagent launched in the background outlives the turn that
  * launched it — measurably: the parent's Stop hook arrives while the subagent is still thinking, and
  * only its SubagentStop says the work is really over. Taking the session in that window throws away
- * everything the subagent has spent, which is the most expensive thing Switchboard can do by
- * accident, so a live subagent counts as busy exactly as a running turn does.
+ * everything the subagent has spent, so a live subagent counts as busy whatever the reason.
  *
- * Background shells and monitors deliberately do not. A dev server started this morning would
- * otherwise hold off a restart for ever, and unlike a subagent it costs nothing but a re-run.
+ * Background shells and monitors count when `trigger` says the respawn can wait for them; see
+ * waitsForShells. Without a trigger — a caller asking whether a session looks busy, not whether to
+ * take it — they do not.
  */
-export function readyForRespawn(input: { status: AgentStatus | undefined | null; work: SessionWork[] }): boolean {
-  return safeToRespawn(input.status) && !input.work.some((w) => w.kind === 'subagent');
+export function readyForRespawn(input: { status: AgentStatus | undefined | null; work: SessionWork[]; trigger?: RespawnTrigger }): boolean {
+  if (!safeToRespawn(input.status)) return false;
+  const shellsHold = input.trigger !== undefined && waitsForShells(input.trigger);
+  return !input.work.some((w) => w.kind === 'subagent' || shellsHold);
 }
 
 /** "2 subagents, 1 shell" — what a session still has running, in the order that matters. */

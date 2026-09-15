@@ -9,6 +9,7 @@ import {
   limitSwapPlan,
   rebindDecision,
   rejectReservedArgs,
+  processIsHost,
   reporterOf,
   sessionFileKey,
   rescueDecision,
@@ -18,7 +19,7 @@ import {
   respawnPlacement,
   titleDecision,
 } from '../src/daemon/runs.ts';
-import { readyForRespawn, safeToRespawn, workSummary } from '../src/shared/respawn.ts';
+import { readyForRespawn, safeToRespawn, waitsForShells, workSummary } from '../src/shared/respawn.ts';
 import { looksFinished, startedWork, taskIdOf } from '../src/daemon/hooks.ts';
 import { attentionMark, byAttention, GROUP_LABEL, QUIET_AFTER_MS, SESSION_GROUPS, sessionGroup, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
@@ -303,12 +304,39 @@ describe('when a session is taken for a restart, swap or relaunch', () => {
     assert.equal(readyForRespawn({ status: 'idle', work: [sub('subagent')] }), false);
   });
 
-  it('does not wait for a background shell or a monitor', () => {
-    // A dev server left running would hold a restart off for ever, and re-running it costs nothing
-    // like what a subagent's tokens cost.
+  it('waits for a background shell before a respawn nobody needed this minute', () => {
+    /*
+     * Run 29e12d39 started its recipe in the background, ended its turn to wait for it, and was
+     * taken for a rebalance one second later. The recipe died with the process six minutes into a
+     * twelve-minute run, and the session came back holding a plan that waited on a result only the
+     * dead process could have been woken with.
+     */
     const work = (kind: SessionWork['kind']): SessionWork => ({ id: 'b1', kind, label: null, since: '', lastSeen: '' });
-    assert.equal(readyForRespawn({ status: 'idle', work: [work('shell')] }), true);
-    assert.equal(readyForRespawn({ status: 'idle', work: [work('monitor')] }), true);
+    for (const trigger of ['rebalance', 'manual', 'update', 'proactive'] as const) {
+      assert.equal(readyForRespawn({ status: 'idle', work: [work('shell')], trigger }), false, trigger);
+      assert.equal(readyForRespawn({ status: 'idle', work: [work('monitor')], trigger }), false, trigger);
+    }
+  });
+
+  it('does not keep a session stuck for a shell when it cannot run where it is', () => {
+    // Out of usage, or with its terminal already gone: the shell is doing it no good.
+    const work = (kind: SessionWork['kind']): SessionWork => ({ id: 'b1', kind, label: null, since: '', lastSeen: '' });
+    for (const trigger of ['limit', 'rescue', 'revive'] as const) {
+      assert.equal(readyForRespawn({ status: 'limited', work: [work('shell')], trigger }), true, trigger);
+      assert.ok(!waitsForShells(trigger), trigger);
+    }
+  });
+
+  it('still waits for a subagent however urgent the respawn', () => {
+    const sub: SessionWork = { id: 'a1', kind: 'subagent', label: null, since: '', lastSeen: '' };
+    assert.equal(readyForRespawn({ status: 'idle', work: [sub], trigger: 'rebalance' }), false);
+    assert.equal(readyForRespawn({ status: 'idle', work: [sub], trigger: 'limit' }), false);
+  });
+
+  it('does not count a shell as busy when nobody is asking about a respawn', () => {
+    // The web asks "does this session look busy", which is a different question.
+    const shell: SessionWork = { id: 'b1', kind: 'shell', label: null, since: '', lastSeen: '' };
+    assert.equal(readyForRespawn({ status: 'idle', work: [shell] }), true);
   });
 
   it('still protects a running turn whatever else is open', () => {
@@ -454,23 +482,41 @@ describe('whether the claude reporting an id is the one the run is hosting', () 
   it('asks nothing of the registry when there is no pid to ask about', () => {
     assert.equal(reporterOf({ kind: 'hook', event: 'Stop', source: null }, THEIRS, null, never), 'elsewhere');
   });
+});
 
-  it('lets the MCP shim answer for the claude that started it', () => {
-    assert.equal(reporterOf({ kind: 'shim', pid: 4242 }, THEIRS, 4242, () => THEIRS), 'hosted', 'the session, on a conversation the run has not heard of yet');
-    assert.equal(reporterOf({ kind: 'shim', pid: 88 }, THEIRS, 4242, never), 'elsewhere', 'a claude the session itself started');
-    assert.equal(reporterOf({ kind: 'shim', pid: null }, THEIRS, 4242, never), 'elsewhere', 'and one that will not say');
+describe('which process an MCP connection belongs to', () => {
+  const RUN = '5f2e3846-9601-40b5-9e13-d12a462b1713';
+  const OTHER = '2cd9f4ad-4326-4355-911c-bfd0ed7ff94a';
+  const never = (): string | null => {
+    throw new Error('the registry should not have been read');
+  };
+
+  it('is the run’s when the process that started it is the one the runner spawned', () => {
+    assert.equal(processIsHost({ claimedPid: 50304, hostPid: 50304, runSession: RUN, sessionOfClaimed: never }), true);
   });
 
-  it('does not let a borrowed pid make a shim sound like the session', () => {
-    // Claude Code stamps CLAUDE_PID on everything a session launches, and the shim prefers it to
-    // its own parent — so a `claude -p` in a Bash tool hands its shim the session's pid and a
-    // conversation of its own. The pid is only worth something if it agrees about which
-    // conversation it is in.
-    assert.equal(reporterOf({ kind: 'shim', pid: 4242 }, THEIRS, 4242, () => MINE), 'elsewhere');
+  it('still is the run’s after a /clear, whatever conversation the shim goes on claiming', () => {
+    /*
+     * The shim's own idea of its conversation is set when its process starts and never updated.
+     * After the run cleared into 5f2e3846 its shim went on announcing 2cd9f4ad, and the one time
+     * that claim was believed the run moved back onto the conversation it had left. The claim is
+     * not an input here at all, so there is nothing for it to get wrong.
+     */
+    assert.equal(processIsHost({ claimedPid: 50304, hostPid: 50304, runSession: RUN, sessionOfClaimed: never }), true);
   });
 
-  it('still believes a shim on a build that keeps no such file', () => {
-    assert.equal(reporterOf({ kind: 'shim', pid: 4242 }, THEIRS, 4242, () => null), 'hosted');
+  it('is the run’s for the new claude a respawn has started before its pid is recorded', () => {
+    assert.equal(processIsHost({ claimedPid: 48492, hostPid: 50304, runSession: RUN, sessionOfClaimed: () => RUN }), true);
+  });
+
+  it('is not the run’s when it came from another claude carrying the run id', () => {
+    // A `claude -p` run from the session's own shell: a different process, in a conversation of its own.
+    assert.equal(processIsHost({ claimedPid: 7777, hostPid: 50304, runSession: RUN, sessionOfClaimed: () => OTHER }), false);
+    assert.equal(processIsHost({ claimedPid: 7777, hostPid: 50304, runSession: RUN, sessionOfClaimed: () => null }), false);
+  });
+
+  it('is nobody’s when it will not say which process started it', () => {
+    assert.equal(processIsHost({ claimedPid: null, hostPid: 50304, runSession: RUN, sessionOfClaimed: never }), false);
   });
 });
 

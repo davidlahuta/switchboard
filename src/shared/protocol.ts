@@ -49,7 +49,21 @@ export type DaemonToRunner =
   | { type: 'error'; message: string };
 
 export type ShimToDaemon =
-  | { type: 'hello'; sessionId: string; pid: number | null; cwd: string; runId: string | null; channel: boolean }
+  | {
+      type: 'hello';
+      /** Only what the process started with; see AgentHub for why the daemon does not rely on it. */
+      sessionId: string;
+      pid: number | null;
+      /**
+       * The process that started this shim: the claude it serves. Unlike `pid`, which prefers the
+       * inherited CLAUDE_PID, this cannot be borrowed from a claude further up. Absent from shims
+       * that predate it.
+       */
+      ppid?: number | null;
+      cwd: string;
+      runId: string | null;
+      channel: boolean;
+    }
   | { type: 'call'; id: number; tool: string; args: Record<string, unknown> };
 
 export type DaemonToShim =

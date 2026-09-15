@@ -359,14 +359,14 @@ export function titleDecision(name: string, shadow: string | null, reported: str
 export type Reporter = 'hosted' | 'cleared' | 'elsewhere';
 
 /**
- * Who is telling the run which conversation it is on.
+ * Who is telling the run which conversation it is on: a hook, from the claude that fired it.
  *
- * A hook arrives from the claude that fired it and names the event; the MCP shim arrives from a
- * process claude started and carries the pid of its parent, which is the claude itself. Neither is
- * trusted for being able to name the run — the run id is inherited, so anything can — but each
- * carries something that settles whether it is the process this run hosts.
+ * The MCP shim used to be a second witness, and it is not one. It takes its session id from
+ * CLAUDE_CODE_SESSION_ID, which Claude Code sets once, when it starts its MCP servers, and a `/clear`
+ * starts a new conversation without restarting them — so after a clear the shim announces the
+ * conversation its process started with, for the rest of the process's life. See AgentHub.
  */
-export type RebindWitness = { kind: 'hook'; event: string; source: string | null } | { kind: 'shim'; pid: number | null };
+export type RebindWitness = { kind: 'hook'; event: string; source: string | null };
 
 /**
  * Where a file Claude Code keeps for a session is remembered, once found.
@@ -393,23 +393,36 @@ export function clearedInPlace(event: string, source: string | null): boolean {
  * `hostPid` is the pid the runner spawned, and `hostSession` reads back the conversation Claude
  * Code says that pid is in — asked lazily, because it is a file read and most reports never need
  * it. Together they are the question: is the claude saying this the one in this run's terminal?
- *
- * A shim carries a pid of its own, and it is worth no more than the pid it names. Claude Code
- * stamps CLAUDE_PID on everything a session launches and the shim prefers it, so a `claude -p`
- * started from a hosted session hands its shim the *parent's* pid along with a conversation of its
- * own — a claim to be this run's session that matches on pid and is false. The pid has to agree
- * about which conversation it is in before it means anything.
  */
 export function reporterOf(witness: RebindWitness, reported: string, hostPid: number | null, hostSession: () => string | null): Reporter {
-  if (witness.kind === 'shim') {
-    if (witness.pid === null || witness.pid !== hostPid) return 'elsewhere';
-    const inThere = hostSession();
-    // Nothing known about the pid is not evidence against it: older builds keep no such file, and
-    // refusing every shim on a build that does not write one would take the board down with it.
-    return inThere === null || inThere === reported ? 'hosted' : 'elsewhere';
-  }
   if (clearedInPlace(witness.event, witness.source)) return 'cleared';
   return hostPid !== null && hostSession() === reported ? 'hosted' : 'elsewhere';
+}
+
+/**
+ * Whether the process a connection came from is the claude this run's terminal is running.
+ *
+ * Asked of an MCP shim, which can say honestly which process started it and nothing trustworthy
+ * about which conversation that process is in now. The pid the runner recorded is the direct
+ * answer. The session registry is the second one, for the seconds after a respawn when the new
+ * claude is up and its pid is not recorded yet: a process Claude Code says is in this run's
+ * conversation is this run's, whatever pid it was last recorded under.
+ *
+ * What the shim claims about its conversation is deliberately not an input. After a `/clear` it is
+ * wrong for the rest of the process's life, and on the one occasion a guard let it through — the
+ * second its claude was killed for a swap, when no registry file was left to contradict it — run
+ * 29e12d39 moved back onto the conversation it had cleared that morning, and the relaunch resumed
+ * that instead of the one that had been working for three hours.
+ */
+export function processIsHost(input: {
+  claimedPid: number | null;
+  hostPid: number | null;
+  runSession: string;
+  sessionOfClaimed: () => string | null;
+}): boolean {
+  if (input.claimedPid === null) return false;
+  if (input.claimedPid === input.hostPid) return true;
+  return input.sessionOfClaimed() === input.runSession;
 }
 
 /**
@@ -758,7 +771,7 @@ export class RunManager {
        * the result the wait was for. Hence the same settle window onWorkSettled uses, measured from
        * when this loop first saw the session free rather than from any one event.
        */
-      const free = !this.busy(r) && this.respawnedRecently(runId) === null;
+      const free = !this.busy(r, plan.trigger) && this.respawnedRecently(runId) === null;
       if (!free) this.readySince.delete(runId);
       else if (!this.readySince.has(runId)) this.readySince.set(runId, Date.now());
       const readyAt = this.readySince.get(runId);
@@ -1488,8 +1501,13 @@ export class RunManager {
     return r?.model ?? getSettings(this.db).defaultModel ?? null;
   }
 
-  private busy(r: RunRow): boolean {
-    return !readyForRespawn({ status: this.coord.agent(r.session_id)?.status, work: this.coord.liveWork(r.session_id) });
+  /**
+   * Whether taking the session now would cost something. `trigger` is why it is being taken, when
+   * that is a respawn: a background shell holds off a respawn nobody needed urgently, and not one
+   * the session cannot make progress without. See readyForRespawn.
+   */
+  private busy(r: RunRow, trigger?: RespawnTrigger): boolean {
+    return !readyForRespawn({ status: this.coord.agent(r.session_id)?.status, work: this.coord.liveWork(r.session_id), trigger });
   }
 
   /**
@@ -1678,7 +1696,7 @@ export class RunManager {
       });
       return this.dto(r);
     }
-    if (!force && this.busy(r)) {
+    if (!force && this.busy(r, plan.trigger)) {
       // Replacing a plan that is already waiting does not restart its clock: whatever asked first
       // set the patience, and asking again — the same limit, read off the screen a second time —
       // is not a reason to give the session longer. See earlierDeadline.
@@ -1693,7 +1711,7 @@ export class RunManager {
             ? `open a new terminal (${queued.reason})`
             : `restart (${queued.reason})`;
       const patience = queued.deadline ? ` (at the latest in ${Math.round((queued.deadline - Date.now()) / 60_000)} min)` : '';
-      this.bus.toast('info', `${r.name}: will ${what} when the current turn ends${patience}`);
+      this.bus.toast('info', `${r.name}: will ${what} once it is free${patience}`);
       this.bus.invalidate('state');
       return this.dto(r);
     }
@@ -1900,7 +1918,7 @@ export class RunManager {
     // Mid-turn, this is queued rather than refused, exactly as a swap or a restart is: the operator
     // asked for a new terminal, not for a decision about whether now is a good moment, and being
     // told "not now" only leaves them to come back and ask again later.
-    if (!force && r.status === 'running' && this.busy(r)) {
+    if (!force && r.status === 'running' && this.busy(r, trigger)) {
       return this.respawn(
         r,
         { target: r.subscription_id, reason, continueAfter: false, kind: 'relaunch', trigger, queuedAt: Date.now(), deadline: null },
@@ -1974,7 +1992,7 @@ export class RunManager {
     if (!r) return true;
     const decision = rebindDecision(r.session_id, sessionId, r.resuming, this.whoReported(r, sessionId, witness));
     if (decision === 'stray') {
-      this.strayReported(r, sessionId, witness.kind === 'hook' ? witness.event : 'an MCP connection');
+      this.strayReported(r, sessionId, witness.event);
       return false;
     }
     if (decision === 'lost') {
@@ -2009,6 +2027,18 @@ export class RunManager {
    */
   private whoReported(r: RunRow, sessionId: string, witness: RebindWitness): Reporter {
     return reporterOf(witness, sessionId, r.pid, () => this.registrySession(r, r.pid!));
+  }
+
+  /** Whether `pid` is the claude this run's terminal is running; see processIsHost. */
+  hostsProcess(runId: string, pid: number | null): boolean {
+    const r = this.row(runId);
+    if (!r) return false;
+    return processIsHost({
+      claimedPid: pid,
+      hostPid: r.pid,
+      runSession: r.session_id,
+      sessionOfClaimed: () => (pid === null ? null : this.registrySession(r, pid)),
+    });
   }
 
   /** The conversation Claude Code says a process is in, or null if it does not say. */
@@ -2107,7 +2137,7 @@ export class RunManager {
     if (!this.pendingRespawn.has(r.id)) return;
     setTimeout(() => {
       const fresh = this.bySession(sessionId);
-      if (!fresh || fresh.status === 'exited' || !this.pendingRespawn.has(fresh.id) || this.busy(fresh)) return;
+      if (!fresh || fresh.status === 'exited' || !this.pendingRespawn.has(fresh.id) || this.busy(fresh, this.pendingRespawn.get(fresh.id)?.trigger)) return;
       log.info('taking a queued respawn now that the session has nothing running', { run: fresh.id });
       this.onIdle(sessionId);
     }, WORK_SETTLED_MS);
@@ -2136,8 +2166,12 @@ export class RunManager {
     if (!r) return;
     // The turn is over but the session may not be: a subagent it launched in the background is
     // still spending, and onWorkSettled will come back here when it is really done.
-    if (this.busy(r)) return;
     const pending = this.pendingRespawn.get(r.id);
+    // Asked with the queued plan's reason, so a respawn that waits for background shells is not
+    // taken here the moment the turn ends while one is still running. That is how a rebalance
+    // killed a recipe six minutes into a twelve-minute run, one second after its session stopped
+    // to wait for it.
+    if (this.busy(r, pending?.trigger)) return;
     if (pending) {
       try {
         this.executeRespawn(r, pending);
