@@ -114,6 +114,19 @@ export async function installService(delaySeconds = 20): Promise<ServiceStatus> 
       `-ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew`,
     `$settings.DisallowStartOnRemoteAppSession = $false`,
     `$settings.StopIfGoingOnBatteries = $false`,
+    /*
+     * Normal priority, not Task Scheduler's default of 7.
+     *
+     * 7 reads like a CPU hint and is much more than that: Windows starts the task below normal on
+     * CPU, and at low memory priority and low I/O priority as well. For a batch job that is right.
+     * For the daemon it is backwards — every hook from every session waits on it with a five-second
+     * budget, and Claude Code discards the answer when the budget runs out. On a desk that ran short
+     * of memory (a container VM holding 25 GB), low memory priority made the daemon the first
+     * process Windows paged out and low I/O priority made its page-ins the last served: a trivial
+     * request took 4.9 seconds, the web page never loaded, and every prompt reported its hook had
+     * timed out — while the sessions, started from a terminal at normal priority, carried on fine.
+     */
+    `$settings.Priority = 4`,
     `$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType Interactive -RunLevel Limited`,
     `Register-ScheduledTask -TaskName '${TASK_NAME}' -Action $action -Trigger $trigger -Settings $settings -Principal $principal ` +
       `-Description 'Keeps the Switchboard daemon running for Claude Code agent coordination and subscription management.' -Force | Out-Null`,
