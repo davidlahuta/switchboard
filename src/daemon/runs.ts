@@ -31,6 +31,7 @@ import { hooksInstalledIn } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import { TermMirror } from './mirror.ts';
 import type { ModelCatalog } from './models.ts';
+import { keepFocus } from './focus.ts';
 import { getSettings } from './settings.ts';
 import { SPENT_PCT, SWAP_MARGIN, type SubscriptionManager } from './subscriptions.ts';
 
@@ -413,7 +414,17 @@ export function sessionDir(cwd: string, lastCwd: string | null, exists: (dir: st
   };
   const root = norm(cwd);
   const last = norm(lastCwd);
-  return last === root || last.startsWith(root + path.sep) ? lastCwd : cwd;
+  if (last !== root && !last.startsWith(root + path.sep)) return cwd;
+  /*
+   * The working tree it was in, not whichever folder of it the shell happened to be in. A worktree
+   * under .claude/worktrees has a .git of its own and is kept; 0376 literal reader's shell was in
+   * the repository's .docs/specs, and its 17:40 terminal opened there and trusted that folder as if
+   * it were a project.
+   */
+  for (let dir = path.resolve(lastCwd); ; dir = path.dirname(dir)) {
+    if (exists(path.join(dir, '.git'))) return dir;
+    if (norm(dir) === root || path.dirname(dir) === dir) return cwd;
+  }
 }
 
 /**
@@ -2272,12 +2283,15 @@ export class RunManager {
       this.db.run("UPDATE runs SET ended_at = NULL, exit_code = NULL WHERE id = ?", r.id);
       this.setStatus(r.id, 'starting');
     }
-    if (!this.send(r.id, { type: 'stop' })) {
+    if (!this.conns.has(r.id)) {
       // Nothing attached, so there is no terminal to wait for.
       this.openTerminalFor(r);
       return this.dto(this.row(runId)!);
     }
     this.relaunching.add(r.id);
+    // The old tab closes when its runner exits; see keepFocus. A runner gone in the moment between the
+    // check and the send is left to the fallback below, which opens the new terminal anyway.
+    keepFocus(() => void this.send(r.id, { type: 'stop' }), `closing ${r.name} for a new terminal`);
     // If the runner never reports an exit (it was already gone), open one anyway.
     setTimeout(() => {
       if (!this.relaunching.has(r.id)) return;
@@ -2298,10 +2312,18 @@ export class RunManager {
     this.stopping.add(runId);
     this.cancelRevive(runId);
     this.clearStall(runId);
-    if (!this.send(runId, { type: 'stop' })) {
+    const markExited = (): void => {
       this.db.run('UPDATE runs SET ended_at = ? WHERE id = ?', now(), runId);
       this.setStatus(runId, 'exited');
+    };
+    if (!this.conns.has(runId)) {
+      markExited();
+      return;
     }
+    // Its tab closes when the runner exits, and Windows Terminal comes forward for that; see keepFocus.
+    keepFocus(() => {
+      if (!this.send(runId, { type: 'stop' })) markExited();
+    }, `closing ${r.name}`);
   }
 
   forget(runId: string): void {
