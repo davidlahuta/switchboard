@@ -656,7 +656,8 @@ export class RunManager {
      */
     for (const r of this.db.all<RunRow>("SELECT * FROM runs WHERE status = 'disconnected'")) {
       if (r.revive_after) continue;
-      this.scheduleRevive(r, 'its terminal was not there when the daemon started');
+      // Worded for the log as what it is: a fallback that nearly always cancels itself. See reviveSucceeded.
+      this.scheduleRevive(r, 'the daemon has just started; cancelled if its terminal reconnects first');
     }
   }
 
@@ -1801,7 +1802,6 @@ export class RunManager {
     this.bus.invalidate('state');
   }
 
-  /** It is alive and answering, so the next death starts counting from nothing again. */
   /** Its terminal is up and talking, so the next death starts counting from nothing again. */
   cameBack(runId: string): void {
     this.reviveSucceeded(runId);
@@ -1811,11 +1811,15 @@ export class RunManager {
     const r = this.row(runId);
     if (!r || (r.revive_after === null && (r.revive_tries ?? 0) === 0)) return;
     this.db.run('UPDATE runs SET revive_after = NULL, revive_tries = 0 WHERE id = ?', runId);
+    // Every "will bring a session back" is closed by a line saying how it ended. Without this a
+    // restart leaves ten of them in the log and nothing to say that not one was needed.
+    log.info('not bringing a session back: its terminal reconnected', { run: runId, wasDue: r.revive_after, tries: r.revive_tries ?? 0 });
   }
 
   /** The operator's decision to stop a session outranks any plan to bring it back. */
   private cancelRevive(runId: string): void {
-    this.db.run('UPDATE runs SET revive_after = NULL, revive_tries = 0 WHERE id = ?', runId);
+    const changed = this.db.run('UPDATE runs SET revive_after = NULL, revive_tries = 0 WHERE id = ? AND (revive_after IS NOT NULL OR revive_tries > 0)', runId).changes;
+    if (changed) log.info('not bringing a session back: it was stopped', { run: runId });
   }
 
   /**
