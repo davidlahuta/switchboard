@@ -1915,7 +1915,8 @@ export class RunManager {
       });
       const what =
         queued.kind === 'swap'
-          ? `switch to ${this.subs.row(queued.target)?.label}`
+          ? // A swap that absorbed a new terminal says so, or the button pressed seems to have done nothing.
+            `switch to ${this.subs.row(queued.target)?.label}${queued.fresh ? ' in a new terminal' : ''}`
           : queued.kind === 'relaunch'
             ? `open a new terminal (${queued.reason})`
             : `restart (${queued.reason})`;
