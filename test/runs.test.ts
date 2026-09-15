@@ -20,7 +20,7 @@ import {
 } from '../src/daemon/runs.ts';
 import { readyForRespawn, safeToRespawn, workSummary } from '../src/shared/respawn.ts';
 import { looksFinished, startedWork, taskIdOf } from '../src/daemon/hooks.ts';
-import { attentionMark, attentionRank, sessionMark, tabTitle } from '../src/shared/marks.ts';
+import { attentionMark, byAttention, GROUP_LABEL, QUIET_AFTER_MS, SESSION_GROUPS, sessionGroup, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
 import { PTY_TERM, withoutParentSession } from '../src/config.ts';
@@ -733,6 +733,93 @@ describe('what a terminal tab says it wants', () => {
   });
 });
 
+describe('the order a desk full of sessions is read in', () => {
+  const NOW = Date.parse('2026-09-15T12:00:00Z');
+  const ago = (ms: number): string => new Date(NOW - ms).toISOString();
+  const run = (over: Partial<Run>): Run =>
+    ({
+      status: 'running',
+      agentStatus: 'idle',
+      name: 'apex',
+      work: [],
+      attention: { waiting: false, unread: 0, unseen: false },
+      lastActivity: ago(5 * 60_000),
+      ...over,
+    }) as Run;
+  const order = (...runs: Run[]): string[] => [...runs].sort(byAttention(NOW)).map((r) => r.name);
+
+  it('puts what is blocked above what is merely talking, and both above what is running', () => {
+    const blocked = run({ name: 'blocked', agentStatus: 'waiting', attention: { waiting: true, unread: 0, unseen: false } });
+    const spoke = run({ name: 'spoke', attention: { waiting: false, unread: 2, unseen: true } });
+    const working = run({ name: 'working', agentStatus: 'working' });
+    assert.deepEqual(order(working, spoke, blocked), ['blocked', 'spoke', 'working']);
+  });
+
+  it('does not let a session nobody has opened for a week sit on top of the desk', () => {
+    /*
+     * The complaint this order was rewritten for. "Has done something you have not read" never
+     * expires, so two sessions parked days ago — finished, unread, wanting nothing — held the head
+     * of both lists permanently, above everything that was actually running. Opening a terminal
+     * nobody wanted to open was the only way to clear it.
+     */
+    const parked = run({ name: 'serensia', attention: { waiting: false, unread: 0, unseen: true }, lastActivity: ago(6 * 24 * 3600_000) });
+    const working = run({ name: 'harnesty', agentStatus: 'working' });
+    assert.equal(sessionGroup(parked, NOW), 'parked');
+    assert.deepEqual(order(parked, working), ['harnesty', 'serensia']);
+  });
+
+  it('keeps a session that has just gone quiet where it was', () => {
+    // It ended a turn a moment ago; it is still the thing being worked on, and a list that moved it
+    // out the instant it stopped typing would move it back on the next prompt.
+    const justDone = run({ name: 'justDone', attention: { waiting: false, unread: 0, unseen: true }, lastActivity: ago(60_000) });
+    assert.equal(sessionGroup(justDone, NOW), 'active');
+  });
+
+  it('holds a long turn in the active group even when no hook has fired for an hour', () => {
+    // Sessions go quiet mid-work — a build, a thinking subagent — and the clock is not evidence
+    // against a session that says it is working.
+    const grinding = run({ name: 'grinding', agentStatus: 'working', lastActivity: ago(2 * 3600_000) });
+    assert.equal(sessionGroup(grinding, NOW), 'active');
+    const delegating = run({ name: 'delegating', lastActivity: ago(2 * 3600_000), work: [{ kind: 'subagent' } as never] });
+    assert.equal(sessionGroup(delegating, NOW), 'active');
+    const limited = run({ name: 'limited', agentStatus: 'limited', lastActivity: ago(2 * 3600_000) });
+    assert.equal(sessionGroup(limited, NOW), 'active', 'it comes back on its own when the window resets');
+  });
+
+  it('holds still while sessions work, because nothing inside a group moves', () => {
+    /*
+     * lastActivity is the agent's last hook, and a working session fires one every few seconds. The
+     * list used to sort on it, so it re-ordered itself continuously and rows moved out from under
+     * whoever was reading them — movement that carried no information, because every session was
+     * doing it. Inside a group the order is the name, which does not change while you read.
+     */
+    const a = run({ name: 'alpha', agentStatus: 'working', lastActivity: ago(1000) });
+    const b = run({ name: 'beta', agentStatus: 'working', lastActivity: ago(9 * 60_000) });
+    const before = order(a, b);
+    const later = [...[a, b].map((r) => ({ ...r, lastActivity: ago(0) }) as Run)].sort(byAttention(NOW + 1000)).map((r) => r.name);
+    assert.deepEqual(before, ['alpha', 'beta']);
+    assert.deepEqual(later, before, 'a hook firing anywhere reshuffles nothing');
+  });
+
+  it('sends what has exited to the bottom, newest first', () => {
+    const old = run({ name: 'old', status: 'exited', endedAt: ago(3 * 3600_000) });
+    const recent = run({ name: 'recent', status: 'exited', endedAt: ago(60_000) });
+    const blocked = run({ name: 'blocked', status: 'exited', endedAt: ago(2 * 3600_000), attention: { waiting: true, unread: 9, unseen: true } });
+    const live = run({ name: 'live' });
+    assert.deepEqual(order(old, recent, blocked, live), ['live', 'recent', 'blocked', 'old']);
+  });
+
+  it('names every group it can sort into', () => {
+    for (const g of SESSION_GROUPS) assert.ok(GROUP_LABEL[g], `${g} has a label`);
+  });
+
+  it('parks a session the moment it has been quiet long enough, and not before', () => {
+    const edge = run({ name: 'edge', lastActivity: ago(QUIET_AFTER_MS - 1000) });
+    assert.equal(sessionGroup(edge, NOW), 'active');
+    assert.equal(sessionGroup(run({ name: 'edge', lastActivity: ago(QUIET_AFTER_MS + 1000) }), NOW), 'parked');
+  });
+});
+
 describe('one mark, wherever a session is shown', () => {
   const run = (over: Partial<Run>): Run =>
     ({ status: 'running', agentStatus: 'idle', name: 'apex', work: [], attention: { waiting: false, unread: 0, unseen: false }, ...over }) as Run;
@@ -743,36 +830,18 @@ describe('one mark, wherever a session is shown', () => {
     assert.equal(tabTitle(waiting, 'apex'), '❗ apex');
   });
 
-  it('puts a session waiting on a person above one that has merely finished', () => {
-    /*
-     * These used to sort as one group — "is it asking for me at all" — and then by whatever moved
-     * last, so a session blocked on a question ten minutes ago sat below one that finished a minute
-     * ago. One of them will still be sitting there tomorrow; the other is done.
-     */
-    const blocked = run({ agentStatus: 'waiting', attention: { waiting: true, unread: 0, unseen: false } });
-    const spoke = run({ attention: { waiting: false, unread: 2, unseen: true } });
-    const done = run({ attention: { waiting: false, unread: 0, unseen: true } });
-    const quiet = run({});
-    assert.ok(attentionRank(blocked) > attentionRank(spoke));
-    assert.ok(attentionRank(spoke) > attentionRank(done));
-    assert.ok(attentionRank(done) > attentionRank(quiet));
-    assert.equal(attentionRank(quiet), 0);
-  });
-
   it('counts a session that has stopped trying as waiting on a person', () => {
     // No next attempt means nothing is coming for it but an operator. It used to carry the mark for
     // "finished something you have not read" — which is what a session that is done looks like.
     const gaveUp = run({ stalled: { reason: 'a spend cap', since: '', nextTry: null, tries: 8 }, attention: { waiting: false, unread: 0, unseen: true } });
     assert.equal(attentionMark(gaveUp)?.glyph, '❗');
     assert.equal(tabTitle(gaveUp, 'apex'), '❗ apex');
-    assert.ok(attentionRank(gaveUp) > attentionRank(run({ attention: { waiting: false, unread: 1, unseen: true } })));
   });
 
   it('leaves a session that is still being told to carry on to get on with it', () => {
     // It has an attempt coming, so it is not waiting for anybody yet.
     const retrying = run({ stalled: { reason: 'rate_limit', since: '', nextTry: '2026-09-11T14:00:00Z', tries: 2 } });
     assert.equal(attentionMark(retrying), null);
-    assert.equal(attentionRank(retrying), 0);
   });
 
   it('marks a busy session in both, and asks nothing of anyone for it', () => {

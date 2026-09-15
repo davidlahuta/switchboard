@@ -1,7 +1,6 @@
-import { useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import type { Repo, Run, StateSnapshot } from '@shared/types.ts';
-import { byAttention } from '../components/AttentionDot.tsx';
-import { liveState, liveTone, sessionMark } from '@shared/marks.ts';
+import { byAttention, GROUP_HINT, GROUP_LABEL, liveState, liveTone, sessionGroup, sessionMark, type SessionGroup } from '@shared/marks.ts';
 import { triggerLabel } from '@shared/respawn.ts';
 import { orderOf, useReorder } from '../lib/reorder.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
@@ -16,30 +15,71 @@ import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Badge, ConfirmDialog, Empty, Icon, StatusPill } from '../components/ui.tsx';
 import { api } from '../lib/api.ts';
 import { shortPath } from '../lib/format.ts';
-import { href } from '../lib/router.ts';
+import { href, navigate, REPO_ALL, repoFilterOf } from '../lib/router.ts';
 import { absTime, timeAgo, useNow } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
 
-export function Sessions({ state }: { state: StateSnapshot }) {
+/** Where the repository filter is kept between visits; see the effect that restores it. */
+const REPO_KEY = 'sb.sessions.repo';
+
+function remembered(): string | null {
+  try {
+    return localStorage.getItem(REPO_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function Sessions({ state, repo }: { state: StateSnapshot; repo: string | null }) {
   const now = useNow(10_000);
   const [newOpen, setNewOpen] = useState(false);
   const [stopping, setStopping] = useState<Run | null>(null);
   const [showExited, setShowExited] = useState(true);
-  const [repoFilter, setRepoFilter] = useState('all');
   const [open, setOpen] = useState<Set<string>>(new Set());
 
-  const runs = [...state.runs].sort(byAttention);
+  /*
+   * The filter lives in the URL, so it survives a reload, a link sent to a phone, and the back
+   * button — and so the page cannot be showing three of nine sessions with nothing to say why.
+   * It is also remembered, because "sticky" means across visits and not only across reloads: the
+   * nav link goes to a bare #/sessions, and arriving there with a filter still set and invisible
+   * would be the worst of both. So the remembered one is put back into the URL rather than applied
+   * behind it, and what the address bar says is always what the list is doing.
+   */
+  const repoFilter = repoFilterOf(repo);
+  useEffect(() => {
+    if (repo !== null) return;
+    const last = remembered();
+    if (last !== null && last !== REPO_ALL) navigate(href.sessions(last), true);
+  }, [repo]);
+  const setRepoFilter = (next: string) => {
+    try {
+      if (next === REPO_ALL) localStorage.removeItem(REPO_KEY);
+      else localStorage.setItem(REPO_KEY, next);
+    } catch {
+      /* a browser that refuses storage still gets the URL */
+    }
+    navigate(href.sessions(next));
+  };
+
+  const runs = [...state.runs].sort(byAttention(now));
   const repoOf = (r: Run) => r.repoId ?? '';
   const usedRepos = state.repos.filter((repo) => runs.some((r) => r.repoId === repo.id));
   const hasLoose = runs.some((r) => !r.repoId);
-  const inRepo = repoFilter === 'all' ? runs : runs.filter((r) => repoOf(r) === repoFilter);
+  const filtered = repoFilter !== REPO_ALL;
+  const inRepo = filtered ? runs.filter((r) => repoOf(r) === repoFilter) : runs;
   const visible = showExited ? inRepo : inRepo.filter((r) => r.status !== 'exited');
   const exitedCount = inRepo.filter((r) => r.status === 'exited').length;
+  const filterName = !filtered ? null : (state.repos.find((x) => x.id === repoFilter)?.name ?? 'outside a repository');
   const markOf = (r: Run): string => sessionMark(r)?.glyph ?? '';
+  const groupOf = (r: Run): SessionGroup => sessionGroup(r, now);
   // Rows slide to their new places rather than jumping there, and light up when they change; see
-  // lib/reorder.ts. Which rows are open counts as part of the layout: opening one moves the others.
+  // lib/reorder.ts. Which rows are open counts as part of the layout: opening one moves the others,
+  // and so does a row changing group, which is the only thing that moves one now.
   const list = useRef<HTMLUListElement>(null);
-  useReorder(list, orderOf(visible.map((r) => ({ id: r.id, mark: markOf(r), state: `${liveState(r)}/${open.has(r.id) ? 'open' : ''}` }))));
+  useReorder(
+    list,
+    orderOf(visible.map((r) => ({ id: r.id, mark: markOf(r), state: `${liveState(r)}/${groupOf(r)}/${open.has(r.id) ? 'open' : ''}` }))),
+  );
 
   const toggle = (id: string) =>
     setOpen((was) => {
@@ -59,14 +99,32 @@ export function Sessions({ state }: { state: StateSnapshot }) {
     <div className="page">
       <PageHead
         title="Sessions"
-        subtitle="Claude Code sessions hosted by Switchboard"
+        subtitle={
+          filtered ? (
+            /* Not only the select: a filtered list that looks like the whole list is how you come
+               back an hour later and conclude six sessions have died. */
+            <>
+              Showing <b>{visible.length}</b> of {runs.length} — filtered to <b>{filterName}</b>{' '}
+              <button type="button" className="link-btn" onClick={() => setRepoFilter(REPO_ALL)}>
+                show all
+              </button>
+            </>
+          ) : (
+            'Claude Code sessions hosted by Switchboard'
+          )
+        }
         actions={
           <>
             {runs.length > 0 && (
-              <label className="check check-inline">
+              <label className={`check check-inline filter-pick${filtered ? ' is-on' : ''}`}>
                 <span className="sr-only">Filter by repository</span>
-                <select className="input select-inline" value={repoFilter} onChange={(e) => setRepoFilter(e.target.value)} aria-label="Filter by repository">
-                  <option value="all">All repositories</option>
+                <select
+                  className="input select-inline"
+                  value={repoFilter}
+                  onChange={(e) => setRepoFilter(e.target.value)}
+                  aria-label="Filter by repository"
+                >
+                  <option value={REPO_ALL}>All repositories</option>
                   {usedRepos.map((repo) => (
                     <option key={repo.id} value={repo.id}>
                       {repo.name}
@@ -74,6 +132,17 @@ export function Sessions({ state }: { state: StateSnapshot }) {
                   ))}
                   {hasLoose && <option value="">Outside a repository</option>}
                 </select>
+                {filtered && (
+                  <button
+                    type="button"
+                    className="btn btn-sm filter-clear"
+                    onClick={() => setRepoFilter(REPO_ALL)}
+                    aria-label="Clear the repository filter"
+                    title="Clear the repository filter"
+                  >
+                    <Icon name="x" size={14} />
+                  </button>
+                )}
               </label>
             )}
             {exitedCount > 0 && (
@@ -92,7 +161,7 @@ export function Sessions({ state }: { state: StateSnapshot }) {
 
       {visible.length === 0 ? (
         <Empty icon="terminal">
-          {repoFilter !== 'all' ? 'No sessions in that repository. ' : 'No sessions. '}
+          {filtered ? 'No sessions in that repository. ' : 'No sessions. '}
           <button type="button" className="link-btn" onClick={() => setNewOpen(true)}>
             Start one
           </button>{' '}
@@ -100,19 +169,34 @@ export function Sessions({ state }: { state: StateSnapshot }) {
         </Empty>
       ) : (
         <ul className="srows" ref={list}>
-          {visible.map((r) => (
-            <SessionRow
-              key={r.id}
-              run={r}
-              repo={r.repoId ? state.repos.find((x) => x.id === r.repoId) : undefined}
-              state={state}
-              now={now}
-              mark={markOf(r)}
-              expanded={open.has(r.id)}
-              onToggle={() => toggle(r.id)}
-              onStop={() => setStopping(r)}
-            />
-          ))}
+          {visible.map((r, i) => {
+            /* A heading wherever the group changes. The order is the answer to "what should I look
+               at first", and a heading is what turns that from a rule the reader has to infer into
+               one they can see — and it is why a row that moves is worth noticing: it has changed
+               what it wants, not merely fired a hook. */
+            const group = groupOf(r);
+            const opens = i === 0 || groupOf(visible[i - 1]) !== group;
+            return (
+              <Fragment key={r.id}>
+                {opens && (
+                  <li className="srow-group" title={GROUP_HINT[group]}>
+                    <span className={`srow-group-label group-${group}`}>{GROUP_LABEL[group]}</span>
+                    <span className="srow-group-count">{visible.filter((x) => groupOf(x) === group).length}</span>
+                  </li>
+                )}
+                <SessionRow
+                  run={r}
+                  repo={r.repoId ? state.repos.find((x) => x.id === r.repoId) : undefined}
+                  state={state}
+                  now={now}
+                  mark={markOf(r)}
+                  expanded={open.has(r.id)}
+                  onToggle={() => toggle(r.id)}
+                  onStop={() => setStopping(r)}
+                />
+              </Fragment>
+            );
+          })}
         </ul>
       )}
 

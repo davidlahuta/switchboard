@@ -131,7 +131,7 @@ function Routed({ route, auth }: { route: Route; auth: AuthStatus }) {
     case 'sessions':
       return (
         <Layout route={route}>
-          <Sessions state={state} />
+          <Sessions state={state} repo={route.repo} />
         </Layout>
       );
     case 'terminal':

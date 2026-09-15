@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react';
 import type { Run, StateSnapshot, Subscription } from '@shared/types.ts';
-import { AttentionDot, byAttention } from '../components/AttentionDot.tsx';
+import { AttentionDot } from '../components/AttentionDot.tsx';
 import { BurnPanel } from '../components/BurnPanel.tsx';
-import { liveState, liveTone, sessionMark } from '@shared/marks.ts';
+import { byAttention, liveState, liveTone, sessionGroup, sessionMark } from '@shared/marks.ts';
 import { orderOf, useReorder } from '../lib/reorder.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { PageHead } from '../components/PageHead.tsx';
@@ -18,10 +18,15 @@ export function Overview({ state }: { state: StateSnapshot }) {
   const now = useNow(1000);
   const [newOpen, setNewOpen] = useState(false);
   const { totals } = state;
-  const liveRuns = state.runs.filter((r) => r.status !== 'exited').sort(byAttention);
-  // Rows slide to their new places rather than jumping there; see lib/reorder.ts.
+  const liveRuns = state.runs.filter((r) => r.status !== 'exited').sort(byAttention(now));
+  // Rows slide to their new places rather than jumping there; see lib/reorder.ts. The group is part
+  // of the signature because it is the only thing that moves a row now, and a move the effect never
+  // hears about is one the reader sees as a jump.
   const liveList = useRef<HTMLUListElement>(null);
-  useReorder(liveList, orderOf(liveRuns.map((r) => ({ id: r.id, mark: sessionMark(r)?.glyph ?? '', state: liveState(r) }))));
+  useReorder(
+    liveList,
+    orderOf(liveRuns.map((r) => ({ id: r.id, mark: sessionMark(r)?.glyph ?? '', state: `${liveState(r)}/${sessionGroup(r, now)}` }))),
+  );
   // Most immediately usable first: headroom already accounts for both windows and plan size.
   // Exhausted ones tie at zero, so break that by which frees up soonest — a spent 5-hour window
   // is back in hours, a spent weekly one in days.

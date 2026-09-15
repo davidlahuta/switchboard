@@ -50,22 +50,108 @@ export function attentionMark(run: Run): SessionMark | null {
 }
 
 /**
- * How loudly a session is asking for the operator: the higher, the sooner it wants them.
+ * How long a session may go without a sign of life before the desk stops calling it active.
  *
- * The same order attentionMark reads in, as a number the lists can sort on. They used to sort on
- * "is it asking for me at all", which flattens the three into one group and then orders that group
- * by whatever moved last — so a session blocked on a question ten minutes ago sat below one that
- * finished a minute ago. One of those will do nothing whatever until a person answers it; the other
- * is done. Zero for a session that wants nothing, and for one that has exited: history sorts last
- * however loudly it was asking when it stopped.
+ * Long enough to cover a session that is genuinely mid-something without hooks firing — a long
+ * build, a slow subagent, a turn that is thinking — and short enough that a session nobody has
+ * touched since this morning is not still presented as part of today's work. A session that is
+ * demonstrably busy is never judged by this; see sessionGroup.
  */
-export function attentionRank(run: Run): number {
-  if (run.status === 'exited') return 0;
-  if (run.attention.waiting) return 4;
-  if (run.stalled && !run.stalled.nextTry) return 3;
-  if (run.attention.unread > 0) return 2;
-  if (run.attention.unseen) return 1;
-  return 0;
+export const QUIET_AFTER_MS = 30 * 60_000;
+
+/**
+ * Which part of the desk a session belongs to.
+ *
+ * A list of sessions answers one question before any other: what should I look at first? The old
+ * order answered it with attentionRank and then "whatever moved last", and got both halves wrong
+ * once there were more than a few sessions on the desk.
+ *
+ * Wrong at the top, because "has done something you have not read" never expires. A session parked
+ * a week ago, finished and unread, outranked every session that was actually running — permanently,
+ * and there was nothing to do about it short of opening a terminal nobody wanted to open. The two
+ * sessions the operator had left alone sat at the head of both lists all week.
+ *
+ * Wrong underneath, because `lastActivity` is the agent's last hook, and a working session fires
+ * one every few seconds. Sorting on it meant the list re-ordered itself continuously: rows the
+ * reader was aiming at moved out from under them, and nothing about the movement carried any
+ * information, because every session was doing it.
+ *
+ * So the question is asked once, coarsely, and the answer is a place to stand rather than a score.
+ * Inside a group nothing moves at all — see byAttention — and a row that does move has changed
+ * group, which is the only movement worth a reader's attention. Everything finer than the group is
+ * said by the mark, in place, where lib/reorder.ts lights it without moving it.
+ */
+export type SessionGroup = 'needs-you' | 'messages' | 'active' | 'parked' | 'done';
+
+/** Highest first: the order the groups are shown in, and the order they sort in. */
+export const SESSION_GROUPS: readonly SessionGroup[] = ['needs-you', 'messages', 'active', 'parked', 'done'];
+
+export const GROUP_LABEL: Record<SessionGroup, string> = {
+  'needs-you': 'Needs you',
+  messages: 'Said something to you',
+  active: 'Active',
+  parked: 'Parked',
+  done: 'Exited',
+};
+
+export const GROUP_HINT: Record<SessionGroup, string> = {
+  'needs-you': 'Stopped until you answer. Nothing else is coming for these.',
+  messages: 'They have sent you something you have not read.',
+  active: 'Working, or quiet for only a moment. These need nothing from you.',
+  parked: 'Quiet for more than half an hour. Still here, still resumable.',
+  done: 'Over. Their conversations are still on disk.',
+};
+
+export function sessionGroup(run: Run, now: number): SessionGroup {
+  if (run.status === 'exited') return 'done';
+  // Both kinds of blocked: stopped on a prompt, and having stopped trying to get past something.
+  // They read the same to an operator — nothing happens here until you do something — so they
+  // stand together rather than splitting the one group that must be read first.
+  if (run.attention.waiting || (run.stalled && !run.stalled.nextTry)) return 'needs-you';
+  if (run.attention.unread > 0) return 'messages';
+  if (isAlive(run, now)) return 'active';
+  return 'parked';
+}
+
+/**
+ * Whether a session is part of what is going on right now.
+ *
+ * Deliberately generous, and deliberately not "is it busy this instant". A session that has just
+ * ended a turn is still the thing the operator was working on a moment ago, and moving it the
+ * instant it goes quiet would be the old churn wearing a different hat — it would leave the group
+ * and come back on the next prompt. What it is doing, down to the subagent, is the mark's job.
+ */
+function isAlive(run: Run, now: number): boolean {
+  if (run.agentStatus === 'working' || run.agentStatus === 'starting') return true;
+  // Waiting out a limit, or retrying after a failed turn: it comes back on its own, with no help.
+  if (run.agentStatus === 'limited' || run.stalled) return true;
+  // Its own turn may be over while it still has subagents thinking or a shell running.
+  if ((run.work ?? []).length > 0) return true;
+  const seen = Date.parse(run.lastActivity);
+  return Number.isFinite(seen) && now - seen < QUIET_AFTER_MS;
+}
+
+/**
+ * One order for every list of sessions, so the overview and the sessions table cannot disagree
+ * about what is at the top.
+ *
+ * Group first, then by name — not by what moved last. A name is the one thing about a session that
+ * does not change while you are reading, so a list sorted by it holds still: `rakousko` is in the
+ * same place this minute as last, and the operator can go to it without reading the list again.
+ * That is worth more than knowing which session fired a hook most recently, which is a question
+ * nobody was asking and the marks answer anyway.
+ *
+ * History is the exception: exited sessions are ordered newest-first, because the only thing
+ * anybody wants from that group is the one that just stopped. They are frozen, so they cannot churn.
+ */
+export function byAttention(now: number): (a: Run, b: Run) => number {
+  return (a, b) => {
+    const ga = SESSION_GROUPS.indexOf(sessionGroup(a, now));
+    const gb = SESSION_GROUPS.indexOf(sessionGroup(b, now));
+    if (ga !== gb) return ga - gb;
+    if (SESSION_GROUPS[ga] === 'done') return (b.endedAt ?? '').localeCompare(a.endedAt ?? '') || a.name.localeCompare(b.name);
+    return a.name.localeCompare(b.name);
+  };
 }
 
 /**
