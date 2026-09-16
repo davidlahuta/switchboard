@@ -163,6 +163,55 @@ const CONTINUE_POLL_MS = 1000;
 export function atPrompt(screen: string): boolean {
   return PROMPT_FOOTER.test(screen) && !CONFIRM_FOOTER.test(screen);
 }
+
+/** How much of the end of a transcript is read for a question left unanswered; see pendingQuestion. */
+const TRANSCRIPT_TAIL_BYTES = 1024 * 1024;
+
+/**
+ * The question a session asked the operator and was still waiting on, read from the end of its
+ * transcript, or null if it was not waiting on one.
+ *
+ * Resuming a conversation drops a tool call that never got its result, and AskUserQuestion is one:
+ * the question is simply gone from the session that comes back. 0327 audit subject resolver asked
+ * for a ruling on PR #721 at 00:01, the desk went down at 00:29, and the revive at 07:41 typed the
+ * usual "continue autonomously" into a session that no longer knew it had asked — so it decided the
+ * ruling itself. The last main-thread tool call tells: an AskUserQuestion with no result after it is
+ * a question still open. A typed prompt or a reply in prose after it means the session moved on.
+ */
+export function pendingQuestion(jsonl: string): string | null {
+  const answered = new Set<string>();
+  const lines = jsonl.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let o: { type?: string; isSidechain?: boolean; message?: { content?: unknown } } | null;
+    try {
+      o = JSON.parse(lines[i]);
+    } catch {
+      continue; // blank, or the partial first line of a tail
+    }
+    if (!o || o.isSidechain) continue;
+    const content = Array.isArray(o.message?.content) ? (o.message.content as Array<Record<string, any>>) : null;
+    if (o.type === 'user') {
+      if (!content) return null; // a prompt typed after the question: it has moved on
+      for (const b of content) if (b?.type === 'tool_result') answered.add(String(b.tool_use_id));
+      continue;
+    }
+    if (o.type !== 'assistant' || !content) continue;
+    if (content.every((b) => b?.type === 'thinking' || b?.type === 'redacted_thinking')) continue;
+    const ask = content.find((b) => b?.type === 'tool_use' && b.name === 'AskUserQuestion' && !answered.has(String(b.id)));
+    if (!ask) return null; // the last thing it did was something else
+    const q = ask.input?.questions?.[0]?.question;
+    return typeof q === 'string' && q.trim() ? q.replace(/\s+/g, ' ').trim() : 'the question you had just asked';
+  }
+  return null;
+}
+
+/** What a session that lost its open question is told when it comes back, instead of to carry on. */
+export function reaskMessage(question: string): string {
+  return (
+    `Your terminal was restarted while you were waiting for the operator's answer to this question: "${question.slice(0, 400)}". ` +
+    'The answer never reached you. Ask it again with AskUserQuestion and wait for the reply; do not decide it yourself or carry on without it.'
+  );
+}
 const CONTINUE_RETRY_MS = 4000;
 const CONTINUE_RETRIES = 15;
 const CONTINUE_FALLBACK_MS = 25_000;
@@ -2108,6 +2157,21 @@ export class RunManager {
     if (!this.resumedSpawn.get(r.id)) return;
     this.resumedSpawn.delete(r.id);
     const armedAt = Date.now();
+    /*
+     * A session that went down waiting on the operator comes back without the question (see
+     * pendingQuestion), so telling it to carry on is telling it to decide for them. It is told to ask
+     * again instead — whatever continueOnResume says, because this is not carrying on, it is putting
+     * back what the operator was about to answer.
+     */
+    const question = this.unansweredQuestion(r);
+    if (question) {
+      const had = this.pendingContinue.get(r.id);
+      if (had) clearTimeout(had.timer);
+      log.warn('resumed a session that was waiting on the operator; telling it to ask again instead of carrying on', { run: r.id, question: question.slice(0, 200) });
+      this.bus.toast('warn', `${r.name} was waiting on your answer when its terminal went away, so it was told to ask you again rather than carry on.`);
+      this.pendingContinue.set(r.id, { text: reaskMessage(question), timer: setTimeout(() => this.waitForPrompt(r.id, armedAt), CONTINUE_POLL_MS) });
+      return;
+    }
     // A swap armed its own message before the process existed, waiting on a SessionStart that does
     // not come for a resume; it waits for this process's prompt instead, like the rest.
     const existing = this.pendingContinue.get(r.id);
@@ -2122,6 +2186,27 @@ export class RunManager {
     const text = getSettings(this.db).continueMessage.trim();
     if (!text) return;
     this.pendingContinue.set(r.id, { text, timer: setTimeout(() => this.waitForPrompt(r.id, armedAt), CONTINUE_POLL_MS) });
+  }
+
+  /** The question this session was left waiting on the operator for, from the end of its transcript. */
+  private unansweredQuestion(r: RunRow): string | null {
+    const file = this.sessionFile(r, path.join('..', `${r.session_id}.jsonl`));
+    if (!file) return null;
+    try {
+      const fd = fs.openSync(file, 'r');
+      try {
+        const size = fs.fstatSync(fd).size;
+        const len = Math.min(size, TRANSCRIPT_TAIL_BYTES);
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, size - len);
+        return pendingQuestion(buf.toString('utf8'));
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (err) {
+      log.debug('could not read the transcript for an open question', { run: r.id, error: err instanceof Error ? err.message : err });
+      return null;
+    }
   }
 
   /**
