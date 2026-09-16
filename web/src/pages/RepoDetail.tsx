@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import type {
   Agent,
+  BoardHealth,
   Claim,
   Conflict,
   HumanMessageRequest,
@@ -134,6 +135,7 @@ export function RepoDetailPage({ repoId, state }: { repoId: string; state: State
           {openConflicts.length > 0 && <ConflictsSection conflicts={openConflicts} now={now} />}
           <AgentsSection detail={detail} state={state} now={now} />
           <ClaimsSection claims={detail.claims} now={now} />
+          <BoardHealthSection repoId={repo.id} now={now} />
         </div>
         <div className={tab === 'messages' ? 'repo-panel is-active' : 'repo-panel'} data-panel="messages">
           <MessagesSection detail={detail} now={now} />
@@ -250,6 +252,132 @@ function AgentTable({ agents, subLabel, now }: { agents: Agent[]; subLabel: (id:
         </tbody>
       </table>
     </div>
+  );
+}
+
+// ---------------- board health ----------------
+
+/** How the board is keeping up: loaded only while open, and refreshed while it stays open. */
+function BoardHealthSection({ repoId, now }: { repoId: string; now: number }) {
+  const [open, setOpen] = useState(false);
+  const [health, setHealth] = useState<BoardHealth | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    const load = async () => {
+      const h = await api.get<BoardHealth>(`/api/repos/${encodeURIComponent(repoId)}/health`);
+      if (live && h) setHealth(h);
+    };
+    void load();
+    const timer = setInterval(() => void load(), 30_000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [open, repoId]);
+
+  const o = health?.orphans;
+  const orphans = o ? o.claimsOfLeftAgents + o.expiredClaimsOpen + o.messagesStrandedOnLeftAgents + o.lanesOfLeftAgents : 0;
+  return (
+    <Section title="Board health">
+      <details className="collapse" onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+        <summary>Claims, conflicts, questions, orphans and message traffic over the last day</summary>
+        {!health ? (
+          <div className="center-block">
+            <Spinner />
+          </div>
+        ) : (
+          <>
+            <ul className="list">
+              <li className="list-row">
+                <span className="list-main">
+                  <span className="list-title">
+                    {plural(health.claims.open, 'claim')} · {health.claims.exclusive} exclusive · {plural(health.lanes, 'lane')}
+                  </span>
+                  <span className="list-sub">
+                    {health.notes.pinned} of {plural(health.notes.active, 'note')} pinned
+                  </span>
+                </span>
+              </li>
+              <li className="list-row">
+                <span className="list-main">
+                  <span className="list-title">
+                    {plural(health.conflicts.open, 'open conflict')} · {health.conflicts.closed24h} closed today
+                  </span>
+                  <span className="list-sub">
+                    {Object.entries(health.conflicts.closedWhy)
+                      .map(([why, n]) => `${n} ${why}`)
+                      .join(' · ') || 'none closed today'}
+                  </span>
+                </span>
+              </li>
+              <li className="list-row">
+                <span className="list-main">
+                  <span className="list-title">
+                    {plural(health.questions.owed, 'question')} owed · {health.questions.lapsed24h} lapsed today
+                  </span>
+                  <span className="list-sub">Questions, requests and handoffs nobody has replied to yet; after 6h they lapse and the asker is told.</span>
+                </span>
+              </li>
+              <li className="list-row">
+                <Icon name={orphans ? 'warn' : 'check'} className={orphans ? 'lvl-warn' : undefined} />
+                <span className="list-main">
+                  <span className="list-title">{orphans ? plural(orphans, 'orphan') : 'No orphans'}</span>
+                  {o && orphans > 0 && (
+                    <span className="list-sub lvl-warn">
+                      {o.claimsOfLeftAgents} claims of agents that left · {o.expiredClaimsOpen} expired claims open · {o.messagesStrandedOnLeftAgents} messages stranded ·{' '}
+                      {o.lanesOfLeftAgents} lanes of agents that left
+                    </span>
+                  )}
+                </span>
+              </li>
+            </ul>
+            {health.traffic24h.length > 0 && (
+              <div className="table-wrap">
+                <table className="rtable">
+                  <thead>
+                    <tr>
+                      <th>Agent</th>
+                      <th>Sent</th>
+                      <th>To all</th>
+                      <th>Received</th>
+                      <th>Delivered text</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {health.traffic24h.map((t) => (
+                      <tr key={t.agentId} className={t.status === 'offline' ? 'row-muted' : undefined}>
+                        <td data-label="Agent" className="cell-title">
+                          {t.name}
+                        </td>
+                        <td data-label="Sent">{t.sent}</td>
+                        <td data-label="To all">{t.broadcasts}</td>
+                        <td data-label="Received">{t.received}</td>
+                        <td data-label="Delivered text">{Math.round(t.chars / 1000)}k chars</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {health.upkeep24h.length > 0 && (
+              <ul className="list">
+                {health.upkeep24h.map((u) => (
+                  <li key={`${u.ts}${u.summary}`} className="list-row">
+                    <span className="list-main">
+                      <span className="list-sub" title={absTime(u.ts)}>
+                        {timeAgo(u.ts, now)} · {u.summary}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </details>
+    </Section>
   );
 }
 
