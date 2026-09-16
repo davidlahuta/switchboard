@@ -79,14 +79,24 @@ export function repoFilterOf(param: string | null): string {
 }
 
 /**
- * A link into a session's terminal, which always opens a tab of its own.
+ * Whether this is a phone or a tablet: a touch screen with no mouse. Tabs there are a switcher
+ * behind a button rather than a row along the top, so a new tab per terminal buries the list it was
+ * opened from and piles up tabs nobody closes, while Back is the natural way out.
+ */
+export function touchOnly(): boolean {
+  return window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+}
+
+/**
+ * A link into a session's terminal: a tab of its own on a desktop, the same tab on a phone.
  *
  * A terminal is somewhere the operator stays — typing into it, watching a turn — while the list it
- * was picked from keeps moving, and sessions are worked on side by side. Opened in place, it took the
- * list away and made Back the way between sessions. noopener, because the terminal tab has no
- * business with the window that opened it.
+ * was picked from keeps moving, and on a desktop sessions are worked on side by side. Opened in place
+ * there, it took the list away and made Back the way between sessions. noopener, because the
+ * terminal tab has no business with the window that opened it. See touchOnly for phones.
  */
-export function terminalLink(runId: string): { href: string; target: '_blank'; rel: 'noopener' } {
+export function terminalLink(runId: string): { href: string; target?: '_blank'; rel?: 'noopener' } {
+  if (touchOnly()) return { href: href.terminal(runId) };
   return { href: href.terminal(runId), target: '_blank', rel: 'noopener' };
 }
 
@@ -99,6 +109,10 @@ export function terminalLink(runId: string): { href: string; target: '_blank'; r
  * null whether the tab opened or not, and so hides exactly the refusal this has to notice.
  */
 export function openTerminal(runId: string): void {
+  if (touchOnly()) {
+    navigate(href.terminal(runId));
+    return;
+  }
   const tab = window.open(href.terminal(runId), '_blank');
   if (tab) tab.opener = null;
   else navigate(href.terminal(runId));
