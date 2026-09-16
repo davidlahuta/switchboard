@@ -6,6 +6,8 @@ import path from 'node:path';
 import {
   atPrompt,
   attentionFor,
+  pendingQuestion,
+  reaskMessage,
   clearedInPlace,
   limitSwapPlan,
   rebindDecision,
@@ -378,6 +380,44 @@ describe('when a resumed session is ready to be told to carry on', () => {
     // A carriage return here answers the dialog, which on the trust prompt means "No, exit".
     const screen = ['Do you trust the files in this folder?', '❯ 1. Yes, proceed', '  2. No, exit', 'Enter to confirm · Esc to cancel', '(shift+tab to cycle)'].join('\n');
     assert.equal(atPrompt(screen), false);
+  });
+});
+
+describe('a session that went down waiting on the operator', () => {
+  const rec = (o: object): string => JSON.stringify(o);
+  const ask = (id: string, question: string) =>
+    rec({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'AskUserQuestion', input: { questions: [{ question }] } }] } });
+  const prose = (text: string) => rec({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+  const result = (id: string) => rec({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'answered' }] } });
+
+  it('finds the question it was still waiting on', () => {
+    // As 0327 audit subject resolver's transcript ended at 00:01, before the desk went down.
+    const t = [prose('One finding needs your ruling.'), ask('t1', 'Rule on the MEDIUM finding?'), rec({ type: 'system', subtype: 'x' })].join('\n');
+    assert.equal(pendingQuestion(t), 'Rule on the MEDIUM finding?');
+  });
+
+  it('is not waiting once the question has its answer', () => {
+    assert.equal(pendingQuestion([ask('t1', 'Merge?'), result('t1'), prose('Merged.')].join('\n')), null);
+  });
+
+  it('is not waiting when a prompt was typed after the question', () => {
+    assert.equal(pendingQuestion([ask('t1', 'Merge?'), rec({ type: 'user', message: { content: 'do something else' } })].join('\n')), null);
+  });
+
+  it('ignores thinking after the question and subagents asking their own', () => {
+    const thinking = rec({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: '…' }] } });
+    const sub = rec({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'subagent' }] } });
+    assert.equal(pendingQuestion([ask('t1', 'Merge?'), thinking, sub].join('\n')), 'Merge?');
+  });
+
+  it('reads a tail that starts part-way through a line', () => {
+    assert.equal(pendingQuestion(['ntent":[]}}', ask('t2', 'Which option?')].join('\n')), 'Which option?');
+  });
+
+  it('tells the session to ask again and not to decide itself', () => {
+    const m = reaskMessage('Rule on the MEDIUM finding?');
+    assert.ok(m.includes('Rule on the MEDIUM finding?'));
+    assert.ok(/ask it again/i.test(m) && /do not decide it yourself/i.test(m));
   });
 });
 
