@@ -328,6 +328,31 @@ const LANE_TTL_MS = 4 * 3600_000;
 /** A lane name as given, tidied; null when none was. */
 const laneName = (v: string | undefined): string | null => (v?.trim() ? v.trim().slice(0, 40) : null);
 
+/**
+ * Traffic rows for one session, whichever of its conversations they were counted under: the board
+ * keeps a row per conversation, and a session that cleared twice read as three agents. The status
+ * shown is the live one's.
+ */
+function mergeByName(rows: BoardHealth['traffic24h']): BoardHealth['traffic24h'] {
+  const out = new Map<string, BoardHealth['traffic24h'][number]>();
+  for (const r of rows) {
+    const had = out.get(r.name);
+    if (!had) {
+      out.set(r.name, { ...r });
+      continue;
+    }
+    const live = had.status === 'offline' ? r : had;
+    out.set(r.name, {
+      ...live,
+      sent: had.sent + r.sent,
+      broadcasts: had.broadcasts + r.broadcasts,
+      received: had.received + r.received,
+      chars: had.chars + r.chars,
+    });
+  }
+  return [...out.values()];
+}
+
 /** Retention for what the board keeps once it is over. */
 const MESSAGE_RETENTION_DAYS = 30;
 const SETTLED_RETENTION_DAYS = 14;
@@ -2590,9 +2615,9 @@ export class Coordinator {
           ),
           lanesOfLeftAgents: count("SELECT COUNT(*) AS n FROM lanes l JOIN agents a ON a.id = l.agent_id WHERE a.repo_id = ? AND a.status = 'offline'", r.id),
         },
-        traffic24h: [...traffic.values()].sort((x, y) => y.chars - x.chars || y.sent - x.sent),
+        traffic24h: mergeByName([...traffic.values()]).sort((x, y) => y.chars - x.chars || y.sent - x.sent),
         upkeep24h: this.db.all<{ ts: string; summary: string }>(
-          "SELECT ts, summary FROM events WHERE repo_id = ? AND agent_id IS NULL AND summary LIKE 'Switchboard %' AND ts >= ? ORDER BY id DESC LIMIT 20",
+          "SELECT ts, summary FROM events WHERE repo_id = ? AND agent_id IS NULL AND summary GLOB 'Switchboard *' AND ts >= ? ORDER BY id DESC LIMIT 20",
           r.id,
           day,
         ),
