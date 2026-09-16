@@ -195,6 +195,45 @@ describe('a board that tidies up after itself', () => {
     });
   });
 
+  describe('lanes', () => {
+    const openClaims = (): string[] =>
+      coord.raw
+        .all<{ pattern: string; lane: string | null }>("SELECT pattern, lane FROM claims WHERE agent_id = 'a1111111' AND released_at IS NULL ORDER BY pattern")
+        .map((c) => `${c.lane ?? '-'}:${c.pattern}`);
+
+    it('keeps each line of work its own intent and claims, apart from the session and each other', async () => {
+      await coord.runTool('a1111111', 'sb_intent', { summary: 'orchestrating the launch gaps', files: ['.docs/plan.md'] });
+      await coord.runTool('a1111111', 'sb_intent', { summary: 'suspension specs', files: ['.docs/specs/0470-*'], lane: 'lane6' });
+      await coord.runTool('a1111111', 'sb_intent', { summary: 'tier limits', files: ['.docs/specs/0466-*'], lane: 'lane4' });
+      await coord.runTool('a1111111', 'sb_intent', { summary: 'suspension and erasure', files: ['.docs/specs/0470-*', '.docs/specs/0474-*'], lane: 'lane6' });
+
+      assert.equal(coord.agent('a1111111')!.intent, 'orchestrating the launch gaps', 'a lane does not replace the session\'s own intent');
+      assert.deepEqual(openClaims(), ['-:.docs/plan.md', 'lane4:.docs/specs/0466-*', 'lane6:.docs/specs/0470-*', 'lane6:.docs/specs/0474-*']);
+      const status = coord.statusText('b2222222');
+      assert.match(status, /lanes: .*lane6: "suspension and erasure"/);
+      assert.match(status, /lanes: .*lane4: "tier limits"/);
+      assert.deepEqual(coord.repoDetail(repoId)!.agents.find((x) => x.id === 'a1111111')!.lanes.map((l) => l.lane).sort(), ['lane4', 'lane6']);
+    });
+
+    it('releases one lane and ends it, leaving the rest', async () => {
+      await coord.runTool('a1111111', 'sb_intent', { summary: 'suspension', files: ['s/**'], lane: 'lane6' });
+      await coord.runTool('a1111111', 'sb_claim', { paths: ['t/**'], lane: 'lane4' });
+      const r = await coord.runTool('a1111111', 'sb_release', { lane: 'lane6' });
+      assert.match(r.text, /Released 1 claim\(s\) and ended lane "lane6"/);
+      assert.deepEqual(openClaims(), ['lane4:t/**']);
+      assert.deepEqual(coord.repoDetail(repoId)!.agents.find((x) => x.id === 'a1111111')!.lanes.map((l) => l.lane), []);
+    });
+
+    it('ends a lane nobody renewed, and every lane of a session that has left', async () => {
+      await coord.runTool('a1111111', 'sb_intent', { summary: 'old', lane: 'stale' });
+      await coord.runTool('b2222222', 'sb_intent', { summary: 'x', lane: 'gone' });
+      coord.raw.run("UPDATE lanes SET updated_at = ? WHERE lane = 'stale'", back(5 * HOUR));
+      coord.markOffline('b2222222', 'ended');
+      coord.sweep();
+      assert.equal(coord.raw.get<{ n: number }>('SELECT COUNT(*) AS n FROM lanes')!.n, 0);
+    });
+  });
+
   describe('questions nobody answers', () => {
     it('stop being owed after six hours, and the asker is told once', () => {
       const q = coord.send('a1111111', repoId, 'ben', 'request', 'review my branch?');

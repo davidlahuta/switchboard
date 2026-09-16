@@ -81,6 +81,14 @@ interface ClaimRow {
   reason: string | null;
   created_at: string;
   expires_at: string | null;
+  lane: string | null;
+}
+
+interface LaneRow {
+  agent_id: string;
+  lane: string;
+  intent: string;
+  updated_at: string;
 }
 
 interface NoteRow {
@@ -312,6 +320,12 @@ export function comparablePath(p: string): string {
   out = path.resolve(out).replace(/[\\/]+$/, '');
   return process.platform === 'win32' ? out.toLowerCase() : out;
 }
+
+/** How long a lane's intent stands without being renewed: as long as the claims it made. */
+const LANE_TTL_MS = 4 * 3600_000;
+
+/** A lane name as given, tidied; null when none was. */
+const laneName = (v: string | undefined): string | null => (v?.trim() ? v.trim().slice(0, 40) : null);
 
 /** Retention for what the board keeps once it is over. */
 const MESSAGE_RETENTION_DAYS = 30;
@@ -557,6 +571,7 @@ export class Coordinator {
     const name = this.uniqueName(repo.id, a.name, id);
     this.db.tx(() => {
       this.db.run('UPDATE claims SET released_at = ? WHERE agent_id = ? AND released_at IS NULL', ts, id);
+      this.db.run('DELETE FROM lanes WHERE agent_id = ?', id);
       this.db.run(
         `UPDATE agents SET repo_id = ?, name = ?, cwd = ?, worktree = ?, branch = ?, intent = NULL, last_seen = ?,
            read_through_id = (SELECT COALESCE(MAX(id), 0) FROM messages WHERE repo_id = ?)
@@ -647,6 +662,7 @@ export class Coordinator {
     const ts = now();
     this.db.run("UPDATE agents SET status = 'offline', ended_at = ?, last_seen = ? WHERE id = ?", ts, ts, id);
     this.db.run('UPDATE claims SET released_at = ? WHERE agent_id = ? AND released_at IS NULL', ts, id);
+    this.db.run('DELETE FROM lanes WHERE agent_id = ?', id);
     // Whatever it had running was running inside it.
     this.endSessionWork(id, `session offline: ${why}`);
     this.event(a.repo_id, id, 'left', `${a.name} left (${why})`);
@@ -907,6 +923,9 @@ export class Coordinator {
       }
     }
     this.releaseLapsedClaims();
+    // A lane nobody has renewed in as long as its claims last has stopped: its subagent is done.
+    const staleLanes = this.db.run('DELETE FROM lanes WHERE updated_at < ?', new Date(Date.now() - LANE_TTL_MS).toISOString()).changes;
+    if (staleLanes) log.info('ended lanes nobody renewed', { count: staleLanes });
     this.alignHostedNames();
     this.redirectToSuccessors();
     this.lapseUnanswered();
@@ -1414,9 +1433,16 @@ export class Coordinator {
     this.bus.invalidate('state', `repo:${a.repo_id}`);
   }
 
-  setIntent(agentId: string, summary: string, files: string[] = [], name?: string): string {
+  /**
+   * Announce what this session is doing. With a lane, what one line of its work is doing: an
+   * orchestrator's six subagents all speak as one session, so without lanes each one's intent
+   * replaced the last and one name ended up holding 48 claims from six unrelated pieces of work.
+   * A lane has its own intent and its own intent claims, and leaves the session's own alone.
+   */
+  setIntent(agentId: string, summary: string, files: string[] = [], name?: string, laneArg?: string): string {
     const a = this.agent(agentId);
     if (!a) throw new Error('unknown session');
+    const lane = laneName(laneArg);
     const ts = now();
     /*
      * A hosted session is called what the operator called it. Agents naming themselves through their
@@ -1427,35 +1453,51 @@ export class Coordinator {
     const hosted = !!a.run_id && !!this.runName(a.run_id);
     const newName = name?.trim() && !hosted ? this.uniqueName(a.repo_id, agentName(name), a.id) : a.name;
     this.db.tx(() => {
-      this.db.run('UPDATE agents SET intent = ?, name = ?, last_seen = ? WHERE id = ?', clip(summary, 300), newName, ts, agentId);
-      this.db.run("UPDATE claims SET released_at = ? WHERE agent_id = ? AND source = 'intent' AND released_at IS NULL", ts, agentId);
-      const expires = new Date(Date.now() + 4 * 3600_000).toISOString();
+      if (lane) {
+        this.db.run(
+          'INSERT INTO lanes (agent_id, lane, intent, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(agent_id, lane) DO UPDATE SET intent = excluded.intent, updated_at = excluded.updated_at',
+          agentId,
+          lane,
+          clip(summary, 300),
+          ts,
+        );
+        this.db.run('UPDATE agents SET last_seen = ? WHERE id = ?', ts, agentId);
+      } else {
+        this.db.run('UPDATE agents SET intent = ?, name = ?, last_seen = ? WHERE id = ?', clip(summary, 300), newName, ts, agentId);
+      }
+      this.db.run("UPDATE claims SET released_at = ? WHERE agent_id = ? AND source = 'intent' AND lane IS ? AND released_at IS NULL", ts, agentId, lane);
+      const expires = new Date(Date.now() + LANE_TTL_MS).toISOString();
       for (const f of files.slice(0, 50)) {
         this.db.run(
-          "INSERT INTO claims (repo_id, agent_id, pattern, exclusive, reason, source, created_at, expires_at) VALUES (?, ?, ?, 0, ?, 'intent', ?, ?)",
+          "INSERT INTO claims (repo_id, agent_id, pattern, exclusive, reason, source, created_at, expires_at, lane) VALUES (?, ?, ?, 0, ?, 'intent', ?, ?, ?)",
           a.repo_id,
           agentId,
           f,
           clip(summary, 120),
           ts,
           expires,
+          lane,
         );
       }
     });
-    this.event(a.repo_id, agentId, 'intent', `${newName}: ${summary}`);
+    const who = lane ? `${newName} [${lane}]` : newName;
+    this.event(a.repo_id, agentId, 'intent', `${who}: ${summary}`);
     // The feed shows this to the operator; the agents already running would otherwise never hear it.
     // Lazily, as info: it rides along with their next hook rather than costing them a turn.
     if (this.liveAgents(a.repo_id).some((x) => x.id !== agentId)) {
-      this.send(agentId, a.repo_id, null, 'info', `Now working on: ${summary}${files.length ? ` — expect changes in ${files.slice(0, 10).join(', ')}` : ''}`);
+      this.send(agentId, a.repo_id, null, 'info', `Now working on${lane ? ` (lane ${lane})` : ''}: ${summary}${files.length ? ` — expect changes in ${files.slice(0, 10).join(', ')}` : ''}`);
     }
     const overlaps = this.overlapReport({ ...a, name: newName }, files);
     return [
-      `Intent set. You are "${newName}".${hosted && name?.trim() && agentName(name) !== newName ? ' (Your name follows your session\'s name; the operator renames it.)' : ''}`,
+      lane
+        ? `Intent set for lane "${lane}" of "${newName}". sb_release with lane "${lane}" when that lane is done.`
+        : `Intent set. You are "${newName}".${hosted && name?.trim() && agentName(name) !== newName ? ' (Your name follows your session\'s name; the operator renames it.)' : ''}`,
       overlaps.length ? `Heads-up, possible overlap:\n- ${overlaps.join('\n- ')}\nConsider sb_send to coordinate.` : 'No overlaps with other agents.',
     ].join('\n');
   }
 
-  claim(agentId: string, patterns: string[], exclusive: boolean, reason: string | null, ttlMin = 60): string {
+  claim(agentId: string, patterns: string[], exclusive: boolean, reason: string | null, ttlMin = 60, laneArg?: string): string {
+    const lane = laneName(laneArg);
     const a = this.agent(agentId);
     if (!a) throw new Error('unknown session');
     const others = this.activeClaims(a.repo_id).filter((c) => c.agent_id !== agentId);
@@ -1470,7 +1512,7 @@ export class Coordinator {
         continue;
       }
       this.db.run(
-        "INSERT INTO claims (repo_id, agent_id, pattern, exclusive, reason, source, created_at, expires_at) VALUES (?, ?, ?, ?, ?, 'claim', ?, ?)",
+        "INSERT INTO claims (repo_id, agent_id, pattern, exclusive, reason, source, created_at, expires_at, lane) VALUES (?, ?, ?, ?, ?, 'claim', ?, ?, ?)",
         a.repo_id,
         agentId,
         p,
@@ -1478,6 +1520,7 @@ export class Coordinator {
         reason,
         ts,
         expires,
+        lane,
       );
       granted.push(p);
     }
@@ -1502,26 +1545,45 @@ export class Coordinator {
       .join('\n');
   }
 
-  release(agentId: string, patterns?: string[]): string {
+  /**
+   * Release claims: the ones named, or all of them. With a lane, only that lane's — and releasing a
+   * whole lane also ends it, taking its intent off the board.
+   */
+  release(agentId: string, patterns?: string[], laneArg?: string): string {
+    const lane = laneName(laneArg);
     const a = this.agent(agentId);
     if (!a) throw new Error('unknown session');
     const ts = now();
+    const inScope = (c: ClaimRow): boolean => c.agent_id === agentId && (!lane || c.lane === lane) && (!patterns?.length || patterns.includes(c.pattern));
     // Agents told their edits would be blocked until this was released have no other way to learn
     // that it has been, and would otherwise keep steering around a claim that is gone.
     const freed = this.activeClaims(a.repo_id)
-      .filter((c) => c.agent_id === agentId && bool(c.exclusive) && (!patterns?.length || patterns.includes(c.pattern)))
+      .filter((c) => inScope(c) && bool(c.exclusive))
       .map((c) => c.pattern);
+    const laneClause = lane ? ' AND lane = ?' : '';
+    const laneParams = lane ? [lane] : [];
     let changes = 0;
     if (patterns?.length) {
-      for (const p of patterns) changes += this.db.run('UPDATE claims SET released_at = ? WHERE agent_id = ? AND pattern = ? AND released_at IS NULL', ts, agentId, p).changes;
+      for (const p of patterns) {
+        changes += this.db.run(`UPDATE claims SET released_at = ? WHERE agent_id = ? AND pattern = ? AND released_at IS NULL${laneClause}`, ts, agentId, p, ...laneParams).changes;
+      }
     } else {
-      changes = this.db.run('UPDATE claims SET released_at = ? WHERE agent_id = ? AND released_at IS NULL', ts, agentId).changes;
+      changes = this.db.run(`UPDATE claims SET released_at = ? WHERE agent_id = ? AND released_at IS NULL${laneClause}`, ts, agentId, ...laneParams).changes;
     }
-    if (changes) this.event(a.repo_id, agentId, 'release', `${a.name} released ${patterns?.length ? patterns.join(', ') : 'all claims'}`);
+    const laneEnded = !!lane && !patterns?.length && this.db.run('DELETE FROM lanes WHERE agent_id = ? AND lane = ?', agentId, lane).changes > 0;
+    if (changes || laneEnded) {
+      const what = patterns?.length ? patterns.join(', ') : lane ? `lane "${lane}"` : 'all claims';
+      this.event(a.repo_id, agentId, 'release', `${a.name} released ${what}`);
+    }
     if (freed.length && this.liveAgents(a.repo_id).some((x) => x.id !== agentId)) {
       this.send(agentId, a.repo_id, null, 'info', `Released ${freed.join(', ')} — open for editing again.`);
     }
-    return `Released ${changes} claim(s).`;
+    return `Released ${changes} claim(s)${laneEnded ? ` and ended lane "${lane}"` : ''}.`;
+  }
+
+  /** The lines of work a session has open, newest first. */
+  private lanesOf(agentId: string): LaneRow[] {
+    return this.db.all<LaneRow>('SELECT * FROM lanes WHERE agent_id = ? ORDER BY updated_at DESC', agentId);
   }
 
   releaseClaim(id: number): void {
@@ -2145,6 +2207,11 @@ export class Coordinator {
     const mine = claims.filter((c) => c.agent_id === x.id);
     const parts = [`${x.name} [${x.status}]`, x.branch ?? 'no branch'];
     if (x.intent) parts.push(`intent: "${x.intent}"`);
+    const lanes = this.lanesOf(x.id);
+    if (lanes.length) {
+      const shown = lanes.slice(0, 6).map((l) => `${l.lane}: "${clip(l.intent, 100)}"`);
+      parts.push(`lanes: ${shown.join('; ')}${lanes.length > shown.length ? ` (+${lanes.length - shown.length} more)` : ''}`);
+    }
     if (mine.length) {
       // An sb_intent listing thirty files becomes thirty claims. Naming them all here would bury
       // the rest of the digest in one agent's file list; sb_who_touches answers the specific case.
@@ -2202,7 +2269,9 @@ export class Coordinator {
     const out = [`Repo ${repo.name} (${repo.root}). You are "${a.name}" on ${a.branch ?? 'no branch'}.`];
     out.push(others.length ? `Other agents online (${others.length}):\n${others.map((x) => this.agentLine(x, claims)).join('\n')}` : 'No other agents online.');
     const myClaims = claims.filter((c) => c.agent_id === a.id);
-    if (myClaims.length) out.push(`Your claims: ${myClaims.map((c) => c.pattern).join(', ')}`);
+    if (myClaims.length) out.push(`Your claims: ${myClaims.map((c) => (c.lane ? `${c.pattern} [${c.lane}]` : c.pattern)).join(', ')}`);
+    const myLanes = this.lanesOf(a.id);
+    if (myLanes.length) out.push(`Your lanes:\n${myLanes.map((l) => `- ${l.lane}: ${l.intent} (${ago(l.updated_at)})`).join('\n')}`);
     if (conflicts.length) {
       out.push(`Open conflicts involving you:\n${conflicts.map((c) => `- ${c.path} with ${this.nameOf(c.agent_a === a.id ? c.agent_b : c.agent_a)} (${c.kind})`).join('\n')}`);
     }
@@ -2265,16 +2334,16 @@ export class Coordinator {
         case 'sb_intent': {
           const summary = str(args.summary);
           if (!summary) return { text: 'summary is required', isError: true };
-          return { text: this.setIntent(agentId, summary, list(args.files), str(args.name)), isError: false };
+          return { text: this.setIntent(agentId, summary, list(args.files), str(args.name), str(args.lane)), isError: false };
         }
         case 'sb_claim': {
           const paths = list(args.paths);
           if (!paths.length) return { text: 'paths is required', isError: true };
           const ttl = typeof args.ttl_minutes === 'number' ? args.ttl_minutes : 60;
-          return { text: this.claim(agentId, paths, args.exclusive === true, str(args.reason) ?? null, ttl), isError: false };
+          return { text: this.claim(agentId, paths, args.exclusive === true, str(args.reason) ?? null, ttl, str(args.lane)), isError: false };
         }
         case 'sb_release':
-          return { text: this.release(agentId, list(args.paths)), isError: false };
+          return { text: this.release(agentId, list(args.paths), str(args.lane)), isError: false };
         case 'sb_send': {
           const body = str(args.body);
           const to = str(args.to);
@@ -2359,6 +2428,7 @@ export class Coordinator {
       cwd: r.cwd,
       status: r.status,
       intent: r.intent,
+      lanes: r.status === 'offline' ? [] : this.lanesOf(r.id).map((l) => ({ lane: l.lane, intent: l.intent, updatedAt: l.updated_at })),
       subscriptionId: r.subscription_id,
       runId: r.run_id,
       hasChannel: bool(r.has_channel),
@@ -2459,6 +2529,7 @@ export class Coordinator {
       pattern: c.pattern,
       exclusive: bool(c.exclusive),
       reason: c.reason,
+      lane: c.lane,
       createdAt: c.created_at,
       expiresAt: c.expires_at,
       waiting: waits.get(c.id) ?? [],

@@ -1455,6 +1455,11 @@ a.list-main:hover {
   max-width: 320px;
   overflow-wrap: anywhere;
 }
+/* One line of work inside a session, under its intent. */
+.lane-line {
+  display: block;
+  margin-top: 4px;
+}
 .cell-actions {
   text-align: right;
 }
