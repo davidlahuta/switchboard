@@ -344,6 +344,19 @@ describe('a board that tidies up after itself', () => {
       );
       assert.equal(coord.boardHealth(repoId)[0].questions.owed, 1);
     });
+
+    it('counts a session once, across the conversations it has had', async () => {
+      await coord.registerAgent({ sessionId: 'g1111111', cwd: dir, name: 'gil', runId: 'run-g' });
+      coord.send('g1111111', repoId, 'all', 'info', 'before the clear');
+      coord.markOffline('g1111111', 'cleared');
+      await coord.registerAgent({ sessionId: 'g2222222', cwd: dir, name: 'gil', runId: 'run-g' });
+      coord.send('g2222222', repoId, 'all', 'info', 'after it');
+      coord.raw.run("INSERT INTO events (repo_id, agent_id, type, summary, ts) VALUES (?, NULL, 'message', 'switchboard → gil: a reminder', ?)", repoId, new Date().toISOString());
+      const h = coord.boardHealth(repoId)[0];
+      const gil = h.traffic24h.filter((t) => t.name === 'gil');
+      assert.deepEqual(gil.map((t) => [t.agentId, t.status, t.sent]), [['g2222222', 'starting', 2]]);
+      assert.equal(h.upkeep24h.length, 0, 'a message Switchboard sent is not upkeep');
+    });
   });
 
   describe('boards and history', () => {
