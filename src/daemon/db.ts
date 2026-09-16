@@ -313,6 +313,16 @@ const MIGRATIONS: string[] = [
      SET email = lower(substr(label, 1, instr(label || ' ', ' ') - 1))
    WHERE lower(substr(label, 1, instr(label || ' ', ' ') - 1)) LIKE '%_@_%._%';
   `,
+  `
+  -- Why a conflict stopped being open. Conflicts were opened by the hundred and closed by nobody:
+  -- 119 of 120 were still open a week later, 98 of them between agents that had long gone. The
+  -- sweep closes them now, and says which of the reasons it was, so a closed one can be told
+  -- apart from one the operator dismissed.
+  ALTER TABLE conflicts ADD COLUMN resolution TEXT;
+  -- When a question, request or handoff stopped being owed: nobody answered it in time, and the
+  -- asker was told so. Kept on the row so a restart neither forgets it nor says it twice.
+  ALTER TABLE messages ADD COLUMN lapsed_at TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

@@ -195,6 +195,8 @@ export interface Conflict {
   detail: string | null;
   createdAt: string;
   resolvedAt: string | null;
+  /** Why it stopped being open, when it has: what the sweep found gone, or the operator. */
+  resolution: string | null;
 }
 
 export interface FeedEvent {

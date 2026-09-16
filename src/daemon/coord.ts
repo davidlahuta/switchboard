@@ -1,5 +1,7 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { DATA_DIR } from '../config.ts';
 import { forgetRepoCache, matchesPattern, patternsOverlap, relPath, repoIdFor, resolveRepo } from '../git.ts';
 import { logger } from '../log.ts';
 import type {
@@ -102,6 +104,7 @@ interface ConflictRow {
   detail: string | null;
   created_at: string;
   resolved_at: string | null;
+  resolution: string | null;
 }
 
 /** Delivery channel into live sessions, implemented by the agent WebSocket hub. */
@@ -287,6 +290,43 @@ const MAX_EVENTS_PER_REPO = 5000;
 
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
+/**
+ * An agent name as peers type it. Session names have spaces, and agent names had hyphens where the
+ * name came through a rename and spaces where it came from the run, so one session could be
+ * "0219 durable actions" on one row and "0219-durable-actions" on the next.
+ */
+export const agentName = (name: string): string => name.trim().replace(/\s+/g, '-').slice(0, 40);
+
+/**
+ * A path in a form two spellings of the same directory agree on: the real path where it exists (on
+ * Windows that also expands 8.3 names like DAVIDL~1, which is how the temp directory is reported),
+ * without a trailing separator, case-folded where the filesystem is.
+ */
+export function comparablePath(p: string): string {
+  let out = p;
+  try {
+    out = fs.realpathSync.native(p);
+  } catch {
+    // not there any more: compare it as given
+  }
+  out = path.resolve(out).replace(/[\\/]+$/, '');
+  return process.platform === 'win32' ? out.toLowerCase() : out;
+}
+
+/** Retention for what the board keeps once it is over. */
+const MESSAGE_RETENTION_DAYS = 30;
+const SETTLED_RETENTION_DAYS = 14;
+const WORK_RETENTION_DAYS = 7;
+/** How long a question may stay unanswered before it stops being owed. */
+const LAPSE_MS = 6 * 3600_000;
+/** Pinned notes a repo keeps before the oldest non-decisions are unpinned. */
+const MAX_PINNED = 25;
+/** How long an ended author's todo stays on the board before it is archived. */
+const ORPHAN_TODO_MS = 24 * 3600_000;
+/** How long a board nobody has used is kept: briefly for scratch folders, a day for the rest. */
+const SCRATCH_BOARD_IDLE_MS = 60 * 60_000;
+const EMPTY_BOARD_IDLE_MS = 24 * 3600_000;
+
 export class Coordinator {
   /** Exposed for tests that need to set up awkward states directly. */
   get raw(): Db {
@@ -306,6 +346,8 @@ export class Coordinator {
   private sessionGone: (sessionId: string) => boolean = () => false;
   /** Told when the sweep gives up on work, since nothing else will say that it ended. */
   private workSwept: (sessionId: string) => void = () => {};
+  /** The name the operator gave a hosted session, which its agent is named after. */
+  private runName: (runId: string) => string | null = () => null;
 
   constructor(db: Db, bus: Bus) {
     this.db = db;
@@ -322,6 +364,11 @@ export class Coordinator {
    */
   setSessionGone(fn: (sessionId: string) => boolean): void {
     this.sessionGone = fn;
+  }
+
+  /** Teach the board the operator's names for the sessions Switchboard hosts. See alignHostedNames. */
+  setRunName(fn: (runId: string) => string | null): void {
+    this.runName = fn;
   }
 
   /**
@@ -407,7 +454,7 @@ export class Coordinator {
     const takeover = this.replacing.get(input.sessionId) ?? null;
     this.replacing.delete(input.sessionId);
     if (existing) {
-      const name = input.name ? this.uniqueName(repo.id, input.name, existing.id) : existing.name;
+      const name = input.name ? this.uniqueName(repo.id, agentName(input.name), existing.id) : existing.name;
       this.db.run(
         `UPDATE agents SET repo_id = ?, name = ?, cwd = ?, worktree = ?, branch = ?, pid = COALESCE(?, pid),
            run_id = COALESCE(?, run_id), subscription_id = COALESCE(?, subscription_id),
@@ -430,7 +477,7 @@ export class Coordinator {
       );
       if (existing.status === 'offline') this.event(repo.id, existing.id, 'joined', `${name} is back`);
     } else {
-      const name = this.uniqueName(repo.id, input.name || this.defaultName(info.branch, info.worktree, input.sessionId), input.sessionId);
+      const name = this.uniqueName(repo.id, input.name ? agentName(input.name) : this.defaultName(info.branch, info.worktree, input.sessionId), input.sessionId);
       // A takeover inherits when the seat was taken and how far through the repo's messages that
       // seat had read, so nothing said to it while the previous conversation held it is either lost
       // or read out a second time. See sessionReplaced.
@@ -564,11 +611,31 @@ export class Coordinator {
       oldId,
       oldId,
     );
+    /*
+     * And what it was asked and had not answered yet. The old conversation read it, but the one in
+     * the terminal now has no memory of that, and the asker is still waiting on this terminal — left
+     * behind, the question was owed by a row that had gone offline, which nothing ever collects on.
+     * It is offered again, from the start, by bringing the inherited watermark down below it.
+     */
+    const owed = this.db.all<{ id: number }>(
+      `SELECT m.id FROM messages m
+        WHERE m.to_id = ? AND m.kind IN ('question', 'request', 'handoff') AND m.lapsed_at IS NULL AND m.from_id <> ?
+          AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id)`,
+      oldId,
+      SYSTEM,
+    );
+    let readThrough = old.read_through_id;
+    for (const m of owed) {
+      this.db.run('UPDATE messages SET to_id = ? WHERE id = ?', newId, m.id);
+      readThrough = Math.min(readThrough, m.id - 1);
+    }
+    // Hooks can register the new conversation before this runs, in which case there is no takeover left to apply.
+    if (owed.length) this.db.run('UPDATE agents SET read_through_id = MIN(read_through_id, ?) WHERE id = ?', readThrough, newId);
     // A session is only offered messages from after it joined, so that a new one is not handed
     // months of backlog. The conversation taking over this terminal is not new in that sense — it
     // is the same seat in the same room — so it inherits when that seat was taken, and what was
     // said to it while the previous conversation held it is still addressed to whoever is there.
-    this.replacing.set(newId, { startedAt: old.started_at, readThrough: old.read_through_id });
+    this.replacing.set(newId, { startedAt: old.started_at, readThrough });
     this.shimGone.delete(oldId);
     this.markOffline(oldId, 'its conversation was cleared');
     log.info('session replaced in the same terminal', { was: old.name, from: oldId, to: newId });
@@ -691,6 +758,20 @@ export class Coordinator {
       this.db.run('DELETE FROM events WHERE ts < ?', eventCutoff).changes +
       this.db.run('DELETE FROM file_touches WHERE ts < ?', touchCutoff).changes +
       this.db.run('DELETE FROM blocks WHERE last_try < ?', touchCutoff).changes;
+    /*
+     * What is over and old. Messages, claims, conflicts and finished work were kept for good: on a
+     * busy board, thousands of rows a week that no view shows and every query scans past.
+     */
+    const days = (n: number): string => new Date(Date.now() - n * 86400_000).toISOString();
+    this.db.run('DELETE FROM deliveries WHERE message_id IN (SELECT id FROM messages WHERE created_at < ?)', days(MESSAGE_RETENTION_DAYS));
+    const settled = {
+      messages: this.db.run('DELETE FROM messages WHERE created_at < ?', days(MESSAGE_RETENTION_DAYS)).changes,
+      claims: this.db.run('DELETE FROM claims WHERE released_at IS NOT NULL AND released_at < ?', days(SETTLED_RETENTION_DAYS)).changes,
+      conflicts: this.db.run("DELETE FROM conflicts WHERE status <> 'open' AND resolved_at < ?", days(SETTLED_RETENTION_DAYS)).changes,
+      work: this.db.run('DELETE FROM session_work WHERE ended_at IS NOT NULL AND ended_at < ?', days(WORK_RETENTION_DAYS)).changes,
+    };
+    if (Object.values(settled).some((n) => n > 0)) log.info('pruned what is over', settled);
+    this.archiveOrphanTodos();
     let capped = 0;
     for (const r of this.db.all<{ id: string }>('SELECT id FROM repos')) {
       capped += this.db.run(
@@ -704,6 +785,48 @@ export class Coordinator {
     // Deliveries outlive their message only if a message is ever deleted; messages are kept.
     if (removed + capped > 0) log.info('pruned history', { aged: removed, overCap: capped });
     this.forgetVanishedRepos();
+    this.forgetIdleBoards();
+  }
+
+  /**
+   * A todo whose author has left and nobody took over. A todo is somebody's own list; once its
+   * author's session has ended with no successor in its terminal, nobody is going to tick it off,
+   * and a pinned one sat in every new session's digest regardless.
+   */
+  private archiveOrphanTodos(): void {
+    const rows = this.db.all<NoteRow>(
+      `SELECT n.* FROM notes n JOIN agents a ON a.id = n.agent_id
+        WHERE n.kind = 'todo' AND n.archived_at IS NULL AND a.status = 'offline' AND a.ended_at < ?`,
+      new Date(Date.now() - ORPHAN_TODO_MS).toISOString(),
+    );
+    for (const n of rows) {
+      const author = this.agent(n.agent_id!)!;
+      if (this.successorOf(author)) continue;
+      this.db.run('UPDATE notes SET archived_at = ? WHERE id = ?', now(), n.id);
+      this.event(n.repo_id, null, 'note', `Switchboard archived ${author.name}'s todo #${n.id}: its session ended over a day ago`);
+      log.info('archived a todo whose author has left', { repo: n.repo_id, note: n.id, author: author.name });
+    }
+  }
+
+  /**
+   * Boards nobody is using that should not be boards. Every directory a session spoke from became
+   * one — temp scratchpads, test checkouts, Switchboard's own data folder, empty subfolders — and
+   * only the ones deleted from disk were ever dropped, so six of eleven boards were of this kind. A
+   * board in a scratch location goes an hour after its last activity; any other board with nothing
+   * on it, no message and no note, goes after a day. Neither while anyone is on it, and a session
+   * that comes back simply makes it again.
+   */
+  private forgetIdleBoards(): void {
+    const scratchRoots = [os.tmpdir(), DATA_DIR].map(comparablePath);
+    for (const r of this.db.all<RepoRow>('SELECT * FROM repos')) {
+      if (this.liveAgents(r.id).length) continue;
+      const idleMs = Date.now() - Date.parse(r.last_activity ?? r.created_at);
+      const root = comparablePath(r.root);
+      const scratch = scratchRoots.some((s) => root === s || root.startsWith(s + path.sep));
+      const empty = !this.db.get('SELECT 1 FROM messages WHERE repo_id = ?', r.id) && !this.db.get('SELECT 1 FROM notes WHERE repo_id = ?', r.id);
+      if (!((scratch && idleMs > SCRATCH_BOARD_IDLE_MS) || (empty && idleMs > EMPTY_BOARD_IDLE_MS))) continue;
+      if (this.forgetRepo(r.id)) log.info('forgot a board nobody uses', { name: r.name, root: r.root, why: scratch ? 'a scratch location' : 'nothing on it' });
+    }
   }
 
   /**
@@ -783,12 +906,162 @@ export class Coordinator {
         this.markOffline(a.id, dead ? 'process exited' : shimGone ? 'its tools disconnected' : 'no activity');
       }
     }
+    this.releaseLapsedClaims();
+    this.alignHostedNames();
+    this.redirectToSuccessors();
+    this.lapseUnanswered();
     for (const repo of this.db.all<{ id: string }>('SELECT id FROM repos')) {
+      this.closeSettledConflicts(repo.id);
       this.nudgeStaleClaims(repo.id);
       this.nudgeUnanswered(repo.id);
       this.breakStaleBlocks(repo.id);
       this.breakDeadlocks(repo.id);
     }
+  }
+
+  /** Live hosted agents under the name their session has, whatever they were called before. */
+  private alignHostedNames(): void {
+    for (const a of this.db.all<AgentRow>("SELECT * FROM agents WHERE status <> 'offline' AND run_id IS NOT NULL")) {
+      const want = this.runName(a.run_id!);
+      if (!want || agentName(want).toLowerCase() === a.name.toLowerCase()) continue;
+      this.renameAgent(a.id, want);
+      const renamedTo = this.agent(a.id)!.name;
+      if (renamedTo === a.name) continue;
+      // It would otherwise go on signing and answering as a name that no longer finds it.
+      this.send(SYSTEM, a.repo_id, a.id, 'info', `Your name on this board is now "${renamedTo}", the name of your Switchboard session (it was "${a.name}"). Agents still using "${a.name}" reach you.`);
+    }
+  }
+
+  /**
+   * Messages still waiting for a conversation that has been replaced in its terminal. /clear moves
+   * them at the moment it happens; every other way a run changes conversation did not, and 18
+   * messages — a handoff and a request among them — sat addressed to rows nobody would read again.
+   */
+  private redirectToSuccessors(): void {
+    // Not Switchboard's own reminders, which were about what the old conversation held, and not
+    // anything older than a day, which would arrive as news long after it was.
+    const stranded = this.db.all<{ id: number; to_id: string }>(
+      `SELECT m.id, m.to_id FROM messages m JOIN agents dead ON dead.id = m.to_id
+        WHERE dead.status = 'offline' AND dead.run_id IS NOT NULL AND m.lapsed_at IS NULL AND m.from_id <> ? AND m.created_at > ?
+          AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = m.to_id)`,
+      SYSTEM,
+      new Date(Date.now() - 24 * 3600_000).toISOString(),
+    );
+    const moved = new Map<string, number>();
+    for (const m of stranded) {
+      const successor = this.successorOf(this.agent(m.to_id)!);
+      if (!successor) continue;
+      this.db.run('UPDATE messages SET to_id = ? WHERE id = ?', successor.id, m.id);
+      // Below its watermark the successor would never be offered it.
+      this.db.run('UPDATE agents SET read_through_id = MIN(read_through_id, ?) WHERE id = ?', m.id - 1, successor.id);
+      moved.set(successor.name, (moved.get(successor.name) ?? 0) + 1);
+    }
+    if (moved.size) log.info('moved messages from replaced conversations to the sessions now in their terminals', Object.fromEntries(moved));
+  }
+
+  /**
+   * A question, request or handoff nobody answered in LAPSE_MS. Until now it was owed for ever: the
+   * digest and sb_status listed it as "Answer #id" days later, while the reminders had stopped at the
+   * same six hours. It stops being owed, and an asker still on the board is told, once, so it can ask
+   * again or take it elsewhere rather than wait on it.
+   */
+  private lapseUnanswered(): void {
+    const cutoff = new Date(Date.now() - LAPSE_MS).toISOString();
+    const rows = this.db.all<MessageRow>(
+      `SELECT m.* FROM messages m
+        WHERE m.lapsed_at IS NULL AND m.to_id IS NOT NULL AND m.to_id <> ? AND m.from_id NOT IN (?, ?)
+          AND m.kind IN ('question', 'request', 'handoff') AND m.created_at < ?
+          AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id)`,
+      HUMAN,
+      SYSTEM,
+      HUMAN,
+      cutoff,
+    );
+    const recent = new Date(Date.now() - LAPSE_MS - 24 * 3600_000).toISOString();
+    for (const m of rows) {
+      this.db.run('UPDATE messages SET lapsed_at = ? WHERE id = ?', now(), m.id);
+      // Anything older than a day before this ran is history: nobody is waiting on it to be told.
+      if (m.created_at < recent) continue;
+      const from = this.agent(m.from_id);
+      const asker = from && (from.status !== 'offline' ? from : this.successorOf(from));
+      if (!asker) continue;
+      this.send(
+        SYSTEM,
+        m.repo_id,
+        asker.id,
+        'info',
+        `Your #${m.id} to ${this.nameOf(m.to_id)} ("${clip(m.body, 160)}") has had no answer for ${Math.round(LAPSE_MS / 3600_000)}h, so it is no longer counted as owed. If you still need it, ask again with sb_send, ask someone else, or take it to "human".`,
+      );
+    }
+    if (rows.length) log.info('questions nobody answered stopped being owed', { count: rows.length });
+  }
+
+  /**
+   * Claims that ended without anybody saying so. An expired claim and a claim whose holder has left
+   * were already ignored by every check, but stayed open in the table for good: 36 of them, from
+   * four sessions that ended days earlier, were still "held". Closing them keeps the table true for
+   * anything that reads it, not only for the checks that know to look past it.
+   */
+  releaseLapsedClaims(): number {
+    const ts = now();
+    const expired = this.db.run('UPDATE claims SET released_at = expires_at WHERE released_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?', ts).changes;
+    const orphaned = this.db.run(
+      "UPDATE claims SET released_at = ? WHERE released_at IS NULL AND agent_id IN (SELECT id FROM agents WHERE status = 'offline')",
+      ts,
+    ).changes;
+    if (expired + orphaned) log.info('released claims nobody holds any more', { expired, heldByLeftSessions: orphaned });
+    return expired + orphaned;
+  }
+
+  /**
+   * Conflicts whose cause has gone. Nothing closed a conflict but the operator, so the list only
+   * grew, and every agent's sb_status carried the ones naming it. One is closed, with the reason,
+   * as soon as what it records is no longer true:
+   * - one side has left the board;
+   * - a claim conflict whose exclusive claim is no longer there;
+   * - an overlap across different worktrees (no longer recorded; older rows), or one neither side
+   *   has edited again within the conflict window;
+   * - a deadlock whose waits have cleared.
+   */
+  closeSettledConflicts(repoId: string): number {
+    const open = this.db.all<ConflictRow>("SELECT * FROM conflicts WHERE repo_id = ? AND status = 'open'", repoId);
+    if (!open.length) return 0;
+    const exclusive = this.activeClaims(repoId).filter((c) => bool(c.exclusive));
+    const windowMin = getSettings(this.db).conflictWindowMin;
+    const since = this.windowStart();
+    const blocks = this.openBlocks(repoId);
+    const tally: Record<string, number> = {};
+    for (const c of open) {
+      const a = this.agent(c.agent_a);
+      const b = this.agent(c.agent_b);
+      let why: string | null = null;
+      let reason = '';
+      if (!a || !b || a.status === 'offline' || b.status === 'offline') {
+        const gone = !a || a.status === 'offline' ? a : b;
+        why = `${gone?.name ?? 'one side'} has left`;
+        reason = 'a side has left';
+      } else if (c.kind === 'claim') {
+        if (!exclusive.some((x) => x.agent_id === c.agent_b && matchesPattern(c.path, x.pattern))) why = reason = 'no exclusive claim covers it any more';
+      } else if (c.kind === 'overlap') {
+        if (!a.worktree || a.worktree !== b.worktree) why = reason = 'the two edits are in different worktrees';
+        else if (!this.db.get('SELECT 1 FROM file_touches WHERE repo_id = ? AND path = ? AND agent_id IN (?, ?) AND ts >= ?', repoId, c.path, c.agent_a, c.agent_b, since)) {
+          why = reason = `neither has edited it for ${windowMin} min`;
+        }
+      } else if (c.kind === 'deadlock') {
+        const ids = new Set([c.agent_a, c.agent_b]);
+        if (!blocks.some((x) => ids.has(x.waiter_id) && ids.has(x.holder_id))) why = reason = 'the waits have cleared';
+      }
+      if (!why) continue;
+      this.db.run("UPDATE conflicts SET status = 'resolved', resolved_at = ?, resolution = ? WHERE id = ? AND status = 'open'", now(), why, c.id);
+      tally[reason] = (tally[reason] ?? 0) + 1;
+    }
+    const n = Object.values(tally).reduce((x, y) => x + y, 0);
+    if (n) {
+      this.event(repoId, null, 'conflict', `Switchboard closed ${n} conflict${n === 1 ? '' : 's'} whose cause has gone`);
+      log.info('closed conflicts whose cause has gone', { repo: repoId, ...tally });
+      this.bus.invalidate('state', `repo:${repoId}`);
+    }
+    return n;
   }
 
   /**
@@ -830,7 +1103,7 @@ export class Coordinator {
     const rows = this.db.all<MessageRow>(
       `SELECT m.* FROM messages m
        WHERE m.repo_id = ? AND m.to_id IS NOT NULL AND m.to_id <> ? AND m.from_id <> ?
-         AND m.kind IN ('question', 'request', 'handoff') AND m.created_at < ? AND m.created_at > ?
+         AND m.kind IN ('question', 'request', 'handoff') AND m.created_at < ? AND m.created_at > ? AND m.lapsed_at IS NULL
          AND EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = m.to_id)
          AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id AND r.from_id = m.to_id)
        ORDER BY m.id`,
@@ -1000,24 +1273,55 @@ export class Coordinator {
    * than one live agent is therefore refused rather than guessed, and the caller is told to use
    * the GUID.
    */
-  findAgent(repoId: string, ref: string): AgentRow | undefined {
+  findAgent(repoId: string, ref: string, depth = 0): AgentRow | undefined {
     const r = ref.trim().replace(/^@/, '');
     if (!r) return undefined;
     const byId = this.db.get<AgentRow>('SELECT * FROM agents WHERE repo_id = ? AND id = ?', repoId, r);
-    if (byId) return byId;
+    if (byId) return this.successorOf(byId) ?? byId;
     const named = this.db.all<AgentRow>(
       "SELECT * FROM agents WHERE repo_id = ? AND lower(name) = lower(?) ORDER BY (status = 'offline'), last_seen DESC",
       repoId,
-      r,
+      agentName(r),
     );
     const live = named.filter((a) => a.status !== 'offline');
     if (live.length > 1) {
       throw new Error(`"${r}" matches ${live.length} live agents (${live.map((a) => a.id).join(', ')}). Address one by its session id.`);
     }
-    if (named.length) return live[0] ?? named[0];
+    if (named.length) return live[0] ?? this.successorOf(named[0]) ?? named[0];
+    /*
+     * A name an agent used to have. Names follow sessions now, and a session renamed from under its
+     * peers — "agent-core-wave" becoming "agent-loop-rename" — is still what their notes and threads
+     * call it, so the latest rename away from that name is followed to where it went.
+     */
+    const renamed = this.db.get<{ summary: string }>(
+      "SELECT summary FROM events WHERE repo_id = ? AND type = 'renamed' AND lower(summary) LIKE lower(?) ESCAPE '\\' ORDER BY id DESC LIMIT 1",
+      repoId,
+      `${agentName(r).replace(/[\\%_]/g, (c) => `\\${c}`)} is now %`,
+    );
+    const to = renamed?.summary.slice(agentName(r).length + ' is now '.length);
+    if (to && depth < 5 && agentName(to).toLowerCase() !== agentName(r).toLowerCase()) {
+      const found = this.findAgent(repoId, to, depth + 1);
+      if (found) return found;
+    }
     // Last resort: an unambiguous session-id prefix.
     const prefix = r.length >= 8 ? this.db.all<AgentRow>('SELECT * FROM agents WHERE repo_id = ? AND id LIKE ?', repoId, `${r}%`) : [];
     return prefix.length === 1 ? prefix[0] : undefined;
+  }
+
+  /**
+   * The live session sitting in the terminal a conversation used to hold, if there is one. A hosted
+   * session's conversation changes under it — /clear, a relaunch onto a new conversation — and
+   * everything addressed to the old one was meant for whoever is at that terminal now.
+   */
+  successorOf(a: AgentRow): AgentRow | undefined {
+    if (a.status !== 'offline' || !a.run_id) return undefined;
+    return this.db.get<AgentRow>(
+      // The same board only: a message filed under one repository is never offered in another.
+      "SELECT * FROM agents WHERE run_id = ? AND repo_id = ? AND id <> ? AND status <> 'offline' ORDER BY last_seen DESC LIMIT 1",
+      a.run_id,
+      a.repo_id,
+      a.id,
+    );
   }
 
   private liveAgents(repoId: string): AgentRow[] {
@@ -1103,7 +1407,7 @@ export class Coordinator {
   renameAgent(agentId: string, name: string): void {
     const a = this.agent(agentId);
     if (!a) return;
-    const next = this.uniqueName(a.repo_id, name.trim().replace(/\s+/g, '-').slice(0, 40), a.id);
+    const next = this.uniqueName(a.repo_id, agentName(name), a.id);
     if (next === a.name) return;
     this.db.run('UPDATE agents SET name = ? WHERE id = ?', next, agentId);
     this.event(a.repo_id, agentId, 'renamed', `${a.name} is now ${next}`);
@@ -1114,7 +1418,14 @@ export class Coordinator {
     const a = this.agent(agentId);
     if (!a) throw new Error('unknown session');
     const ts = now();
-    const newName = name?.trim() ? this.uniqueName(a.repo_id, name.trim().replace(/\s+/g, '-').slice(0, 32), a.id) : a.name;
+    /*
+     * A hosted session is called what the operator called it. Agents naming themselves through their
+     * intent left the board reading "lane6-launch-dsr", "idle" and "idle-2" for sessions the operator
+     * knows as "remaining specs" and "0219 durable actions" — and peers asking by the name they could
+     * see got "unknown agent". The name follows the session; renaming the session renames it here.
+     */
+    const hosted = !!a.run_id && !!this.runName(a.run_id);
+    const newName = name?.trim() && !hosted ? this.uniqueName(a.repo_id, agentName(name), a.id) : a.name;
     this.db.tx(() => {
       this.db.run('UPDATE agents SET intent = ?, name = ?, last_seen = ? WHERE id = ?', clip(summary, 300), newName, ts, agentId);
       this.db.run("UPDATE claims SET released_at = ? WHERE agent_id = ? AND source = 'intent' AND released_at IS NULL", ts, agentId);
@@ -1139,7 +1450,7 @@ export class Coordinator {
     }
     const overlaps = this.overlapReport({ ...a, name: newName }, files);
     return [
-      `Intent set. You are "${newName}".`,
+      `Intent set. You are "${newName}".${hosted && name?.trim() && agentName(name) !== newName ? ' (Your name follows your session\'s name; the operator renames it.)' : ''}`,
       overlaps.length ? `Heads-up, possible overlap:\n- ${overlaps.join('\n- ')}\nConsider sb_send to coordinate.` : 'No overlaps with other agents.',
     ].join('\n');
   }
@@ -1262,7 +1573,7 @@ export class Coordinator {
   resolveConflict(id: number, status: 'resolved' | 'dismissed'): void {
     const c = this.db.get<ConflictRow>('SELECT * FROM conflicts WHERE id = ?', id);
     if (!c) return;
-    this.db.run('UPDATE conflicts SET status = ?, resolved_at = ? WHERE id = ?', status, now(), id);
+    this.db.run('UPDATE conflicts SET status = ?, resolved_at = ?, resolution = ? WHERE id = ?', status, now(), `the operator ${status}`, id);
     this.bus.invalidate('state', `repo:${c.repo_id}`);
   }
 
@@ -1375,13 +1686,23 @@ export class Coordinator {
     for (const o of others) {
       const other = this.agent(o.agent_id);
       if (!other) continue;
-      const opened = this.openConflict(a.repo_id, rel, 'overlap', agentId, other.id, `both edited within ${getSettings(this.db).conflictWindowMin} min`);
+      /*
+       * A record only where the two edits can actually collide: two live sessions writing the same
+       * file in the same worktree. Separate worktrees meet at a merge, which git reports better than
+       * a row that stays open for ever — and they did stay open: 98 of 119 were between agents that
+       * had long gone. The warnings go out exactly as before either way.
+       */
+      const sameTree = !!a.worktree && other.worktree === a.worktree;
+      if (sameTree && other.status !== 'offline') {
+        this.openConflict(a.repo_id, rel, 'overlap', agentId, other.id, `both edited within ${getSettings(this.db).conflictWindowMin} min`);
+      }
       if (this.shouldWarn(`overlap|${agentId}|${rel}|${other.id}`)) {
         warnings.push(
           `${other.name} (${other.branch ?? 'no branch'}${other.worktree && other.worktree !== a.worktree ? ', other worktree' : ', SAME worktree'}, ${other.status}) also edited it ${ago(o.ts)}${other.intent ? ` — their intent: "${other.intent}"` : ''}`,
         );
       }
-      if (opened && other.status !== 'offline') {
+      // Once per pair and file while it stays live, as it was once per open conflict.
+      if (other.status !== 'offline' && this.shouldWarn(`overlap-told|${[agentId, other.id].sort().join('|')}|${rel}`, NUDGE_TTL_MS)) {
         this.send(
           SYSTEM,
           a.repo_id,
@@ -1393,7 +1714,8 @@ export class Coordinator {
     }
     for (const c of this.activeClaims(a.repo_id)) {
       if (c.agent_id === agentId || !matchesPattern(rel, c.pattern)) continue;
-      this.openConflict(a.repo_id, rel, 'claim', agentId, c.agent_id, `edit inside claim "${c.pattern}"`);
+      // A soft claim is a heads-up, not a lock: an edit inside one is still said, but not recorded.
+      if (bool(c.exclusive)) this.openConflict(a.repo_id, rel, 'claim', agentId, c.agent_id, `edit inside exclusive claim "${c.pattern}"`);
       if (this.shouldWarn(`claim|${agentId}|${rel}|${c.agent_id}`)) {
         warnings.push(`it is inside ${c.agent_name}'s ${bool(c.exclusive) ? 'EXCLUSIVE ' : ''}claim "${c.pattern}"${c.reason ? ` (${c.reason})` : ''}`);
       }
@@ -1505,9 +1827,11 @@ export class Coordinator {
   }
 
   private pending(a: AgentRow): MessageRow[] {
+    // Broadcasts from before a session joined are history; a message addressed to it is not, however
+    // old — which is what lets one meant for the conversation it replaced reach it.
     const rows = this.db.all<MessageRow>(
       `SELECT m.* FROM messages m
-       WHERE m.repo_id = ? AND m.id > ? AND m.from_id <> ? AND (m.to_id = ? OR m.to_id IS NULL) AND m.created_at >= ?
+       WHERE m.repo_id = ? AND m.id > ? AND m.from_id <> ? AND (m.to_id = ? OR (m.to_id IS NULL AND m.created_at >= ?))
          AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = ?)
        ORDER BY m.id`,
       a.repo_id,
@@ -1589,7 +1913,7 @@ export class Coordinator {
          JOIN deliveries d ON d.message_id = m.id AND d.agent_id = m.to_id
          WHERE m.repo_id = ? AND m.to_id = ? AND m.from_id <> ? AND m.from_id <> ?
            AND m.kind IN ('question', 'request', 'handoff')
-           AND d.delivered_at < ? AND m.created_at > ?
+           AND d.delivered_at < ? AND m.created_at > ? AND m.lapsed_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id AND r.from_id = m.to_id)
          ORDER BY m.id DESC LIMIT 5`,
         a.repo_id,
@@ -1734,20 +2058,37 @@ export class Coordinator {
 
   // ---------------------------------------------------------------- notes
 
-  note(agentId: string | null, repoId: string, kind: NoteKind, body: string, pinned: boolean): Note {
+  /**
+   * Record a note, or a new version of one. `replaces` exists because notes that grew were written
+   * again rather than edited — eight "NUMBER RESERVATION" notes on one board, each amending the last,
+   * all pinned — so the pinned list filled with superseded versions while the digest showed only the
+   * newest few. The replaced note is archived, and the new one keeps its kind and pin unless told
+   * otherwise.
+   */
+  note(agentId: string | null, repoId: string, kind: NoteKind | undefined, body: string, pinned: boolean | undefined, replaces: number | null = null): Note {
+    const old = replaces === null ? undefined : this.db.get<NoteRow>('SELECT * FROM notes WHERE id = ? AND repo_id = ? AND archived_at IS NULL', replaces, repoId);
+    if (replaces !== null && !old) throw new Error(`There is no note #${replaces} on this board to replace (it may be archived already).`);
+    const k: NoteKind = kind ?? old?.kind ?? 'fact';
+    const pin = pinned ?? (old ? bool(old.pinned) : false);
     const { lastInsertRowid: id } = this.db.run(
       'INSERT INTO notes (repo_id, agent_id, kind, body, pinned, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       repoId,
       agentId,
-      kind,
+      k,
       clip(body, 4000),
-      pinned ? 1 : 0,
+      pin ? 1 : 0,
       now(),
     );
     const who = agentId ? this.nameOf(agentId) : 'operator';
-    this.event(repoId, agentId, 'note', `${who} noted [${kind}] ${clip(body, 120)}`);
-    if (kind === 'decision' || kind === 'warning') {
-      this.send(agentId ?? HUMAN, repoId, null, 'info', `📌 ${kind}: ${body}`);
+    if (old) {
+      this.db.run('UPDATE notes SET archived_at = ? WHERE id = ?', now(), old.id);
+      this.event(repoId, agentId, 'note', `${who} replaced note #${old.id} with #${id} [${k}] ${clip(body, 120)}`);
+    } else {
+      this.event(repoId, agentId, 'note', `${who} noted [${k}] ${clip(body, 120)}`);
+    }
+    if (pin) this.capPins(repoId);
+    if (k === 'decision' || k === 'warning') {
+      this.send(agentId ?? HUMAN, repoId, null, 'info', `📌 ${k}${old ? ` (replaces #${old.id})` : ''}: ${body}`);
     }
     return this.noteDto(this.db.get<NoteRow>('SELECT * FROM notes WHERE id = ?', id)!);
   }
@@ -1756,8 +2097,46 @@ export class Coordinator {
     const n = this.db.get<NoteRow>('SELECT * FROM notes WHERE id = ?', id);
     if (!n) return;
     if (patch.pinned !== undefined) this.db.run('UPDATE notes SET pinned = ? WHERE id = ?', patch.pinned ? 1 : 0, id);
+    if (patch.pinned) this.capPins(n.repo_id);
     if (patch.archived !== undefined) this.db.run('UPDATE notes SET archived_at = ? WHERE id = ?', patch.archived ? now() : null, id);
     this.bus.invalidate(`repo:${n.repo_id}`);
+  }
+
+  /**
+   * Keep a board's pinned notes to MAX_PINNED. Every pin was forever, and every note was pinned —
+   * 23 of 23 on the busiest board — so pinning had stopped meaning anything. Past the cap the oldest
+   * note that is not a decision is unpinned (never archived: it stays on the board), and decisions
+   * only once nothing else is left to unpin.
+   */
+  private capPins(repoId: string): void {
+    const pinned = this.db.all<NoteRow>(
+      "SELECT * FROM notes WHERE repo_id = ? AND pinned = 1 AND archived_at IS NULL ORDER BY (kind = 'decision'), id",
+      repoId,
+    );
+    for (const n of pinned.slice(0, Math.max(0, pinned.length - MAX_PINNED))) {
+      this.db.run('UPDATE notes SET pinned = 0 WHERE id = ?', n.id);
+      this.event(repoId, null, 'note', `Switchboard unpinned note #${n.id} [${n.kind}]: more than ${MAX_PINNED} notes were pinned`);
+      log.info('unpinned a note over the pin limit', { repo: repoId, note: n.id, kind: n.kind });
+    }
+  }
+
+  /**
+   * Pinned notes in the order a session should read them: decisions, then warnings, then todos, then
+   * facts, newest first within each. The digest showed the newest eight whatever they were, so a
+   * ruling everybody had to follow dropped out of sight behind a day of reservations and residue.
+   */
+  private pinnedLines(repoId: string, limit: number): string | null {
+    const notes = this.db.all<NoteRow>(
+      `SELECT * FROM notes WHERE repo_id = ? AND pinned = 1 AND archived_at IS NULL
+        ORDER BY CASE kind WHEN 'decision' THEN 0 WHEN 'warning' THEN 1 WHEN 'todo' THEN 2 ELSE 3 END, id DESC LIMIT ?`,
+      repoId,
+      limit,
+    );
+    if (!notes.length) return null;
+    const total = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM notes WHERE repo_id = ? AND pinned = 1 AND archived_at IS NULL', repoId)!.n;
+    const lines = notes.map((n) => `- #${n.id} [${n.kind}] ${clip(n.body, 300)}`);
+    if (total > notes.length) lines.push(`- …and ${total - notes.length} more pinned (the board's Notes panel)`);
+    return `Pinned notes:\n${lines.join('\n')}`;
   }
 
   // ------------------------------------------------------ summaries (text)
@@ -1787,7 +2166,7 @@ export class Coordinator {
     if (!a.intent) todo.push('Announce your task with sb_intent, including the paths you expect to change.');
     const unanswered = this.db.all<MessageRow>(
       `SELECT m.* FROM messages m
-       WHERE m.repo_id = ? AND m.to_id = ? AND m.from_id <> ? AND m.kind IN ('question', 'request', 'handoff')
+       WHERE m.repo_id = ? AND m.to_id = ? AND m.from_id <> ? AND m.kind IN ('question', 'request', 'handoff') AND m.lapsed_at IS NULL
          AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id AND r.from_id = m.to_id)
        ORDER BY m.id DESC LIMIT 5`,
       a.repo_id,
@@ -1818,7 +2197,7 @@ export class Coordinator {
       a.id,
       a.id,
     );
-    const notes = this.db.all<NoteRow>('SELECT * FROM notes WHERE repo_id = ? AND pinned = 1 AND archived_at IS NULL ORDER BY id DESC LIMIT 10', a.repo_id);
+    const pinned = this.pinnedLines(a.repo_id, 10);
     const unread = this.pending(a).length;
     const out = [`Repo ${repo.name} (${repo.root}). You are "${a.name}" on ${a.branch ?? 'no branch'}.`];
     out.push(others.length ? `Other agents online (${others.length}):\n${others.map((x) => this.agentLine(x, claims)).join('\n')}` : 'No other agents online.');
@@ -1827,7 +2206,7 @@ export class Coordinator {
     if (conflicts.length) {
       out.push(`Open conflicts involving you:\n${conflicts.map((c) => `- ${c.path} with ${this.nameOf(c.agent_a === a.id ? c.agent_b : c.agent_a)} (${c.kind})`).join('\n')}`);
     }
-    if (notes.length) out.push(`Pinned notes:\n${notes.map((n) => `- [${n.kind}] ${clip(n.body, 300)}`).join('\n')}`);
+    if (pinned) out.push(pinned);
     out.push(unread ? `Unread messages: ${unread} (sb_inbox).` : 'No unread messages.');
     const todo = this.owes(a, claims);
     if (todo.length) out.push(`Owed by you:\n${todo.map((t) => `- ${t}`).join('\n')}`);
@@ -1840,14 +2219,14 @@ export class Coordinator {
     if (!a) return '';
     const repo = this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', a.repo_id)!;
     const others = this.liveAgents(a.repo_id).filter((x) => x.id !== a.id);
-    const notes = this.db.all<NoteRow>('SELECT * FROM notes WHERE repo_id = ? AND pinned = 1 AND archived_at IS NULL ORDER BY id DESC LIMIT 8', a.repo_id);
-    if (!others.length && !notes.length) {
+    const pinned = this.pinnedLines(a.repo_id, 8);
+    if (!others.length && !pinned) {
       return `Switchboard: you are "${a.name}", currently the only agent in ${repo.name}. Announce your task with sb_intent so agents joining later can see it.`;
     }
     const claims = this.activeClaims(a.repo_id);
     const out = [`Switchboard: you are "${a.name}" in ${repo.name}.`];
     if (others.length) out.push(`${others.length} other agent(s) are working in this repo:\n${others.slice(0, 12).map((x) => this.agentLine(x, claims)).join('\n')}`);
-    if (notes.length) out.push(`Pinned notes:\n${notes.map((n) => `- [${n.kind}] ${clip(n.body, 300)}`).join('\n')}`);
+    if (pinned) out.push(pinned);
     const todo = this.owes(a, claims);
     if (todo.length) out.push(`Before you start:\n${todo.map((t) => `- ${t}`).join('\n')}`);
     if (others.length) out.push('Say what you land with sb_send to "all" as you go — they cannot see your worktree.');
@@ -1859,6 +2238,24 @@ export class Coordinator {
   async runTool(agentId: string, tool: string, args: Record<string, unknown>): Promise<ToolResult> {
     const a = this.agent(agentId);
     if (!a) return { text: 'Switchboard does not know this session yet; retry in a moment.', isError: true };
+    if (a.status === 'offline') {
+      /*
+       * A conversation the board has retired still speaking. Before the shim followed its run it
+       * could, and did: four ended sessions set intents after they had gone, leaving 69 claims that
+       * nothing would release. If the session is really over — replaced in its terminal, or its run
+       * has ended — it is refused; otherwise it is plainly alive, and back on the board.
+       */
+      const successor = this.successorOf(a);
+      if (successor || this.sessionGone(agentId)) {
+        return {
+          text: `This conversation has left the board${successor ? ` — its terminal is now "${successor.name}"` : ''}, so ${tool} was not applied. Restart the Switchboard MCP server (/mcp) if this session is still working.`,
+          isError: true,
+        };
+      }
+      this.db.run("UPDATE agents SET status = 'idle', ended_at = NULL, last_seen = ? WHERE id = ?", now(), agentId);
+      this.event(a.repo_id, agentId, 'joined', `${a.name} is back`);
+      this.bus.invalidate('state', `repo:${a.repo_id}`);
+    }
     const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : undefined);
     const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '') : []);
     try {
@@ -1897,9 +2294,10 @@ export class Coordinator {
         case 'sb_note': {
           const body = str(args.body);
           if (!body) return { text: 'body is required', isError: true };
-          const kind = (['decision', 'fact', 'warning', 'todo'].includes(String(args.kind)) ? args.kind : 'fact') as NoteKind;
-          const n = this.note(agentId, a.repo_id, kind, body, args.pin === true);
-          return { text: `Noted #${n.id}${n.pinned ? ' (pinned)' : ''}.`, isError: false };
+          const kind = ['decision', 'fact', 'warning', 'todo'].includes(String(args.kind)) ? (args.kind as NoteKind) : undefined;
+          const replaces = typeof args.replaces === 'number' ? args.replaces : null;
+          const n = this.note(agentId, a.repo_id, kind, body, typeof args.pin === 'boolean' ? args.pin : undefined, replaces);
+          return { text: `Noted #${n.id}${n.pinned ? ' (pinned)' : ''}${replaces !== null ? `, replacing #${replaces}` : ''}.`, isError: false };
         }
         case 'sb_who_touches': {
           const paths = list(args.paths);
@@ -1933,7 +2331,7 @@ export class Coordinator {
       // behind stops after the cap instead of walking its whole backlog.
       const rows = this.db.all<{ id: number }>(
         `SELECT m.id FROM messages m
-          WHERE m.repo_id = ? AND m.id > ? AND m.from_id <> ? AND (m.to_id = ? OR m.to_id IS NULL) AND m.created_at >= ?
+          WHERE m.repo_id = ? AND m.id > ? AND m.from_id <> ? AND (m.to_id = ? OR (m.to_id IS NULL AND m.created_at >= ?))
             AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = ?)
           ORDER BY m.id LIMIT ?`,
         repoId,
@@ -2041,7 +2439,13 @@ export class Coordinator {
     const unread = this.unreadByAgent(repoId);
     const agents = [
       ...this.db.all<AgentRow>("SELECT * FROM agents WHERE repo_id = ? AND status <> 'offline' ORDER BY started_at", repoId),
-      ...this.db.all<AgentRow>("SELECT * FROM agents WHERE repo_id = ? AND status = 'offline' ORDER BY last_seen DESC LIMIT 30", repoId),
+      // A conversation whose terminal is now held by another is that session's history, not an agent.
+      ...this.db.all<AgentRow>(
+        `SELECT * FROM agents o WHERE repo_id = ? AND status = 'offline'
+           AND NOT (run_id IS NOT NULL AND EXISTS (SELECT 1 FROM agents l WHERE l.run_id = o.run_id AND l.id <> o.id AND l.status <> 'offline'))
+         ORDER BY last_seen DESC LIMIT 30`,
+        repoId,
+      ),
     ];
     const waits = new Map<number, Waiting[]>();
     for (const b of this.openBlocks(repoId)) {
@@ -2078,6 +2482,7 @@ export class Coordinator {
         detail: c.detail,
         createdAt: c.created_at,
         resolvedAt: c.resolved_at,
+        resolution: c.resolution,
       }));
     const notes = this.db
       .all<NoteRow>('SELECT * FROM notes WHERE repo_id = ? AND archived_at IS NULL ORDER BY pinned DESC, id DESC LIMIT 200', repoId)

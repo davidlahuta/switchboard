@@ -94,13 +94,14 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'sb_note',
     description:
-      'Record a durable note shared with all agents in this repo. pin=true shows it to every new session. Use for decisions and gotchas others must know.',
+      'Record a durable note shared with all agents in this repo. pin=true shows it to every new session. Use for decisions and gotchas others must know. To update a note, pass replaces=<its id>: the old one is archived and the new one keeps its kind and pin.',
     inputSchema: {
       type: 'object',
       properties: {
         body: { type: 'string' },
         kind: { type: 'string', enum: ['decision', 'fact', 'warning', 'todo'] },
         pin: { type: 'boolean' },
+        replaces: { type: 'integer', description: 'id of the note this one supersedes' },
       },
       required: ['body'],
       additionalProperties: false,
