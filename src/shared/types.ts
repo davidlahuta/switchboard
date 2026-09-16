@@ -113,6 +113,8 @@ export interface Agent {
   cwd: string | null;
   status: AgentStatus;
   intent: string | null;
+  /** Lines of work inside the session with their own intents: an orchestrator's subagents, say. */
+  lanes: AgentLane[];
   subscriptionId: string | null;
   runId: string | null;
   hasChannel: boolean;
@@ -123,6 +125,12 @@ export interface Agent {
   endedAt: string | null;
 }
 
+export interface AgentLane {
+  lane: string;
+  intent: string;
+  updatedAt: string;
+}
+
 export interface Claim {
   id: number;
   repoId: string;
@@ -131,6 +139,8 @@ export interface Claim {
   pattern: string;
   exclusive: boolean;
   reason: string | null;
+  /** The line of work inside the session that holds it, when it was claimed for one. */
+  lane: string | null;
   createdAt: string;
   expiresAt: string | null;
   /** Agents currently held up by this claim, oldest wait first. */

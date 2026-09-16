@@ -323,6 +323,19 @@ const MIGRATIONS: string[] = [
   -- asker was told so. Kept on the row so a restart neither forgets it nor says it twice.
   ALTER TABLE messages ADD COLUMN lapsed_at TEXT;
   `,
+  `
+  -- A line of work inside one session. An orchestrator's subagents all speak through its one MCP
+  -- server, so they were one agent: each lane's intent replaced the last, and one name held 48
+  -- claims from six unrelated pieces of work that nobody could release separately.
+  CREATE TABLE lanes (
+    agent_id TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, lane)
+  );
+  ALTER TABLE claims ADD COLUMN lane TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

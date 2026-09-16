@@ -231,7 +231,12 @@ function AgentTable({ agents, subLabel, now }: { agents: Agent[]; subLabel: (id:
                 )}
               </td>
               <td data-label="Intent" className="cell-wrap">
-                {a.intent ?? <span className="dim">—</span>}
+                {a.intent ?? (a.lanes.length === 0 && <span className="dim">—</span>)}
+                {a.lanes.map((l) => (
+                  <span key={l.lane} className="lane-line" title={`Lane ${l.lane}, updated ${absTime(l.updatedAt)}`}>
+                    <Badge tone="neutral">{l.lane}</Badge> {l.intent}
+                  </span>
+                ))}
               </td>
               <td data-label="Subscription">{subLabel(a.subscriptionId)}</td>
               <td data-label="Last tool">
@@ -292,6 +297,12 @@ function ClaimsSection({ claims, now }: { claims: Claim[]; now: number }) {
               <span className="list-title">
                 <span className="mono">{c.pattern}</span>{' '}
                 {c.exclusive ? <Badge tone="crit">exclusive</Badge> : <Badge tone="neutral">soft</Badge>}
+                {c.lane && (
+                  <>
+                    {' '}
+                    <Badge tone="accent">lane {c.lane}</Badge>
+                  </>
+                )}
               </span>
               <span className="list-sub">
                 {c.agentName}
