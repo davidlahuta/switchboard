@@ -9,6 +9,8 @@ const log = logger('agents');
 interface Conn {
   ws: WebSocket;
   channel: boolean;
+  /** The run this shim's terminal hosts, when it is one: whose conversation it speaks for. */
+  runId: string | null;
 }
 
 /** Connections from the per-session MCP shims. Doubles as the coordinator's push channel. */
@@ -107,17 +109,29 @@ export class AgentHub implements PushTarget {
       });
       const previous = this.conns.get(sessionId);
       if (previous && previous.ws !== ws) previous.ws.close();
-      this.conns.set(sessionId, { ws, channel: msg.channel });
+      this.conns.set(sessionId, { ws, channel: msg.channel, runId: hosted?.id ?? null });
       reply({ type: 'welcome', agentName: agent.name });
       if (msg.channel) this.coord.flushPushQueue(sessionId);
       log.debug('shim connected', { session: sessionId, claimed: msg.sessionId, channel: msg.channel });
       return;
     }
     if (msg.type === 'call') {
-      const sid = getSession();
+      let sid = getSession();
       if (!sid) {
         reply({ type: 'result', id: msg.id, text: 'Switchboard: not registered yet', isError: true });
         return;
+      }
+      /*
+       * A hosted shim speaks for whatever conversation its run holds now. Re-keying normally keeps
+       * the two in step; this catches any change it missed, on the call that would otherwise fail,
+       * rather than leaving a terminal cut off from the board until its MCP server restarts.
+       */
+      const runId = this.conns.get(sid)?.runId ?? null;
+      const current = runId ? this.runs.row(runId)?.session_id : undefined;
+      if (current && current !== sid) {
+        log.info('shim followed its run to the conversation it holds now', { run: runId, from: sid, to: current });
+        this.rekey(sid, current);
+        sid = current;
       }
       const r = await this.coord.runTool(sid, msg.tool, msg.args ?? {});
       reply({ type: 'result', id: msg.id, text: r.text, isError: r.isError });
@@ -163,7 +177,7 @@ export class AgentHub implements PushTarget {
     const previous = this.conns.get(newId);
     if (previous && previous.ws !== conn.ws) previous.ws.close();
     this.conns.set(newId, conn);
-    log.debug('shim re-keyed', { from: oldId, to: newId });
+    log.info('shim re-keyed', { from: oldId, to: newId });
     return true;
   }
 }

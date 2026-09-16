@@ -640,9 +640,19 @@ export class Coordinator {
    */
   sessionReplaced(oldId: string, newId: string): void {
     if (oldId === newId) return;
+    /*
+     * The connection moves even when the conversation it leaves never made it onto the board. A run
+     * that went through two conversations in thirteen seconds had its shim re-keyed onto the middle
+     * one, which never sent a hook that registers; when the third arrived there was no row to retire,
+     * this returned before re-keying, and every sb_* call from that terminal for the next two hours
+     * answered "Switchboard does not know this session yet".
+     */
+    const moved = this.pushTarget.rekey(oldId, newId);
     const old = this.agent(oldId);
-    if (!old) return;
-    this.pushTarget.rekey(oldId, newId);
+    if (!old) {
+      if (moved) log.info('session replaced in the same terminal', { was: null, from: oldId, to: newId });
+      return;
+    }
     // Never shown to it, so it is not something the cleared conversation has already had its chance
     // at: whoever asked is still waiting on whoever is in that terminal.
     this.db.run(

@@ -586,6 +586,19 @@ describe('a session that clears its conversation', () => {
     assert.match(offered, /delivered, never answered/, 'the owed question is put in front of the new conversation again');
   });
 
+  it('moves the channel on even from a conversation that never reached the board', async () => {
+    // Two changes in quick succession: the shim is re-keyed onto a conversation that sends no hook
+    // that registers, and then onto the one that does.
+    coord.sessionReplaced('new44444', 'ghost555');
+    assert.ok(connected.has('ghost555'));
+    coord.sessionReplaced('ghost555', 'real6666');
+    assert.ok(connected.has('real6666'), 'the terminal is not left filed under the conversation in between');
+    assert.ok(!connected.has('ghost555'));
+    // Put back for the test below.
+    await coord.registerAgent({ sessionId: 'real6666', cwd: dir, name: 'mara' });
+    coord.sessionReplaced('real6666', 'new44444');
+  });
+
   it('does nothing when the id has not actually changed', () => {
     const before = coord.agent('new44444')!.status;
     coord.sessionReplaced('new44444', 'new44444');
