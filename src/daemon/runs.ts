@@ -1418,6 +1418,8 @@ export class RunManager {
       // Daemon restarted while the runner kept claude alive: just reattach and repaint.
       this.db.run('UPDATE runs SET pid = ?, cols = ?, rows = ? WHERE id = ?', msg.pid, msg.cols, msg.rows, r.id);
       this.setStatus(r.id, 'running');
+      // Attached with its claude running is back, whichever of it and its shim reached us first.
+      this.reviveSucceeded(r.id);
       mirror.reset();
       this.send(r.id, { type: 'redraw' });
     } else {
@@ -1942,6 +1944,17 @@ export class RunManager {
   private reviveSucceeded(runId: string): void {
     const r = this.row(runId);
     if (!r || (r.revive_after === null && (r.revive_tries ?? 0) === 0)) return;
+    /*
+     * Only a terminal that is attached has come back. The claude of a terminal Windows is tearing
+     * down outlives its runner by a moment, and its MCP shim reconnects to a daemon that has just
+     * started: that announcement cancelled the revive the runner's disconnect had queued, and three
+     * sessions stayed down until the daemon was restarted by hand. A sweep that finds the runner
+     * attached clears the revive itself (reviveDecision 'already-back').
+     */
+    if (!this.conns.has(runId)) {
+      log.info('still bringing a session back: it announced itself, but no terminal is attached', { run: runId, due: r.revive_after, tries: r.revive_tries ?? 0 });
+      return;
+    }
     this.db.run('UPDATE runs SET revive_after = NULL, revive_tries = 0 WHERE id = ?', runId);
     // Every "will bring a session back" is closed by a line saying how it ended. Without this a
     // restart leaves ten of them in the log and nothing to say that not one was needed.
