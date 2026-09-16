@@ -567,18 +567,23 @@ describe('a session that clears its conversation', () => {
   });
 
   it('carries over what was asked of it and never shown', async () => {
-    // A question reaches a connected session at once, so that one has had its chance; an info
-    // waits for a hook, and the clear happens before one arrives.
-    const seen = coord.send('peer2222', repoId, 'mara', 'question', 'already delivered, already missed');
+    // A question reaches a connected session at once and is read there; an info waits for a hook,
+    // and the clear happens before one arrives. An info that was shown stays behind.
+    const read = coord.send('peer2222', repoId, 'mara', 'question', 'delivered, never answered');
+    const shownInfo = coord.send('peer2222', repoId, 'mara', 'info', 'shown already');
+    coord.piggyback('new33333');
     const unseen = coord.send('peer2222', repoId, 'mara', 'info', 'never shown to anyone');
 
     coord.sessionReplaced('new33333', 'new44444');
     await coord.registerAgent({ sessionId: 'new44444', cwd: dir, name: 'mara' });
 
     const to = (id: number): string | null => coord.raw.get<{ to_id: string }>('SELECT to_id FROM messages WHERE id = ?', id)!.to_id;
-    assert.equal(to(unseen.id), 'new44444', 'a question nobody has answered follows the terminal');
-    assert.equal(to(seen.id), 'new33333', 'one the cleared conversation already had its chance at does not');
-    assert.match(coord.piggyback('new44444') ?? '', /never shown to anyone/);
+    assert.equal(to(unseen.id), 'new44444', 'what nobody was shown follows the terminal');
+    assert.equal(to(read.id), 'new44444', 'and so does a question still owed: the asker is waiting on this terminal, not on a conversation');
+    assert.equal(to(shownInfo.id), 'new33333', 'an info the cleared conversation was shown does not');
+    const offered = coord.piggyback('new44444') ?? '';
+    assert.match(offered, /never shown to anyone/);
+    assert.match(offered, /delivered, never answered/, 'the owed question is put in front of the new conversation again');
   });
 
   it('does nothing when the id has not actually changed', () => {

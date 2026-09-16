@@ -46,6 +46,7 @@ export async function startDaemon(): Promise<void> {
   const hub = new AgentHub(coord, runs);
   coord.setPushTarget(hub);
   coord.setSessionGone((sessionId) => runs.sessionOver(sessionId));
+  coord.setRunName((runId) => runs.row(runId)?.name ?? null);
   coord.setWorkSwept((sessionId) => runs.onWorkSettled(sessionId));
   const auth = new Auth(db);
   const updater = new Updater(db, bus, runs);
