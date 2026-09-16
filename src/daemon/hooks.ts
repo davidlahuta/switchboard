@@ -1,6 +1,7 @@
 import { logger } from '../log.ts';
 import { type Coordinator, editedPath } from './coord.ts';
 import type { RunManager } from './runs.ts';
+import { TaskNotes } from './tasknotes.ts';
 
 const log = logger('hooks');
 
@@ -69,6 +70,7 @@ function titleSync(runs: RunManager, sid: string, p: Payload): Record<string, un
 
 /** Claude Code HTTP hook endpoint: presence, conflict checks, lazy message delivery, swap signals. */
 export function createHookHandler(coord: Coordinator, runs: RunManager) {
+  const notes = new TaskNotes();
   return async (event: string, p: Payload, runHeader: string | undefined): Promise<object> => {
     const sid = typeof p.session_id === 'string' ? p.session_id : null;
     /*
@@ -106,6 +108,22 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
         hasChannel: run ? true : undefined,
         name: run?.name ?? null,
       });
+    }
+
+    /*
+     * A background shell or monitor that ends on its own tells only the model, in the transcript;
+     * see finishedTasks. Looked for on every main-thread hook while such work is open, reading only
+     * what the transcript gained since the last look.
+     */
+    if (!agentId && transcript && event !== 'SessionStart' && coord.liveWork(sid).some((w) => w.kind !== 'subagent')) {
+      let ended = 0;
+      for (const id of notes.finished(transcript)) {
+        if (coord.workEnded(id, 'finished')) {
+          ended++;
+          log.info('session work finished, from its notification in the transcript', { session: sid, id });
+        }
+      }
+      if (ended) runs.onWorkSettled(sid);
     }
 
     try {
