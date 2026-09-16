@@ -7,6 +7,7 @@ import { logger } from '../log.ts';
 import type {
   Agent,
   AgentStatus,
+  BoardHealth,
   Claim,
   Conflict,
   ConflictKind,
@@ -946,6 +947,7 @@ export class Coordinator {
       this.renameAgent(a.id, want);
       const renamedTo = this.agent(a.id)!.name;
       if (renamedTo === a.name) continue;
+      log.info('named an agent after its session', { from: a.name, to: renamedTo });
       // It would otherwise go on signing and answering as a name that no longer finds it.
       this.send(SYSTEM, a.repo_id, a.id, 'info', `Your name on this board is now "${renamedTo}", the name of your Switchboard session (it was "${a.name}"). Agents still using "${a.name}" reach you.`);
     }
@@ -2500,6 +2502,102 @@ export class Coordinator {
 
   agentsOnline(): number {
     return this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM agents WHERE status <> 'offline'")?.n ?? 0;
+  }
+
+  /** Board health for one repo, or for every repo. See BoardHealth. */
+  boardHealth(repoId?: string): BoardHealth[] {
+    const repos = repoId
+      ? this.db.all<RepoRow>('SELECT * FROM repos WHERE id = ?', repoId)
+      : this.db.all<RepoRow>('SELECT * FROM repos ORDER BY last_activity DESC');
+    const day = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const count = (sql: string, ...params: Array<string | number>): number => this.db.get<{ n: number }>(sql, ...params)?.n ?? 0;
+    return repos.map((r) => {
+      const claims = this.activeClaims(r.id);
+      const closedWhy: Record<string, number> = {};
+      for (const c of this.db.all<{ resolution: string | null; n: number }>(
+        "SELECT resolution, COUNT(*) AS n FROM conflicts WHERE repo_id = ? AND status <> 'open' AND resolved_at >= ? GROUP BY resolution",
+        r.id,
+        day,
+      )) {
+        const why = !c.resolution ? 'unrecorded' : c.resolution.endsWith(' has left') ? 'a side has left' : c.resolution;
+        closedWhy[why] = (closedWhy[why] ?? 0) + c.n;
+      }
+      const agents = new Map(this.db.all<AgentRow>('SELECT * FROM agents WHERE repo_id = ?', r.id).map((a) => [a.id, a]));
+      const traffic = new Map<string, BoardHealth['traffic24h'][number]>();
+      const row = (id: string): BoardHealth['traffic24h'][number] => {
+        let t = traffic.get(id);
+        if (!t) {
+          const a = agents.get(id);
+          t = { agentId: id, name: a?.name ?? this.nameOf(id), status: a?.status ?? (id === SYSTEM || id === HUMAN ? id : 'unknown'), sent: 0, broadcasts: 0, received: 0, chars: 0 };
+          traffic.set(id, t);
+        }
+        return t;
+      };
+      for (const s of this.db.all<{ from_id: string; n: number; b: number }>(
+        'SELECT from_id, COUNT(*) AS n, SUM(to_id IS NULL) AS b FROM messages WHERE repo_id = ? AND created_at >= ? GROUP BY from_id',
+        r.id,
+        day,
+      )) {
+        Object.assign(row(s.from_id), { sent: s.n, broadcasts: s.b });
+      }
+      for (const d of this.db.all<{ agent_id: string; n: number; c: number }>(
+        `SELECT d.agent_id, COUNT(*) AS n, SUM(LENGTH(m.body)) AS c FROM deliveries d JOIN messages m ON m.id = d.message_id
+          WHERE m.repo_id = ? AND d.delivered_at >= ? GROUP BY d.agent_id`,
+        r.id,
+        day,
+      )) {
+        Object.assign(row(d.agent_id), { received: d.n, chars: d.c });
+      }
+      return {
+        repoId: r.id,
+        repoName: r.name,
+        agentsLive: this.liveAgents(r.id).length,
+        claims: { open: claims.length, exclusive: claims.filter((c) => bool(c.exclusive)).length, inLanes: claims.filter((c) => c.lane).length },
+        lanes: count("SELECT COUNT(*) AS n FROM lanes l JOIN agents a ON a.id = l.agent_id WHERE a.repo_id = ? AND a.status <> 'offline'", r.id),
+        conflicts: {
+          open: count("SELECT COUNT(*) AS n FROM conflicts WHERE repo_id = ? AND status = 'open'", r.id),
+          closed24h: Object.values(closedWhy).reduce((x, y) => x + y, 0),
+          closedWhy,
+        },
+        questions: {
+          owed: count(
+            `SELECT COUNT(*) AS n FROM messages m WHERE m.repo_id = ? AND m.to_id IS NOT NULL AND m.to_id <> ? AND m.from_id <> ?
+               AND m.kind IN ('question', 'request', 'handoff') AND m.lapsed_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM messages x WHERE x.reply_to = m.id)`,
+            r.id,
+            HUMAN,
+            SYSTEM,
+          ),
+          lapsed24h: count('SELECT COUNT(*) AS n FROM messages WHERE repo_id = ? AND lapsed_at >= ?', r.id, day),
+        },
+        notes: {
+          active: count('SELECT COUNT(*) AS n FROM notes WHERE repo_id = ? AND archived_at IS NULL', r.id),
+          pinned: count('SELECT COUNT(*) AS n FROM notes WHERE repo_id = ? AND archived_at IS NULL AND pinned = 1', r.id),
+        },
+        orphans: {
+          claimsOfLeftAgents: count(
+            "SELECT COUNT(*) AS n FROM claims c JOIN agents a ON a.id = c.agent_id WHERE c.repo_id = ? AND c.released_at IS NULL AND a.status = 'offline'",
+            r.id,
+          ),
+          expiredClaimsOpen: count('SELECT COUNT(*) AS n FROM claims WHERE repo_id = ? AND released_at IS NULL AND expires_at <= ?', r.id, now()),
+          messagesStrandedOnLeftAgents: count(
+            `SELECT COUNT(*) AS n FROM messages m JOIN agents a ON a.id = m.to_id
+              WHERE m.repo_id = ? AND a.status = 'offline' AND m.from_id <> ? AND m.created_at >= ? AND m.lapsed_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.agent_id = m.to_id)`,
+            r.id,
+            SYSTEM,
+            day,
+          ),
+          lanesOfLeftAgents: count("SELECT COUNT(*) AS n FROM lanes l JOIN agents a ON a.id = l.agent_id WHERE a.repo_id = ? AND a.status = 'offline'", r.id),
+        },
+        traffic24h: [...traffic.values()].sort((x, y) => y.chars - x.chars || y.sent - x.sent),
+        upkeep24h: this.db.all<{ ts: string; summary: string }>(
+          "SELECT ts, summary FROM events WHERE repo_id = ? AND agent_id IS NULL AND summary LIKE 'Switchboard %' AND ts >= ? ORDER BY id DESC LIMIT 20",
+          r.id,
+          day,
+        ),
+      };
+    });
   }
 
   repoDetail(repoId: string, limits: DetailLimits = DEFAULT_LIMITS): RepoDetail | null {

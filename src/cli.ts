@@ -150,6 +150,24 @@ async function diag(asJson: boolean, screen: boolean): Promise<void> {
       for (const line of r.screen) console.log(`  │ ${line.slice(0, 110)}`);
     }
   }
+  // Boards: what the sweeps keep tidy, in capitals when they are not keeping up.
+  for (const b of d.boards ?? []) {
+    if (!b.agentsLive && !b.conflicts.open && !b.questions.owed) continue;
+    const o = b.orphans;
+    const orphans = o.claimsOfLeftAgents + o.expiredClaimsOpen + o.messagesStrandedOnLeftAgents + o.lanesOfLeftAgents;
+    console.log(`\nboard ${b.repoName} · ${b.agentsLive} live · ${b.claims.open} claims (${b.claims.exclusive} exclusive, ${b.claims.inLanes} in ${b.lanes} lanes) · ${b.notes.pinned}/${b.notes.active} notes pinned`);
+    const closed = Object.entries(b.conflicts.closedWhy).map(([why, n]) => `${n} ${why}`).join(', ');
+    console.log(`  conflicts ${b.conflicts.open} open, ${b.conflicts.closed24h} closed today${closed ? ` (${closed})` : ''} · questions ${b.questions.owed} owed, ${b.questions.lapsed24h} lapsed today`);
+    if (orphans) {
+      console.log(
+        `  ORPHANS: ${o.claimsOfLeftAgents} claims of agents that left · ${o.expiredClaimsOpen} expired claims open · ${o.messagesStrandedOnLeftAgents} messages stranded · ${o.lanesOfLeftAgents} lanes of agents that left`,
+      );
+    }
+    for (const t of b.traffic24h.slice(0, 12)) {
+      console.log(`  ${t.name.slice(0, 28).padEnd(28)} ${t.status.padEnd(9)} sent ${String(t.sent).padStart(4)} (${t.broadcasts} to all) · got ${String(t.received).padStart(4)}, ${Math.round(t.chars / 1000)}k chars`);
+    }
+    for (const u of b.upkeep24h.slice(0, 5)) console.log(`  upkeep ${u.ts.slice(11, 19)}Z ${u.summary.slice(0, 100)}`);
+  }
 }
 
 async function main(): Promise<void> {

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { DATA_DIR, PACKAGE_ROOT, PORT, VERSION, WEB_DIST } from '../config.ts';
 import { logger } from '../log.ts';
-import type { StateSnapshot, Totals } from '../shared/types.ts';
+import type { BoardHealth, StateSnapshot, Totals } from '../shared/types.ts';
 import type { AgentHub } from './agents.ts';
 import type { Auth } from './auth.ts';
 import type { Bus } from './bus.ts';
@@ -63,6 +63,7 @@ export interface Diagnostics {
     supervised: boolean;
   };
   runs: RunDiagnostics[];
+  boards: BoardHealth[];
 }
 
 export interface Services {
@@ -229,6 +230,7 @@ export function createServer(s: Services): http.Server {
           supervised: isSupervised(),
         },
         runs: s.runs.diagnostics(),
+        boards: s.coord.boardHealth(),
       };
     },
     'local',
@@ -284,6 +286,7 @@ export function createServer(s: Services): http.Server {
   // Must precede /api/repos/:id, which would otherwise capture "discovered".
   route('GET', '/api/repos/discovered', ({ url }) => s.scanner.list(url.searchParams.get('refresh') === '1'));
   route('GET', '/api/repos/:id', ({ params }) => s.coord.repoDetail(params[0]) ?? fail(404, 'Unknown repo'));
+  route('GET', '/api/repos/:id/health', ({ params }) => s.coord.boardHealth(params[0])[0] ?? fail(404, 'Unknown repo'));
   route('DELETE', '/api/repos/:id', ({ params }) =>
     s.coord.forgetRepo(params[0]) ? { ok: true } : fail(409, 'Unknown repo, or agents are still working in it.'),
   );

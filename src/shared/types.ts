@@ -513,6 +513,27 @@ export interface StateSnapshot {
   models: Model[];
 }
 
+/**
+ * How one board is keeping up, for `switchboard diag` and the board's health panel. The orphan
+ * counts are what the sweeps exist to keep at zero: anything there for longer than a minute is a
+ * cleanup that is not happening.
+ */
+export interface BoardHealth {
+  repoId: string;
+  repoName: string;
+  agentsLive: number;
+  claims: { open: number; exclusive: number; inLanes: number };
+  lanes: number;
+  conflicts: { open: number; closed24h: number; closedWhy: Record<string, number> };
+  questions: { owed: number; lapsed24h: number };
+  notes: { active: number; pinned: number };
+  orphans: { claimsOfLeftAgents: number; expiredClaimsOpen: number; messagesStrandedOnLeftAgents: number; lanesOfLeftAgents: number };
+  /** Per sender and recipient over the last day, busiest first. `chars` is what was delivered to it. */
+  traffic24h: Array<{ agentId: string; name: string; status: string; sent: number; broadcasts: number; received: number; chars: number }>;
+  /** What Switchboard itself did to the board in the last day: conflicts closed, notes unpinned or archived, claims broken. */
+  upkeep24h: Array<{ ts: string; summary: string }>;
+}
+
 export interface RepoDetail {
   repo: Repo;
   agents: Agent[];

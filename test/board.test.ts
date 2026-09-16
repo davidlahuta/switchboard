@@ -313,6 +313,39 @@ describe('a board that tidies up after itself', () => {
     });
   });
 
+  describe('board health', () => {
+    it('shows orphans until the sweep clears them, and what the sweep did', async () => {
+      coord.claim('b2222222', ['src/hard/**'], true, null, 60);
+      await coord.recordEdit('a1111111', file('src', 'hard', 'x.ts'), 'Edit');
+      coord.raw.run("UPDATE agents SET status = 'offline' WHERE id = 'b2222222'");
+
+      const before = coord.boardHealth(repoId)[0];
+      assert.equal(before.orphans.claimsOfLeftAgents, 1);
+      assert.equal(before.conflicts.open, 1);
+
+      coord.sweep();
+      const after = coord.boardHealth(repoId)[0];
+      assert.deepEqual(after.orphans, { claimsOfLeftAgents: 0, expiredClaimsOpen: 0, messagesStrandedOnLeftAgents: 0, lanesOfLeftAgents: 0 });
+      assert.deepEqual(after.conflicts, { open: 0, closed24h: 1, closedWhy: { 'a side has left': 1 } });
+      assert.match(after.upkeep24h[0]?.summary ?? '', /Switchboard closed 1 conflict/);
+    });
+
+    it('counts who sent what and how much was delivered to whom', () => {
+      coord.send('a1111111', repoId, 'all', 'info', 'x'.repeat(1000));
+      coord.send('a1111111', repoId, 'ben', 'question', 'y?');
+      coord.piggyback('b2222222');
+      const t = coord.boardHealth(repoId)[0].traffic24h;
+      assert.deepEqual(
+        t.map((x) => [x.name, x.sent, x.broadcasts, x.received, x.chars]),
+        [
+          ['ben', 0, 0, 2, 1002],
+          ['ada', 2, 1, 0, 0],
+        ],
+      );
+      assert.equal(coord.boardHealth(repoId)[0].questions.owed, 1);
+    });
+  });
+
   describe('boards and history', () => {
     it('forgets a board in a scratch folder an hour after anyone used it, but not while anyone is on it', () => {
       assert.equal(comparablePath(os.tmpdir()), comparablePath(fs.realpathSync.native(os.tmpdir())));
