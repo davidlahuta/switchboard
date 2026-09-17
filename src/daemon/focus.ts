@@ -8,49 +8,138 @@ const log = logger('focus');
 const READY_WAIT_MS = 3000;
 
 /*
- * Notes the window in front, says "ready", then watches for Windows Terminal to take the foreground
- * and hands it back. It does nothing when Windows Terminal already had focus (the operator is in it),
- * when focus goes somewhere other than Windows Terminal (the operator moved on), or when the window
- * that had it is gone. AttachThreadInput is what lets a background process set the foreground: joined
- * to the input of the thread that owns it, the call is no longer refused as focus stealing.
+ * Notes the window in front and the state of every Windows Terminal window, says "ready", then
+ * undoes whatever Windows Terminal does to come forward for as long as it keeps doing it: hands the
+ * foreground back, minimizes again a window that was minimized, and sends one that was behind
+ * other windows back behind them. Windows Terminal has no way to open a tab without summoning its
+ * window (1.24 has --maximized, --focus, --pos and --size, and no --minimized), so this is the only
+ * place to stop it. It leaves the foreground alone when Windows Terminal already had it (the
+ * operator is in it) or when focus goes somewhere else (the operator moved on). AttachThreadInput is
+ * what lets a background process set the foreground: joined to the input of the thread that owns
+ * it, the call is no longer refused as focus stealing.
  */
-const WATCH_SCRIPT = [
-  'Add-Type @"',
-  'using System; using System.Runtime.InteropServices;',
-  'public static class SwitchboardFocus {',
-  '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
-  '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
-  '  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);',
-  '  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);',
-  '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
-  '  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);',
-  '  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
-  '}',
-  '"@',
-  'function Owner($h) { $p = 0; [void][SwitchboardFocus]::GetWindowThreadProcessId($h, [ref]$p); try { (Get-Process -Id $p -ErrorAction Stop).ProcessName } catch { "" } }',
-  '$prev = [SwitchboardFocus]::GetForegroundWindow()',
-  '$prevOwner = Owner $prev',
-  '[Console]::Out.WriteLine("ready $prevOwner"); [Console]::Out.Flush()',
-  'if ($prev -eq [IntPtr]::Zero -or $prevOwner -eq "WindowsTerminal") { "kept: Windows Terminal already had focus"; exit 0 }',
-  '$deadline = [DateTime]::UtcNow.AddSeconds(5)',
-  'while ([DateTime]::UtcNow -lt $deadline) {',
-  '  Start-Sleep -Milliseconds 100',
-  '  $fg = [SwitchboardFocus]::GetForegroundWindow()',
-  '  if ($fg -eq $prev -or $fg -eq [IntPtr]::Zero) { continue }',
-  '  $owner = Owner $fg',
-  '  if ($owner -ne "WindowsTerminal") { "left: focus moved to $owner"; exit 0 }',
-  '  if (-not [SwitchboardFocus]::IsWindow($prev)) { "left: the window that had focus is gone"; exit 0 }',
-  '  Start-Sleep -Milliseconds 200',
-  '  $p = 0; $tid = [SwitchboardFocus]::GetWindowThreadProcessId($fg, [ref]$p); $me = [SwitchboardFocus]::GetCurrentThreadId()',
-  '  [void][SwitchboardFocus]::AttachThreadInput($me, $tid, $true)',
-  '  [void][SwitchboardFocus]::BringWindowToTop($prev); [void][SwitchboardFocus]::SetForegroundWindow($prev)',
-  '  [void][SwitchboardFocus]::AttachThreadInput($me, $tid, $false)',
-  '  Start-Sleep -Milliseconds 150',
-  '  if ([SwitchboardFocus]::GetForegroundWindow() -eq $prev) { "restored $prevOwner" } else { "refused: Windows kept Windows Terminal in front" }',
-  '  exit 0',
-  '}',
-  '"kept: Windows Terminal never took focus"',
-].join('\n');
+const WATCH_SCRIPT = `Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public static class SwitchboardFocus {
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int n);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+  [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+  [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+
+  const int SW_SHOWMINNOACTIVE = 7;
+  const uint GW_HWNDPREV = 3;
+  const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
+
+  class Term { public IntPtr H; public bool Minimized; public IntPtr Above; }
+  static IntPtr prev;
+  static string prevOwner = "";
+  static readonly List<Term> terms = new List<Term>();
+
+  static bool IsTerminal(IntPtr h) {
+    var sb = new StringBuilder(64);
+    GetClassName(h, sb, sb.Capacity);
+    return sb.ToString() == "CASCADIA_HOSTING_WINDOW_CLASS";
+  }
+
+  static string Owner(IntPtr h) {
+    uint pid;
+    GetWindowThreadProcessId(h, out pid);
+    try { return Process.GetProcessById((int)pid).ProcessName; } catch { return ""; }
+  }
+
+  // The nearest window above h that can be seen: where h goes back to in the z-order.
+  static IntPtr VisibleAbove(IntPtr h) {
+    for (var w = GetWindow(h, GW_HWNDPREV); w != IntPtr.Zero; w = GetWindow(w, GW_HWNDPREV)) {
+      if (IsWindowVisible(w) && !IsIconic(w)) return w;
+    }
+    return IntPtr.Zero;
+  }
+
+  // Before the tab is opened or closed: the window in front, and every terminal window's state.
+  public static string Snapshot() {
+    prev = GetForegroundWindow();
+    prevOwner = Owner(prev);
+    EnumWindows((h, l) => {
+      if (IsTerminal(h) && IsWindowVisible(h)) terms.Add(new Term { H = h, Minimized = IsIconic(h), Above = VisibleAbove(h) });
+      return true;
+    }, IntPtr.Zero);
+    return prevOwner;
+  }
+
+  static bool TakeBack(IntPtr fg) {
+    uint pid;
+    uint tid = GetWindowThreadProcessId(fg, out pid);
+    uint me = GetCurrentThreadId();
+    AttachThreadInput(me, tid, true);
+    BringWindowToTop(prev);
+    SetForegroundWindow(prev);
+    AttachThreadInput(me, tid, false);
+    return GetForegroundWindow() == prev;
+  }
+
+  // Undo whatever Windows Terminal does to come forward, for as long as it keeps doing it.
+  public static string Watch(int timeoutMs, int settleMs) {
+    if (prev == IntPtr.Zero || IsTerminal(prev)) return "kept: Windows Terminal already had focus";
+    var start = DateTime.UtcNow;
+    DateTime? lastFix = null;
+    int focusFixes = 0, minimized = 0, lowered = 0;
+    bool refused = false;
+    string movedTo = null;
+    while ((DateTime.UtcNow - start).TotalMilliseconds < timeoutMs) {
+      if (lastFix.HasValue && (DateTime.UtcNow - lastFix.Value).TotalMilliseconds > settleMs) break;
+      Thread.Sleep(15);
+      var fg = GetForegroundWindow();
+      if (movedTo == null && fg != prev && fg != IntPtr.Zero) {
+        if (IsTerminal(fg)) {
+          if (!IsWindow(prev)) return "left: the window that had focus is gone";
+          if (TakeBack(fg)) { focusFixes++; refused = false; } else refused = true;
+          lastFix = DateTime.UtcNow;
+        } else {
+          // The operator went somewhere else: their choice. The terminal is still put back below.
+          movedTo = Owner(fg);
+        }
+      }
+      foreach (var t in terms) {
+        if (!IsWindow(t.H)) continue;
+        if (t.Minimized) {
+          if (!IsIconic(t.H)) { ShowWindow(t.H, SW_SHOWMINNOACTIVE); minimized++; lastFix = DateTime.UtcNow; }
+        } else if (t.Above != IntPtr.Zero && IsWindow(t.Above) && IsWindowVisible(t.Above) && VisibleAbove(t.H) != t.Above && lowered < 40) {
+          SetWindowPos(t.H, t.Above, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+          lowered++;
+          lastFix = DateTime.UtcNow;
+        }
+      }
+    }
+    if (refused) return "refused: Windows kept Windows Terminal in front";
+    if (!lastFix.HasValue) return movedTo != null ? "left: focus moved to " + movedTo : "kept: Windows Terminal never took focus";
+    var what = new List<string>();
+    if (focusFixes > 0) what.Add("focus");
+    if (minimized > 0) what.Add("minimized again");
+    if (lowered > 0) what.Add("sent back behind");
+    return "restored " + prevOwner + " (" + string.Join(", ", what) + ")";
+  }
+}
+'@
+$owner = [SwitchboardFocus]::Snapshot()
+[Console]::Out.WriteLine("ready $owner"); [Console]::Out.Flush()
+[SwitchboardFocus]::Watch(5000, 800)`;
 
 /**
  * Do something that makes Windows Terminal come to the front — open a tab, close one — and put the
