@@ -329,6 +329,7 @@ export function createServer(s: Services): http.Server {
       autoCompact: typeof body.autoCompact === 'boolean' ? body.autoCompact : undefined,
       autoCompactTokens: typeof body.autoCompactTokens === 'number' ? body.autoCompactTokens : undefined,
       skipPermissions: typeof body.skipPermissions === 'boolean' ? body.skipPermissions : undefined,
+      diffPanel: typeof body.diffPanel === 'boolean' ? body.diffPanel : undefined,
       continueOnResume: typeof body.continueOnResume === 'boolean' ? body.continueOnResume : undefined,
     });
   });

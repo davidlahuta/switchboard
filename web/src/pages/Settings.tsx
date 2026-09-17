@@ -235,6 +235,14 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
 
         <div className="setting">
           <div className="setting-text">
+            <div className="setting-name">Open the diff panel</div>
+            <div className="setting-desc">New sessions start with Claude Code's /diff panel open beside the conversation. Off keeps it shut until you run /diff.</div>
+          </div>
+          <Toggle checked={draft.defaultDiffPanel} onChange={(v) => set('defaultDiffPanel', v)} label="Open the diff panel by default" />
+        </div>
+
+        <div className="setting">
+          <div className="setting-text">
             <div className="setting-name">Open sessions in the terminal window I am using</div>
             <div className="setting-desc">
               A new session joins the Windows Terminal window you were last in, as another tab. Turn this off to keep

@@ -336,6 +336,10 @@ const MIGRATIONS: string[] = [
   );
   ALTER TABLE claims ADD COLUMN lane TEXT;
   `,
+  `
+  -- Whether Claude Code's diff panel opens beside this session. NULL follows the global default.
+  ALTER TABLE runs ADD COLUMN diff_panel INTEGER;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;
