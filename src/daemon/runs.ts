@@ -69,6 +69,7 @@ interface RunRow {
   auto_compact: number | null;
   auto_compact_tokens: number | null;
   skip_permissions: number | null;
+  diff_panel: number | null;
   claude_title: string | null;
   continue_on_resume: number | null;
   last_viewed_at: string | null;
@@ -848,6 +849,7 @@ export class RunManager {
       autoCompact: r.auto_compact === null ? getSettings(this.db).defaultAutoCompact : bool(r.auto_compact),
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
       skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
+      diffPanel: r.diff_panel === null ? getSettings(this.db).defaultDiffPanel : bool(r.diff_panel),
       continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
       work,
       stalled: r.stalled_since
@@ -1190,6 +1192,7 @@ export class RunManager {
     autoCompact?: boolean;
     autoCompactTokens?: number;
     skipPermissions?: boolean;
+    diffPanel?: boolean;
     continueOnResume?: boolean;
   }): Promise<RunRow> {
     const cwd = path.resolve(spec.cwd);
@@ -1209,13 +1212,14 @@ export class RunManager {
     const autoCompact = spec.autoCompact ?? settings.defaultAutoCompact;
     const autoCompactTokens = Math.min(990_000, Math.max(20_000, Math.round(spec.autoCompactTokens ?? settings.defaultAutoCompactTokens)));
     const skipPermissions = spec.skipPermissions ?? settings.defaultSkipPermissions;
+    const diffPanel = spec.diffPanel ?? settings.defaultDiffPanel;
     const subscriptionId = this.resolveSubscription(spec.subscriptionId);
     const id = crypto.randomBytes(4).toString('hex');
     const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
     const repoId = await this.coord.repoForDir(cwd);
     this.db.run(
-      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, continue_on_resume, last_viewed_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, diff_panel, continue_on_resume, last_viewed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       name.slice(0, 80),
       cwd,
@@ -1230,6 +1234,7 @@ export class RunManager {
       autoCompact ? 1 : 0,
       autoCompactTokens,
       skipPermissions ? 1 : 0,
+      diffPanel ? 1 : 0,
       spec.continueOnResume === undefined ? null : spec.continueOnResume ? 1 : 0,
       now(),
       now(),
@@ -1263,6 +1268,8 @@ export class RunManager {
     const args: string[] = canResume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
     // Before the process exists, so it never reaches the trust dialog: the folder was chosen here.
     this.subs.trustFolder(subscriptionId, this.homeDir(r));
+    // Likewise the diff panel, which Claude Code reads from the profile rather than from any flag.
+    this.subs.setDiffPanel(subscriptionId, this.dto(r).diffPanel);
     // And so the channel this session is about to ask for resolves to something.
     this.subs.ensureMcpRegistered(subscriptionId);
     /*

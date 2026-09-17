@@ -49,6 +49,7 @@ export function NewSessionDialog({
   const [compactTokens, setCompactTokens] = useState(state.settings.defaultAutoCompactTokens);
   const [continueOnResume, setContinueOnResume] = useState(state.settings.continueOnResume);
   const [skipPermissions, setSkipPermissions] = useState(state.settings.defaultSkipPermissions);
+  const [diffPanel, setDiffPanel] = useState(state.settings.defaultDiffPanel);
   const [argsText, setArgsText] = useState('');
   const [recent, setRecent] = useState<RecentSession[] | null>(null);
   const [discovered, setDiscovered] = useState<DiscoveredRepo[] | null>(null);
@@ -70,6 +71,7 @@ export function NewSessionDialog({
     setAutoCompact(state.settings.defaultAutoCompact);
     setCompactTokens(state.settings.defaultAutoCompactTokens);
     setSkipPermissions(state.settings.defaultSkipPermissions);
+    setDiffPanel(state.settings.defaultDiffPanel);
     setContinueOnResume(state.settings.continueOnResume);
     setArgsText('');
     setError(null);
@@ -148,6 +150,7 @@ export function NewSessionDialog({
       autoCompact,
       autoCompactTokens: clampTokens(compactTokens),
       skipPermissions,
+      diffPanel,
       continueOnResume,
       ...(name.trim() ? { name: name.trim() } : {}),
       ...(worktree.trim() && !resumeId ? { worktree: worktree.trim() } : {}),
@@ -347,6 +350,14 @@ export function NewSessionDialog({
             <span>
               Skip tool permissions
               <span className="field-hint">Runs tools without asking you to approve each one.</span>
+            </span>
+          </label>
+
+          <label className="check">
+            <input type="checkbox" checked={diffPanel} onChange={(e) => setDiffPanel(e.target.checked)} />
+            <span>
+              Open the diff panel
+              <span className="field-hint">Show Claude Code's /diff panel beside the conversation. You can still toggle it with /diff.</span>
             </span>
           </label>
 

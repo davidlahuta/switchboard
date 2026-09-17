@@ -303,6 +303,8 @@ export interface Run {
   autoCompact: boolean;
   autoCompactTokens: number;
   skipPermissions: boolean;
+  /** Claude Code's /diff panel opens beside the conversation, resolved against the global default */
+  diffPanel: boolean;
   /** told to carry on when it comes back, resolved against the global setting */
   continueOnResume: boolean;
   /** a swap or restart holding off until this session's turn ends */
@@ -393,6 +395,8 @@ export interface Settings {
   defaultAutoCompactTokens: number;
   /** Pre-tick "skip permission prompts" in the new-session dialog */
   defaultSkipPermissions: boolean;
+  /** Pre-tick "open the diff panel" in the new-session dialog */
+  defaultDiffPanel: boolean;
   /** Swap automatically when a session hits a usage limit */
   autoSwap: boolean;
   /**
@@ -566,6 +570,8 @@ export interface CreateRunRequest {
   autoCompactTokens?: number;
   /** run with --dangerously-skip-permissions (no tool approval prompts) */
   skipPermissions?: boolean;
+  /** open Claude Code's diff panel beside the conversation; omit to follow the global default */
+  diffPanel?: boolean;
   /** type the continue message when this session comes back; omit to follow the global setting */
   continueOnResume?: boolean;
 }

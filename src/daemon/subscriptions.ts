@@ -655,6 +655,29 @@ export class SubscriptionManager {
     }
   }
 
+  /**
+   * Whether Claude Code opens its diff panel for sessions on this profile.
+   *
+   * There is no flag or setting for it: Claude Code keeps the panel's last state as diffSidebarOpen
+   * in the profile's .claude.json, and a /diff in any one session turns it on for every session
+   * started after it. So it is set here, just before each launch, to what that session asked for —
+   * false keeps the panel shut, true opens it once the terminal is wide enough.
+   */
+  setDiffPanel(subscriptionId: string, open: boolean): void {
+    const sub = this.row(subscriptionId);
+    if (!sub) return;
+    const file = path.join(sub.config_dir, '.claude.json');
+    const target = readJson<Record<string, any>>(file) ?? {};
+    if (target.diffSidebarOpen === open) return;
+    target.diffSidebarOpen = open;
+    try {
+      writeJson(file, target);
+      log.info('set the diff panel for the next session on a profile', { subscription: sub.label, open });
+    } catch (err) {
+      log.warn('could not set the diff panel', err instanceof Error ? err.message : err);
+    }
+  }
+
   propagateTrust(fromId: string, toId: string, dir: string): void {
     const from = this.row(fromId);
     if (!from) return;
