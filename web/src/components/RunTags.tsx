@@ -1,7 +1,7 @@
 import type { Model, Run, UpdateStatus } from '@shared/types.ts';
 import { kindLabel, triggerLabel, workSummary } from '@shared/respawn.ts';
 import { modelShort } from '../lib/format.ts';
-import { Badge } from './ui.tsx';
+import { Badge, Icon } from './ui.tsx';
 
 /**
  * What you want to know about a running session at a glance beyond its status: which model it is
@@ -105,6 +105,21 @@ export function RunTags({
           old host
         </Badge>
       )}
+    </span>
+  );
+}
+
+/**
+ * A small mark beside a session's name for one that is told to carry on when it comes back — after
+ * a restart, a swap, a relaunch or a revive. Shown in the lists, where the full tag is dropped for
+ * width, because which sessions pick themselves up after a restart is the first thing to know on
+ * opening the desk.
+ */
+export function AutoContinueMark({ run }: { run: Run }) {
+  if (!run.continueOnResume) return null;
+  return (
+    <span className="auto-continue" title="Auto-continue: told to carry on whenever it comes back (restart, swap, relaunch, revive)" aria-label="Auto-continue on">
+      <Icon name="refresh" size={12} />
     </span>
   );
 }

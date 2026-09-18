@@ -7,7 +7,7 @@ import { orderOf, useReorder } from '../lib/reorder.ts';
 import { NewSessionDialog } from '../components/NewSessionDialog.tsx';
 import { PageHead } from '../components/PageHead.tsx';
 import { RestartMenu } from '../components/RestartMenu.tsx';
-import { RunTags } from '../components/RunTags.tsx';
+import { AutoContinueMark, RunTags } from '../components/RunTags.tsx';
 import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Badge, Empty, Icon, Section, StaleBadge, StatusPill, UsageBar } from '../components/ui.tsx';
 import { planLabel, shortPath, subStatusLabel, usageLevel } from '../lib/format.ts';
@@ -246,6 +246,7 @@ function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
         <span className="list-title">
           <AttentionDot run={run} />
           {run.name}
+          <AutoContinueMark run={run} />
           {run.autoSwap && (
             <span className="auto-swap" title="Auto-swap on limits">
               <Icon name="bolt" size={12} />

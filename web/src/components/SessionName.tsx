@@ -3,6 +3,7 @@ import type { Run } from '@shared/types.ts';
 import { api } from '../lib/api.ts';
 import { terminalLink } from '../lib/router.ts';
 import { AttentionDot } from './AttentionDot.tsx';
+import { AutoContinueMark } from './RunTags.tsx';
 import { Icon } from './ui.tsx';
 
 /**
@@ -70,6 +71,7 @@ export function SessionName({ run, as: Tag = 'span', linked, dot }: { run: Run; 
           {run.name}
         </span>
       )}
+      <AutoContinueMark run={run} />
       <button
         type="button"
         className="btn btn-icon btn-ghost rename-btn"
