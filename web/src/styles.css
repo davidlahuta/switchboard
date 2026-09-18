@@ -1112,6 +1112,15 @@ select.input {
   font-weight: 600;
   vertical-align: middle;
 }
+/* Beside a session's name: it carries on by itself when it comes back. */
+.auto-continue {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  color: var(--accent);
+  vertical-align: middle;
+  flex: none;
+}
 .stale-flag {
   display: inline-flex;
   align-items: center;
