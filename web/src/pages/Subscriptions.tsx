@@ -6,6 +6,7 @@ import { Badge, ConfirmDialog, Dialog, Empty, Icon, IconButton, StaleBadge, Togg
 import { api, request } from '../lib/api.ts';
 import { isRateLimited, planLabel, subStatusLabel } from '../lib/format.ts';
 import { absTime, retryIn, timeAgo, useNow } from '../lib/time.ts';
+import { openTerminal } from '../lib/router.ts';
 import { emitToast } from '../lib/toast.ts';
 
 export function Subscriptions({ state }: { state: StateSnapshot }) {
@@ -49,6 +50,8 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
   const [priority, setPriority] = useState(String(sub.priority));
   const [history, setHistory] = useState<UsagePoint[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
   const u = sub.usage;
   const id = encodeURIComponent(sub.id);
   // While rate limited the daemon refuses early refreshes, so the button would only produce an error.
@@ -93,6 +96,20 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
     setRefreshing(true);
     await api.post(`/api/subscriptions/${id}/refresh`);
     setRefreshing(false);
+  };
+
+  /**
+   * Only opens Claude Code's own "Use your reset?" prompt in a session on this subscription, and
+   * brings up its terminal. The reset is spent only if you choose "Yes, use my reset" there.
+   */
+  const openReset = async () => {
+    setResetBusy(true);
+    const res = await api.post<{ runId: string; name: string }>(`/api/subscriptions/${id}/limit-reset`);
+    setResetBusy(false);
+    setResetOpen(false);
+    if (!res) return;
+    emitToast('info', `${res.name}: Claude Code is asking whether to use a reset. Nothing is used unless you choose "Yes, use my reset".`);
+    openTerminal(res.runId);
   };
 
   const relogin = async () => {
@@ -245,6 +262,20 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
             <Icon name="refresh" size={14} />
             <span>{refreshing ? 'Refreshing…' : 'Refresh usage'}</span>
           </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setResetOpen(true)}
+            disabled={sub.liveRuns === 0}
+            title={
+              sub.liveRuns === 0
+                ? 'A reset is used through Claude Code, so a session has to be running on this subscription.'
+                : 'Open Claude Code’s reset prompt in a session here. You confirm it there.'
+            }
+          >
+            <Icon name="bolt" size={14} />
+            <span>Use reset…</span>
+          </button>
           <button type="button" className="btn btn-sm" onClick={() => void relogin()}>
             <Icon name="key" size={14} />
             <span>Re-login</span>
@@ -252,6 +283,23 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
           <IconButton icon="trash" label={`Remove ${sub.label}`} variant="danger" onClick={onRemove} />
         </span>
       </footer>
+      <ConfirmDialog
+        open={resetOpen}
+        title={`Open the reset prompt for ${sub.label}?`}
+        confirmLabel="Open reset prompt"
+        busy={resetBusy}
+        onConfirm={() => void openReset()}
+        onCancel={() => setResetOpen(false)}
+      >
+        <p>
+          Switchboard types <span className="mono">/limit-reset</span> into a session on this subscription and opens its
+          terminal. Claude Code then asks <strong>“Use your reset?”</strong> and shows how many you have left.
+        </p>
+        <p>
+          Nothing is used unless you choose <strong>“Yes, use my reset”</strong> there yourself; Switchboard never answers
+          that prompt. Resets are limited and only help while this subscription is at a limit.
+        </p>
+      </ConfirmDialog>
     </article>
   );
 }
