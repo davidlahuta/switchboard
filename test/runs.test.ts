@@ -31,7 +31,7 @@ import { readyForRespawn, safeToRespawn, waitsForShells, workSummary } from '../
 import { looksFinished, startedWork, taskIdOf } from '../src/daemon/hooks.ts';
 import { attentionMark, byAttention, GROUP_LABEL, QUIET_AFTER_MS, SESSION_GROUPS, sessionGroup, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
-import { headroomOf, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
+import { headroomOf, modelWindows, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
 import { PTY_TERM, withoutParentSession } from '../src/config.ts';
 import type { Run, SessionWork, Usage } from '../src/shared/types.ts';
 
@@ -876,6 +876,24 @@ describe('subscription headroom', () => {
     assert.equal(headroomOf(usage(100, 100), 5).headroom, 0);
     assert.equal(headroomOf(usage(null, null), 5).bindingWindow, null);
     assert.equal(headroomOf(null, 5).bindingWindow, null);
+  });
+
+  it('holds a session on Fable to what is left of the Fable week', () => {
+    const fable = { ...usage(5, 30), scoped: [{ label: 'Fable', pct: 90, resetsAt: null }] };
+    assert.equal(headroomOf(fable, 20, 'claude-fable-5-1').headroom, 2, 'a tenth of the Fable week left');
+    assert.equal(headroomOf(fable, 20, 'claude-opus-5').headroom, 14, 'another model has the account-wide week');
+    assert.equal(headroomOf(fable, 20).headroom, 14, 'no model known: only the account-wide windows');
+    assert.equal(headroomOf(fable, 20, 'claude-fable-5-1').bindingWindow, 'sevenDay', 'what the subscription list shows is unchanged');
+  });
+
+  it('ranks subscriptions for a Fable session by their Fable weeks', () => {
+    // A: an empty account-wide week but a Fable week nearly gone. B: busier overall, plenty of Fable.
+    const a = { ...usage(0, 10), scoped: [{ label: 'Fable', pct: 95, resetsAt: null }] };
+    const b = { ...usage(0, 50), scoped: [{ label: 'Fable', pct: 20, resetsAt: null }] };
+    assert.ok(headroomOf(b, 20, 'claude-fable-5-1').headroom > headroomOf(a, 20, 'claude-fable-5-1').headroom);
+    assert.ok(headroomOf(a, 20, 'claude-opus-5').headroom > headroomOf(b, 20, 'claude-opus-5').headroom, 'and the other way round for Opus');
+    assert.deepEqual(modelWindows(a, 'claude-fable-5-1').map((w) => w.label), ['Fable']);
+    assert.deepEqual(modelWindows(a, 'claude-opus-5'), []);
   });
 });
 

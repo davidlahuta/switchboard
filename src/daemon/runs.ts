@@ -34,7 +34,7 @@ import { TermMirror } from './mirror.ts';
 import type { ModelCatalog } from './models.ts';
 import { keepFocus } from './focus.ts';
 import { getSettings } from './settings.ts';
-import { SPENT_PCT, SWAP_MARGIN, type SubscriptionManager } from './subscriptions.ts';
+import { modelWindows, SPENT_PCT, SWAP_MARGIN, type SubscriptionManager } from './subscriptions.ts';
 
 const log = logger('runs');
 
@@ -905,6 +905,7 @@ export class RunManager {
       skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
       diffPanel: r.diff_panel === null ? getSettings(this.db).defaultDiffPanel : bool(r.diff_panel),
       continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
+      swapsInPlace: this.swapsInPlace(r),
       work,
       stalled: r.stalled_since
         ? {
@@ -1233,9 +1234,10 @@ export class RunManager {
 
   // --------------------------------------------------------------- create
 
-  private resolveSubscription(ref: string, exclude?: string | null, runId?: string, atLimit = false): string {
+  private resolveSubscription(ref: string, exclude?: string | null, runId?: string, atLimit = false, model?: string | null): string {
     if (ref === 'auto') {
-      const best = this.subs.pickBest({ exclude, runId, atLimit, model: runId ? this.modelOf(runId) : null });
+      // A new session has no run to read its model from yet, so it says what it will run.
+      const best = this.subs.pickBest({ exclude, runId, atLimit, model: model !== undefined ? model : runId ? this.modelOf(runId) : null });
       if (!best) throw httpError(409, 'No enabled, logged-in subscription with headroom is available.');
       return best.id;
     }
@@ -1278,7 +1280,7 @@ export class RunManager {
     const autoCompactTokens = Math.min(990_000, Math.max(20_000, Math.round(spec.autoCompactTokens ?? settings.defaultAutoCompactTokens)));
     const skipPermissions = spec.skipPermissions ?? settings.defaultSkipPermissions;
     const diffPanel = spec.diffPanel ?? settings.defaultDiffPanel;
-    const subscriptionId = this.resolveSubscription(spec.subscriptionId);
+    const subscriptionId = this.resolveSubscription(spec.subscriptionId, undefined, undefined, false, model);
     const id = crypto.randomBytes(4).toString('hex');
     const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
     const repoId = await this.coord.repoForDir(cwd);
@@ -1831,7 +1833,7 @@ export class RunManager {
     const live = this.db.all<RunRow>(`SELECT * FROM runs WHERE status IN ('running', 'starting', 'swapping')`).filter((r) => this.conns.has(r.id));
     // Signed, per subscription: what this pass has already sent somewhere or taken away.
     const pending = new Map<string, number>();
-    const worthOf = (r: RunRow): number => this.subs.scoreOf(r.subscription_id, pending);
+    const worthOf = (r: RunRow): number => this.subs.scoreOf(r.subscription_id, pending, this.modelOf(r.id));
     const order = [...live].sort((a, b) => worthOf(a) - worthOf(b));
     let queued = 0;
     let skipped = 0;
@@ -1852,8 +1854,9 @@ export class RunManager {
         });
         continue;
       }
-      const best = this.subs.rank({ exclude: r.subscription_id, runId: r.id, model: this.modelOf(r.id), pending });
-      const current = this.subs.scoreOf(r.subscription_id, pending);
+      const model = this.modelOf(r.id);
+      const best = this.subs.rank({ exclude: r.subscription_id, runId: r.id, model, pending });
+      const current = this.subs.scoreOf(r.subscription_id, pending, model);
       if (!best || best.score < current * SWAP_MARGIN) {
         log.debug('rebalance found nowhere clearly better', { run: r.id, on: r.subscription_id, score: current, best: best?.row.id, bestScore: best?.score });
         continue;
@@ -3050,9 +3053,15 @@ export class RunManager {
   private maybeProactive(sub: Subscription, runs: RunRow[]): void {
     const settings = getSettings(this.db);
     if (!settings.proactiveSwap || !sub.usage || sub.usage.stale) return;
-    const used = Math.max(sub.usage.fiveHour?.pct ?? 0, sub.usage.sevenDay?.pct ?? 0);
-    if (used < settings.swapThresholdPct) return;
     for (const r of runs) {
+      /*
+       * Measured against what binds this session: a session on Fable is as close to its limit as the
+       * Fable week is, whatever the account-wide windows say. Read off those alone, a Fable session ran
+       * its subscription's Fable week to the wall with the proactive swap never once looking at it.
+       */
+      const model = this.modelOf(r.id);
+      const used = this.subs.usedPct(sub.id, model);
+      if (used < settings.swapThresholdPct) continue;
       if (!bool(r.auto_swap) || this.pendingRespawn.has(r.id)) continue;
       if (this.respawnedRecently(r.id) !== null) continue;
       /*
@@ -3069,12 +3078,14 @@ export class RunManager {
        * candidate has to be clearly better than staying, counting where this session has already
        * been so a pair of subscriptions cannot pass it between them.
        */
-      const best = this.subs.rank({ exclude: r.subscription_id, runId: r.id, model: this.modelOf(r.id) });
+      const best = this.subs.rank({ exclude: r.subscription_id, runId: r.id, model });
       if (!best) continue;
-      const staying = this.subs.scoreOf(r.subscription_id);
+      const staying = this.subs.scoreOf(r.subscription_id, undefined, model);
       if (best.score < staying * SWAP_MARGIN) continue;
       try {
-        this.swap(r.id, best.row.id, `${sub.label} at ${Math.round(used)}%`, { trigger: 'proactive' });
+        // Say which ceiling it was, or "at 97%" reads as a mistake next to a week that is half free.
+        const scoped = modelWindows(sub.usage, model).find((w) => w.pct === used && used > Math.max(sub.usage?.fiveHour?.pct ?? 0, sub.usage?.sevenDay?.pct ?? 0));
+        this.swap(r.id, best.row.id, `${sub.label} at ${Math.round(used)}%${scoped ? ` of its ${scoped.label} week` : ''}`, { trigger: 'proactive' });
       } catch {
         // nothing better available; stay put
       }

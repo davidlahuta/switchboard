@@ -309,6 +309,8 @@ export interface Run {
   diffPanel: boolean;
   /** told to carry on when it comes back, resolved against the global setting */
   continueOnResume: boolean;
+  /** a swap now moves it without restarting it, so it is taken at once, mid-turn or not */
+  swapsInPlace: boolean;
   /** a swap or restart holding off until this session's turn ends */
   waiting: WaitingRespawn | null;
   /**
