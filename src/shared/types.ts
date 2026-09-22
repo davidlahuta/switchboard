@@ -281,6 +281,8 @@ export interface Swap {
   reason: string;
   /** what set it going; null on swaps recorded before Switchboard kept track */
   trigger: RespawnTrigger | null;
+  /** made in place, without restarting the session */
+  hot: boolean;
   ts: string;
 }
 

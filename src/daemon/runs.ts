@@ -450,6 +450,20 @@ export function respawnPlacement(input: { kind: RespawnKind; staleHost: boolean;
 }
 
 /**
+ * How a session is moved to another subscription: in place, by rewriting the login its process
+ * reads (see CredentialSync), or by restarting it on the other one.
+ *
+ * In place needs a process that was started on a private copy of its login and is still running
+ * under a terminal that is attached — the copy is the only thing that changes, so there has to be a
+ * process to read it. It costs nothing: no turn is lost, nothing waits for the session to be free,
+ * and a subagent keeps running, because it is the same process. A move that was also asked to come
+ * back in a new terminal restarts, since that is a restart anyway.
+ */
+export function swapMethod(input: { hotSwapOn: boolean; privateCopy: boolean; attached: boolean; running: boolean; fresh?: boolean }): 'hot' | 'restart' {
+  return input.hotSwapOn && input.privateCopy && input.attached && input.running && input.fresh !== true ? 'hot' : 'restart';
+}
+
+/**
  * The folder a session is opened in when it comes back: where it last was, while that is still part
  * of the folder it was started in, and otherwise the folder it was started in.
  *
@@ -849,8 +863,8 @@ export class RunManager {
   }
 
   private dto(r: RunRow): Run {
-    const swap = this.db.get<{ from_sub: string | null; to_sub: string; reason: string; trigger_kind: string | null; ts: string }>(
-      'SELECT from_sub, to_sub, reason, trigger_kind, ts FROM swaps WHERE run_id = ? ORDER BY id DESC LIMIT 1',
+    const swap = this.db.get<{ from_sub: string | null; to_sub: string; reason: string; trigger_kind: string | null; hot: number; ts: string }>(
+      'SELECT from_sub, to_sub, reason, trigger_kind, hot, ts FROM swaps WHERE run_id = ? ORDER BY id DESC LIMIT 1',
       r.id,
     );
     const lastSwap: Swap | null = swap
@@ -859,6 +873,7 @@ export class RunManager {
           toSubscriptionId: swap.to_sub,
           reason: swap.reason,
           trigger: (swap.trigger_kind as RespawnTrigger | null) ?? null,
+          hot: swap.hot === 1,
           ts: swap.ts,
         }
       : null;
@@ -1636,6 +1651,21 @@ export class RunManager {
     const r = this.liveRun(runId);
     const target = this.resolveSubscription(targetRef, r.subscription_id, r.id, opts.atLimit ?? false);
     if (target === r.subscription_id) throw httpError(400, 'Session already runs on that subscription');
+    const method = swapMethod({
+      hotSwapOn: getSettings(this.db).hotSwap,
+      privateCopy: r.creds_sub !== null,
+      attached: this.conns.has(r.id),
+      running: r.status === 'running' && r.pid !== null && processAlive(r.pid),
+      fresh: opts.fresh,
+    });
+    if (method === 'hot') {
+      try {
+        return this.hotSwap(r, target, reason, opts.trigger ?? 'manual', opts.continueAfter ?? false);
+      } catch (err) {
+        // The copy could not be written; a restart still moves it.
+        log.warn('could not move a session in place; restarting it instead', { run: r.id, to: target, error: err instanceof Error ? err.message : err });
+      }
+    }
     return this.respawn(
       r,
       {
@@ -1650,6 +1680,76 @@ export class RunManager {
       },
       opts.force ?? false,
     );
+  }
+
+  /**
+   * Move a running session to another subscription without restarting it: its private copy of the
+   * login is rewritten, and its next request goes out as the other account. Done at once, whatever
+   * the session is doing — a request already in flight finishes on the old login, the rest use the new.
+   */
+  private hotSwap(r: RunRow, target: string, reason: string, trigger: RespawnTrigger, continueAfter: boolean): Run {
+    const from = r.subscription_id;
+    if (!this.creds.assign(r.id, target)) throw new Error(`${this.subs.row(target)?.label ?? target} has no login to move it to`);
+    // A later restart starts it in the target's profile, which has to trust its folder as this one did.
+    this.subs.syncProfile(target);
+    this.subs.propagateTrust(from, target, this.homeDir(r));
+    this.db.run(
+      'INSERT INTO swaps (run_id, from_sub, to_sub, reason, trigger_kind, ts, hot) VALUES (?, ?, ?, ?, ?, ?, 1)',
+      r.id,
+      from,
+      target,
+      reason,
+      trigger,
+      now(),
+    );
+    // host_sub stays: the process, and the files it keeps about itself, are still in the profile it started in.
+    this.db.run('UPDATE runs SET subscription_id = ?, creds_sub = ?, swap_count = swap_count + 1 WHERE id = ?', target, target, r.id);
+    this.coord.setSubscription(r.session_id, target);
+    /*
+     * Whatever a queued swap was waiting for is done. One that was also to come back in a new terminal
+     * still does that, now on the subscription it has already moved to.
+     */
+    const queued = this.pendingRespawn.get(r.id);
+    if (queued?.kind === 'swap') {
+      if (queued.fresh) {
+        const plan: PendingRespawn = { ...queued, kind: 'relaunch', target };
+        this.pendingRespawn.set(r.id, plan);
+        this.savePending(r.id, plan);
+      } else {
+        this.pendingRespawn.delete(r.id);
+        this.savePending(r.id, null);
+      }
+    }
+    this.subagentHeld.delete(r.id);
+    this.readySince.delete(r.id);
+    /*
+     * The limit it moved off is still on its screen, and would be read again as a limit on the account
+     * it has just moved to; the same quiet a respawn is given covers it, and keeps anything else from
+     * moving it again in the same breath.
+     */
+    this.lastRespawn.set(r.id, Date.now());
+    this.spendCapped.delete(r.id);
+    const agent = this.coord.agent(r.session_id);
+    if (agent?.status === 'limited') this.coord.setStatus(r.session_id, 'idle');
+    const fromLabel = this.subs.row(from)?.label ?? from;
+    const toLabel = this.subs.row(target)?.label ?? target;
+    if (r.repo_id) this.coord.event(r.repo_id, r.session_id, 'swap', `${r.name}: ${fromLabel} → ${toLabel}, in place (${reason})`);
+    this.bus.toast('info', `${r.name}: ${fromLabel} → ${toLabel}, without a restart (${reason})`);
+    log.info('swap in place', { run: r.id, session: r.session_id, from, to: target, reason, trigger });
+    /*
+     * A session that stopped on the limit is sitting at its prompt, and nothing else will type into
+     * it; one that is still working carries on by itself on the new login.
+     */
+    if (continueAfter && !this.busy(this.row(r.id)!)) {
+      const text = getSettings(this.db).continueMessage.trim();
+      if (text) {
+        const old = this.pendingContinue.get(r.id);
+        if (old) clearTimeout(old.timer);
+        this.pendingContinue.set(r.id, { text, released: true, timer: setTimeout(() => this.typeContinue(r.id), CONTINUE_DELAY_MS) });
+      }
+    }
+    this.bus.invalidate('state');
+    return this.dto(this.row(r.id)!);
   }
 
   /** Restart a session on the same subscription, e.g. to pick up a new claude build. */
