@@ -1030,6 +1030,16 @@ export class RunManager {
         this.readySince.delete(runId);
         continue;
       }
+      // A swap queued before the session could be moved in place — before a restart gave it its own
+      // login, or before hot swap was turned on — need not wait for it to be free any more.
+      if (plan.kind === 'swap' && plan.target !== r.subscription_id && this.swapsInPlace(r, plan.fresh)) {
+        try {
+          this.hotSwap(r, plan.target, plan.reason, plan.trigger, plan.continueAfter);
+          continue;
+        } catch (err) {
+          log.warn('could not move a queued session in place; it waits to be restarted', { run: runId, error: err instanceof Error ? err.message : err });
+        }
+      }
       /*
        * There are two ways a queued respawn comes due, and only one of them is an event.
        *
@@ -1651,14 +1661,7 @@ export class RunManager {
     const r = this.liveRun(runId);
     const target = this.resolveSubscription(targetRef, r.subscription_id, r.id, opts.atLimit ?? false);
     if (target === r.subscription_id) throw httpError(400, 'Session already runs on that subscription');
-    const method = swapMethod({
-      hotSwapOn: getSettings(this.db).hotSwap,
-      privateCopy: r.creds_sub !== null,
-      attached: this.conns.has(r.id),
-      running: r.status === 'running' && r.pid !== null && processAlive(r.pid),
-      fresh: opts.fresh,
-    });
-    if (method === 'hot') {
+    if (this.swapsInPlace(r, opts.fresh)) {
       try {
         return this.hotSwap(r, target, reason, opts.trigger ?? 'manual', opts.continueAfter ?? false);
       } catch (err) {
@@ -1679,6 +1682,19 @@ export class RunManager {
         fresh: opts.fresh,
       },
       opts.force ?? false,
+    );
+  }
+
+  /** Whether a swap of this session now would be made in place; see swapMethod. */
+  private swapsInPlace(r: RunRow, fresh?: boolean): boolean {
+    return (
+      swapMethod({
+        hotSwapOn: getSettings(this.db).hotSwap,
+        privateCopy: r.creds_sub !== null,
+        attached: this.conns.has(r.id),
+        running: r.status === 'running' && r.pid !== null && processAlive(r.pid),
+        fresh,
+      }) === 'hot'
     );
   }
 
@@ -3039,9 +3055,13 @@ export class RunManager {
     for (const r of runs) {
       if (!bool(r.auto_swap) || this.pendingRespawn.has(r.id)) continue;
       if (this.respawnedRecently(r.id) !== null) continue;
-      // Idle on the main thread is not idle: a background subagent is still spending, and a swap
-      // would take the session out from under it.
-      if (this.coord.agent(r.session_id)?.status !== 'idle' || this.busy(r)) continue;
+      /*
+       * Idle on the main thread is not idle: a background subagent is still spending, and a swap
+       * would take the session out from under it. A swap made in place takes nothing from anybody,
+       * so a session that can be moved that way is moved whatever it is doing — which is the point:
+       * the long turn this used to have to wait out is the one that spends the most.
+       */
+      if (!this.swapsInPlace(r) && (this.coord.agent(r.session_id)?.status !== 'idle' || this.busy(r))) continue;
       /*
        * Crossing the threshold is a reason to look, not a reason to move. A swap costs the session
        * its place in the conversation and a resume, so somewhere merely a little better is not worth

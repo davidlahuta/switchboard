@@ -343,8 +343,9 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
           <div className="setting-text">
             <div className="setting-name">Proactive swap</div>
             <div className="setting-desc">
-              Swap idle sessions before they hit the limit, once their subscription crosses the threshold. A swap can only
-              happen between turns, so this is what keeps a long turn from being cut in half by one.
+              Swap sessions before they hit the limit, once their subscription crosses the threshold. A session that has to be
+              restarted to swap is only moved between turns, so this is what keeps a long turn from being cut in half by one;
+              one that swaps without restarting is moved at once.
             </div>
           </div>
           <Toggle checked={draft.proactiveSwap} onChange={(v) => set('proactiveSwap', v)} label="Proactive swap" />
