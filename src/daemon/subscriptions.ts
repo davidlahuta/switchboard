@@ -801,6 +801,31 @@ export class SubscriptionManager {
     this.watchers.set(id, timer);
   }
 
+  /** A subscription's own credentials file: what CredentialSync copies from and renews into. */
+  credentialsFile(id: string): string | null {
+    const r = this.row(id);
+    return r ? path.join(r.config_dir, '.credentials.json') : null;
+  }
+
+  /** Renew a subscription's login if it is near its end; see freshToken. */
+  async renewLogin(id: string): Promise<void> {
+    const r = this.row(id);
+    if (r) await this.freshToken(r);
+  }
+
+  /** The account a token belongs to, by email, asked of the API; null when it will not say. */
+  async accountOfToken(token: string): Promise<string | null> {
+    const res = await this.oauthGet(token, '/api/oauth/profile');
+    if (!res.ok) return null;
+    const p = (await res.json()) as { account?: { email?: string } };
+    return p.account?.email?.toLowerCase() ?? null;
+  }
+
+  /** The subscription an account is, by the account its own token says it is. */
+  subscriptionOfAccount(email: string): string | null {
+    return this.db.get<{ id: string }>("SELECT id FROM subscriptions WHERE lower(account_email) = lower(?) ORDER BY status = 'ready' DESC, created_at LIMIT 1", email)?.id ?? null;
+  }
+
   private readCredentials(dir: string): Credentials | null {
     const raw = readJson<{ claudeAiOauth?: Record<string, unknown> }>(path.join(dir, '.credentials.json'));
     const o = raw?.claudeAiOauth;

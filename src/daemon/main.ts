@@ -85,6 +85,8 @@ export async function startDaemon(): Promise<void> {
   coord.prune();
   // /rename and /model inside a session write to disk at once and fire no hook, so an idle session
   // renamed or switched there would not show up here until someone typed something into it.
+  // Every session's copy of its login kept on its subscription's newest; see CredentialSync.
+  const logins = setInterval(() => void runs.syncCredentials().catch((err) => log.warn('login sync failed', err instanceof Error ? err.message : err)), 2000);
   const titles = setInterval(() => {
     runs.pollSessions();
     runs.drainPending();
@@ -120,6 +122,7 @@ export async function startDaemon(): Promise<void> {
     clearInterval(sweep);
     clearInterval(prune);
     clearInterval(titles);
+    clearInterval(logins);
     subs.stop();
     updater.stop();
     for (const server of servers) {

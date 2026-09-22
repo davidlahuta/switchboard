@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultAutoCompactTokens: 700_000,
   defaultSkipPermissions: true,
   defaultDiffPanel: false,
+  hotSwap: true,
   autoSwap: true,
   autoRevive: true,
   // Waiting for the limit means the swap lands mid-turn, which is the one time it costs something.
@@ -55,6 +56,7 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
   if (typeof patch.defaultAutoCompact === 'boolean') next.defaultAutoCompact = patch.defaultAutoCompact;
   if (typeof patch.defaultSkipPermissions === 'boolean') next.defaultSkipPermissions = patch.defaultSkipPermissions;
   if (typeof patch.defaultDiffPanel === 'boolean') next.defaultDiffPanel = patch.defaultDiffPanel;
+  if (typeof patch.hotSwap === 'boolean') next.hotSwap = patch.hotSwap;
   if (patch.defaultAutoCompactTokens !== undefined) {
     next.defaultAutoCompactTokens = n(patch.defaultAutoCompactTokens, 20_000, 990_000, current.defaultAutoCompactTokens);
   }
