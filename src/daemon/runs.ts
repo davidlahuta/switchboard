@@ -1196,6 +1196,14 @@ export class RunManager {
     this.db.run('UPDATE runs SET model = ? WHERE id = ?', model, r.id);
     this.bus.invalidate('state');
     log.info('session model changed in claude', { run: r.id, model });
+    /*
+     * Where a stopped session can go depends on what it runs: off Fable, a desk whose Fable weeks are
+     * all spent has room again. Looked at now rather than at the next usage poll.
+     */
+    if (this.coord.agent(sessionId)?.status === 'limited') {
+      this.lastRescue.delete(r.id);
+      this.rescueLimited();
+    }
   }
 
   /** Change what this session does when it comes back. Takes effect on its next resume. */
@@ -2798,7 +2806,10 @@ export class RunManager {
   /** A turn that ended with an answer rather than an error: whatever was wrong is over. */
   onTurnEnded(sessionId: string): void {
     const r = this.bySession(sessionId);
-    if (r) this.clearStall(r.id);
+    if (!r) return;
+    this.clearStall(r.id);
+    // A turn that finished was paid for, so a spend cap on this subscription is behind it.
+    this.subs.clearSpendCap(r.subscription_id);
   }
 
   onIdle(sessionId: string): void {
@@ -2954,7 +2965,11 @@ export class RunManager {
        * has to come back to it. A spend cap especially: no usage number will ever move to say it is
        * over, so the only way back is to try again later.
        */
-      if (cause === 'spend') this.spendCapped.add(r.id);
+      if (cause === 'spend') {
+        this.spendCapped.add(r.id);
+        // The account's cap, not this session's: nothing else is to be sent there either.
+        this.subs.markSpendCapped(subAtLimit);
+      }
       this.dropWorkOfStoppedSession(sessionId);
       this.markStalled(this.row(r.id) ?? r, cause === 'spend' ? 'a spend cap' : 'rate_limit');
       const settings = getSettings(this.db);
@@ -2977,9 +2992,30 @@ export class RunManager {
         // gain does not apply: anywhere with capacity left beats a subscription with none.
         this.swap(r.id, 'auto', `usage limit on ${label}`, { ...limitSwapPlan(source), continueAfter: true, atLimit: true, trigger: 'limit' });
       } catch (err) {
-        this.bus.toast('error', `${r.name} hit the limit on ${label} and cannot switch: ${err instanceof Error ? err.message : err}`);
+        if ((err as { status?: number }).status === 409 && this.row(r.id)?.subscription_id === subAtLimit) this.strandedOnLimit(r, label);
+        else this.bus.toast('error', `${r.name} hit the limit on ${label} and cannot switch: ${err instanceof Error ? err.message : err}`);
       }
     })();
+  }
+
+  /**
+   * A session stopped on a limit with nowhere to go: every subscription is spent for what it runs.
+   *
+   * It is not given up on. It is marked limited — a spend cap never marked it — because that is what
+   * the rescue sweep looks for each time usage is read, and it is moved the moment anywhere has room.
+   * The operator is told why in terms that can be acted on: which ceiling it is (a Fable week spent
+   * everywhere is not the same news as the whole desk being out), and when the first one lifts. Told
+   * only "no headroom", two sessions on Fable looked stuck on a desk with most of its week in hand.
+   */
+  private strandedOnLimit(r: RunRow, label: string): void {
+    this.coord.setStatus(r.session_id, 'limited');
+    const model = this.modelOf(r.id);
+    const scoped = modelWindows(this.subs.get(r.subscription_id)?.usage ?? null, model).map((w) => w.label);
+    const what = scoped.length ? `${scoped.join(' or ')} (the model it runs)` : 'it';
+    const at = this.subs.roomReturnsAt(model, r.subscription_id);
+    const when = at ? ` The first frees up at ${new Date(at).toLocaleString()}.` : '';
+    log.warn('a session stopped on a limit has nowhere to go; waiting for room', { run: r.id, model, roomAt: at ? new Date(at).toISOString() : null });
+    this.bus.toast('warn', `${r.name} hit the limit on ${label}, and no subscription has room left for ${what}. It moves as soon as one does.${when}`);
   }
 
   private onUsage(sub: Subscription): void {

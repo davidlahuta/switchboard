@@ -119,6 +119,10 @@ type OAuthWindow = { utilization?: number; resets_at?: string | null } | null | 
 const ASSUMED_PCT = 40;
 /** A subscription at or past this has nothing left to give, whatever the proactive threshold says. */
 export const SPENT_PCT = 99;
+/** The longest a spend cap is believed without a turn succeeding there: one five-hour window. */
+export const SPEND_CAP_MAX_MS = 5 * 3600_000;
+/** How long a spend cap is believed when the five-hour window has no reset time to go by. */
+export const SPEND_CAP_UNKNOWN_MS = 3600_000;
 /** How close a spent window has to be to turning over before that is worth counting on. */
 const RESET_SOON_MS = 15 * 60_000;
 /**
@@ -244,6 +248,8 @@ export class SubscriptionManager {
   private readonly inFlight = new Set<string>();
   /** When each subscription's token may next be offered for renewal. See freshToken. */
   private readonly renewAfter = new Map<string, number>();
+  /** Subscriptions that stopped a session on a spend cap, and until when that is believed. See markSpendCapped. */
+  private readonly spendCappedUntil = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
 
   constructor(db: Db, bus: Bus, launcher: Launcher) {
@@ -449,6 +455,8 @@ export class SubscriptionManager {
    * spent to a session that could work there all day.
    */
   usedPct(id: string, model: string | null = null): number {
+    // A spend cap stops every request whatever the windows read; see markSpendCapped.
+    if (this.spendCapped(id) !== null) return 100;
     const r = this.row(id);
     const usage = r ? this.dto(r).usage : null;
     if (!usage) return ASSUMED_PCT;
@@ -458,7 +466,67 @@ export class SubscriptionManager {
 
   /** A subscription's headroom for a session running `model`; nothing when it cannot be used at all. */
   private headroomFor(sub: Subscription, model: string | null): number {
-    return sub.headroom > 0 ? headroomOf(sub.usage, sub.weight, model).headroom : 0;
+    return sub.headroom > 0 && this.spendCapped(sub.id) === null ? headroomOf(sub.usage, sub.weight, model).headroom : 0;
+  }
+
+  /**
+   * A session on this subscription was stopped by its spend cap.
+   *
+   * The cap is the account's ceiling on what it pays for beyond its plan, and the usage endpoint says
+   * nothing about it: the windows can read 86% while the account refuses every request. Forgotten the
+   * moment the session moved on, it made the subscription look like the best place to send the next
+   * one — hello capped "launch specs" at 11:57, and at 12:06 it was sent straight back there and
+   * stopped again. So it is remembered, as spent, until the five-hour window turns over and the plan
+   * pays again (at most SPEND_CAP_MAX_MS; SPEND_CAP_UNKNOWN_MS when no reset is known), or until a
+   * session there finishes a turn, which proves it is paying already.
+   */
+  markSpendCapped(id: string, now = Date.now()): number {
+    const reset = Date.parse(this.get(id)?.usage?.fiveHour?.resetsAt ?? '');
+    const until = Number.isFinite(reset) && reset > now ? Math.min(reset, now + SPEND_CAP_MAX_MS) : now + SPEND_CAP_UNKNOWN_MS;
+    this.spendCappedUntil.set(id, until);
+    log.info('a subscription hit its spend cap; treating it as spent', { subscription: id, until: new Date(until).toISOString() });
+    return until;
+  }
+
+  /** A session on it finished a turn, so whatever capped it is over. */
+  clearSpendCap(id: string): void {
+    if (this.spendCappedUntil.delete(id)) log.info('a subscription that hit its spend cap is paying again', { subscription: id });
+  }
+
+  /** Until when a subscription is held to be spent by a spend cap, or null when it is not. */
+  spendCapped(id: string, now = Date.now()): number | null {
+    const until = this.spendCappedUntil.get(id);
+    if (until === undefined) return null;
+    if (until > now) return until;
+    this.spendCappedUntil.delete(id);
+    return null;
+  }
+
+  /**
+   * When the first subscription that is spent for a session running `model` gets room back, or null
+   * when nothing says. Each one is free once every window it is spent on has turned over, and its
+   * spend cap, if it hit one, has lapsed. What a session with nowhere to go is told to expect.
+   */
+  roomReturnsAt(model: string | null, exclude?: string | null, now = Date.now()): number | null {
+    let soonest: number | null = null;
+    for (const r of this.rows()) {
+      if (r.id === exclude) continue;
+      const sub = this.dto(r);
+      if (!sub.enabled || sub.status !== 'ready') continue;
+      const spent = [sub.usage?.fiveHour ?? null, sub.usage?.sevenDay ?? null, ...modelWindows(sub.usage, model)].filter(
+        (w): w is NonNullable<typeof w> => !!w && w.pct >= SPENT_PCT,
+      );
+      let at = this.spendCapped(r.id, now) ?? 0;
+      let known = true;
+      for (const w of spent) {
+        const t = Date.parse(w.resetsAt ?? '');
+        if (!Number.isFinite(t)) known = false;
+        else at = Math.max(at, t);
+      }
+      if (!known || at <= now) continue;
+      soonest = soonest === null ? at : Math.min(soonest, at);
+    }
+    return soonest;
   }
 
   /** What the subscription a session running `model` is on now is worth, to compare a proposed move against. */
