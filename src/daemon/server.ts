@@ -269,6 +269,8 @@ export function createServer(s: Services): http.Server {
   route('PATCH', '/api/subscriptions/:id', ({ params, body }) => s.subs.update(params[0], body));
   route('DELETE', '/api/subscriptions/:id', ({ params, url }) => (s.subs.remove(params[0], url.searchParams.get('purge') === '1'), { ok: true }));
   route('POST', '/api/subscriptions/:id/login', ({ params }) => (s.subs.openLogin(params[0]), { ok: true }));
+  // Opens Claude Code's reset prompt for the operator to answer; never answers it. No agent tool reaches this.
+  route('POST', '/api/subscriptions/:id/limit-reset', ({ params }) => s.runs.openLimitReset(params[0]));
   route('POST', '/api/subscriptions/:id/refresh', async ({ params }) => {
     if (!s.subs.row(params[0])) fail(404, 'not found');
     await s.subs.refreshIdentity(params[0]);

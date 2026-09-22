@@ -164,9 +164,26 @@ const PROMPT_FOOTER = /\(shift\+tab to cycle\)|\?\s*for shortcuts/i;
 /** How often a resuming session's screen is looked at for its prompt. */
 const CONTINUE_POLL_MS = 1000;
 
+/**
+ * Claude Code asking whether to spend one of the account's usage resets (`/limit-reset`). Only the
+ * operator answers it: nothing Switchboard types on its own may land while it is on screen, whatever
+ * footer it is drawn with. A reset is a scarce thing, and a continue message ends in a carriage return.
+ */
+const LIMIT_RESET_PROMPT = /Use\s*your\s*reset\?|Yes,\s*use\s*my\s*reset/i;
+
 /** Whether a session's screen shows it at its prompt and not asking anything; see waitForPrompt. */
 export function atPrompt(screen: string): boolean {
-  return PROMPT_FOOTER.test(screen) && !CONFIRM_FOOTER.test(screen);
+  return PROMPT_FOOTER.test(screen) && !CONFIRM_FOOTER.test(screen) && !LIMIT_RESET_PROMPT.test(screen);
+}
+
+/**
+ * Which session on a subscription to open Claude Code's reset prompt in: one sitting at its prompt,
+ * a session stopped on a limit first, since that is who the reset is for. A session that is working
+ * or asking something is never typed into.
+ */
+export function limitResetHost(candidates: Array<{ id: string; agentStatus: string | null | undefined; atPrompt: boolean }>): string | null {
+  const ready = candidates.filter((c) => c.atPrompt && c.agentStatus !== 'working' && c.agentStatus !== 'waiting');
+  return (ready.find((c) => c.agentStatus === 'limited') ?? ready[0])?.id ?? null;
 }
 
 /** How long a started session's prompt has to be on screen, idle, before it is told where its task is. */
@@ -2306,6 +2323,30 @@ export class RunManager {
     setTimeout(check, CONTINUE_POLL_MS);
   }
 
+  /**
+   * Put Claude Code's own "Use your reset?" prompt in front of the operator, in a session on this
+   * subscription, and say which one. Only the prompt: Switchboard types `/limit-reset` and stops. It
+   * never answers the question — see LIMIT_RESET_PROMPT — so a reset is spent only by the operator
+   * choosing "Yes, use my reset" in the terminal. Resets belong to Claude Code (the usage endpoint
+   * answers anything else that asks with "not eligible on this surface"), so this is the way in.
+   */
+  openLimitReset(subscriptionId: string): { runId: string; name: string } {
+    const sub = this.subs.row(subscriptionId);
+    if (!sub) throw httpError(404, 'Unknown subscription');
+    const live = this.db
+      .all<RunRow>("SELECT * FROM runs WHERE subscription_id = ? AND status = 'running'", subscriptionId)
+      .filter((r) => this.conns.has(r.id));
+    if (!live.length) throw httpError(409, `No session is running on ${sub.label}. Start one there, or swap one to it, and try again.`);
+    const host = limitResetHost(
+      live.map((r) => ({ id: r.id, agentStatus: this.coord.agent(r.session_id)?.status, atPrompt: atPrompt(this.mirrors.get(r.id)?.screenText() ?? '') })),
+    );
+    if (!host) throw httpError(409, `Every session on ${sub.label} is working or asking something. Try again when one is at its prompt.`);
+    const r = this.row(host)!;
+    this.send(host, { type: 'type', text: '/limit-reset' });
+    log.info('opened the usage reset prompt for the operator', { subscription: subscriptionId, run: host });
+    return { runId: host, name: r.name };
+  }
+
   /** Queue the continue message to go in as soon as the session can take it. */
   private sendContinue(r: RunRow, why: string): void {
     const text = getSettings(this.db).continueMessage.trim();
@@ -2683,7 +2724,7 @@ export class RunManager {
     // return, and on the folder trust dialog that answers "No, exit" — which is exactly how a
     // session was killed rather than resumed.
     const screen = this.mirrors.get(runId)?.screenText() ?? '';
-    if (CONFIRM_FOOTER.test(screen)) {
+    if (CONFIRM_FOOTER.test(screen) || LIMIT_RESET_PROMPT.test(screen)) {
       if (attempt < CONTINUE_RETRIES) {
         pending.timer = setTimeout(() => this.typeContinue(runId, attempt + 1), CONTINUE_RETRY_MS);
         return;
