@@ -656,6 +656,21 @@ describe('whether the claude reporting an id is the one the run is hosting', () 
   it('asks nothing of the registry when there is no pid to ask about', () => {
     assert.equal(reporterOf({ kind: 'hook', event: 'Stop', source: null }, THEIRS, null, never), 'elsewhere');
   });
+
+  it('follows a conversation the hosted process moved into a background job: spec-0464', () => {
+    // sessions/54008.json: {"sessionId":"a4ea9029-…","parkedJobId":"874e1fbc"}; the job reports 874e1fbc-6686-….
+    const JOB = '874e1fbc-6686-49cd-b83a-19e857c2771e';
+    const prompt = { kind: 'hook', event: 'UserPromptSubmit', source: null } as const;
+    assert.equal(reporterOf(prompt, JOB, 54008, () => MINE, () => '874e1fbc'), 'parked');
+    assert.equal(rebindDecision(MINE, JOB, null, 'parked'), 'adopt');
+  });
+
+  it('does not take a job it did not park for its own', () => {
+    const prompt = { kind: 'hook', event: 'UserPromptSubmit', source: null } as const;
+    assert.equal(reporterOf(prompt, THEIRS, 54008, () => MINE, () => '874e1fbc'), 'elsewhere', 'parked something else');
+    assert.equal(reporterOf(prompt, THEIRS, 54008, () => MINE, () => null), 'elsewhere', 'parked nothing');
+    assert.equal(reporterOf(prompt, THEIRS, 54008, () => MINE), 'elsewhere', 'no registry entry to say');
+  });
 });
 
 describe('whether a session whose terminal seems gone is brought back', () => {

@@ -610,7 +610,7 @@ export function titleDecision(name: string, shadow: string | null, reported: str
  * run's id. Anything else is `elsewhere`: some other claude that is merely carrying the run id in
  * its environment, and has no standing to say which conversation this run is.
  */
-export type Reporter = 'hosted' | 'cleared' | 'elsewhere';
+export type Reporter = 'hosted' | 'cleared' | 'parked' | 'elsewhere';
 
 /**
  * Who is telling the run which conversation it is on: a hook, from the claude that fired it.
@@ -648,9 +648,25 @@ export function clearedInPlace(event: string, source: string | null): boolean {
  * Code says that pid is in — asked lazily, because it is a file read and most reports never need
  * it. Together they are the question: is the claude saying this the one in this run's terminal?
  */
-export function reporterOf(witness: RebindWitness, reported: string, hostPid: number | null, hostSession: () => string | null): Reporter {
+export function reporterOf(
+  witness: RebindWitness,
+  reported: string,
+  hostPid: number | null,
+  hostSession: () => string | null,
+  hostParked: () => string | null = () => null,
+): Reporter {
   if (clearedInPlace(witness.event, witness.source)) return 'cleared';
-  return hostPid !== null && hostSession() === reported ? 'hosted' : 'elsewhere';
+  if (hostPid === null) return 'elsewhere';
+  if (hostSession() === reported) return 'hosted';
+  /*
+   * Claude Code can move a conversation out of its terminal into a background job, run by its own
+   * daemon under a new session id, with the terminal left showing the job. The hosted process says
+   * so in its registry entry (`parkedJobId`, the job's short id, which the new session id starts
+   * with), and that makes the job this run's. Read as a stranger, spec-0464 was cut off from its own
+   * hooks: it read "starting" for as long as it worked, and never got its name back.
+   */
+  const parked = hostParked();
+  return parked && reported.startsWith(parked) ? 'parked' : 'elsewhere';
 }
 
 /**
@@ -815,6 +831,8 @@ export class RunManager {
   /** When each run was last taken down and brought back, so nothing takes it again mid-flight. */
   private readonly lastRespawn = new Map<string, number>();
   private readonly lastLimit = new Map<string, number>();
+  /** Runs followed into a Claude Code background job, whose name is pushed to it on the next hook. */
+  private readonly nameOwed = new Set<string>();
   /** Runs stopped on a spend cap, until they move: nothing they started is still running. */
   private readonly spendCapped = new Set<string>();
 
@@ -1267,6 +1285,15 @@ export class RunManager {
   syncTitle(sessionId: string, reported: string | null): string | null {
     const r = this.bySession(sessionId);
     if (!r) return null;
+    /*
+     * A job the conversation was just moved into titles itself after its first turn, and that title
+     * is Claude Code's guess, not a rename: the run's name goes to it once, whatever it reports.
+     */
+    if (this.nameOwed.delete(r.id) && reported?.trim() !== r.name) {
+      this.db.run('UPDATE runs SET claude_title = ? WHERE id = ?', r.name, r.id);
+      log.info('giving a session moved into a background job its name back', { run: r.id, name: r.name, had: reported });
+      return r.name;
+    }
     const { adopt, push } = titleDecision(r.name, r.claude_title, reported);
     if (adopt) {
       this.db.run('UPDATE runs SET name = ?, claude_title = ? WHERE id = ?', adopt, adopt, r.id);
@@ -2854,7 +2881,8 @@ export class RunManager {
   rebind(runId: string, sessionId: string, witness: RebindWitness): boolean {
     const r = this.row(runId);
     if (!r) return true;
-    const decision = rebindDecision(r.session_id, sessionId, r.resuming, this.whoReported(r, sessionId, witness));
+    const reporter = this.whoReported(r, sessionId, witness);
+    const decision = rebindDecision(r.session_id, sessionId, r.resuming, reporter);
     if (decision === 'stray') {
       this.strayReported(r, sessionId, witness.event);
       return false;
@@ -2873,7 +2901,16 @@ export class RunManager {
       // Before the run moves on: the board has to retire the conversation this terminal used to
       // hold and carry its channel across, and it can only do that while both ids are in hand.
       this.coord.sessionReplaced(r.session_id, sessionId);
-      this.db.run('UPDATE runs SET session_id = ?, resume = 1 WHERE id = ?', sessionId, runId);
+      /*
+       * A job Claude Code moved the conversation into was started without the run's --name, so it
+       * starts with no name of its own and titles itself after its first turn. Forgetting what the
+       * run last knew the title to be makes the next hook push the run's name into it (titleDecision).
+       */
+      if (reporter === 'parked') {
+        log.info('the session was moved into a Claude Code background job; following it', { run: runId, from: r.session_id, to: sessionId });
+        this.db.run('UPDATE runs SET session_id = ?, resume = 1, claude_title = NULL WHERE id = ?', sessionId, runId);
+        this.nameOwed.add(runId);
+      } else this.db.run('UPDATE runs SET session_id = ?, resume = 1 WHERE id = ?', sessionId, runId);
       this.bus.invalidate('state');
     }
     return true;
@@ -2890,7 +2927,13 @@ export class RunManager {
    * and `/clear` is recognised from the hook as well, for the case where the file cannot be read.
    */
   private whoReported(r: RunRow, sessionId: string, witness: RebindWitness): Reporter {
-    return reporterOf(witness, sessionId, r.pid, () => this.registrySession(r, r.pid!));
+    return reporterOf(
+      witness,
+      sessionId,
+      r.pid,
+      () => this.registrySession(r, r.pid!),
+      () => this.registryEntry(r, r.pid!)?.parkedJobId ?? null,
+    );
   }
 
   /** Whether `pid` is the claude this run's terminal is running; see processIsHost. */
@@ -2907,10 +2950,17 @@ export class RunManager {
 
   /** The conversation Claude Code says a process is in, or null if it does not say. */
   private registrySession(r: RunRow, pid: number): string | null {
+    return this.registryEntry(r, pid)?.sessionId ?? null;
+  }
+
+  /** What Claude Code's registry says about a process: its conversation, and any job it moved it to. */
+  private registryEntry(r: RunRow, pid: number): { sessionId: string; parkedJobId: string | null } | null {
     for (const root of new Set([this.hostDir(r), this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR])) {
       if (!root) continue;
-      const entry = readJson<{ sessionId?: unknown }>(path.join(root, 'sessions', `${pid}.json`));
-      if (typeof entry?.sessionId === 'string') return entry.sessionId;
+      const entry = readJson<{ sessionId?: unknown; parkedJobId?: unknown }>(path.join(root, 'sessions', `${pid}.json`));
+      if (typeof entry?.sessionId === 'string') {
+        return { sessionId: entry.sessionId, parkedJobId: typeof entry.parkedJobId === 'string' && entry.parkedJobId ? entry.parkedJobId : null };
+      }
     }
     return null;
   }
