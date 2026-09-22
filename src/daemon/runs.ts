@@ -728,6 +728,8 @@ export class RunManager {
   /** When each run was last taken down and brought back, so nothing takes it again mid-flight. */
   private readonly lastRespawn = new Map<string, number>();
   private readonly lastLimit = new Map<string, number>();
+  /** Runs stopped on a spend cap, until they move: nothing they started is still running. */
+  private readonly spendCapped = new Set<string>();
 
   constructor(db: Db, bus: Bus, subs: SubscriptionManager, coord: Coordinator, launcher: Launcher, models: ModelCatalog) {
     this.db = db;
@@ -1013,7 +1015,8 @@ export class RunManager {
          * the same account, and will never announce anything. Waiting for it is waiting for nothing
          * while the session sits on a subscription it cannot use.
          */
-        const limited = this.coord.agent(r.session_id)?.status === 'limited';
+        // A spend cap says so however the status reads; see dropWorkOfStoppedSession.
+        const limited = this.spendCapped.has(runId) || this.coord.agent(r.session_id)?.status === 'limited';
         if (!limited && this.coord.liveSubagents(r.session_id) > 0 && Date.now() < plan.deadline! + SUBAGENT_GRACE_MS) {
           if (!this.subagentHeld.has(runId)) {
             this.subagentHeld.add(runId);
@@ -2084,6 +2087,7 @@ export class RunManager {
   private executeRespawn(r: RunRow, plan: PendingRespawn): void {
     const { target, reason, continueAfter, kind } = plan;
     this.lastRespawn.set(r.id, Date.now());
+    this.spendCapped.delete(r.id);
     // Read before the kill, because after it the session comes back with no memory of being cut off.
     const interrupted = this.busy(r);
     this.pendingRespawn.delete(r.id);
@@ -2383,6 +2387,7 @@ export class RunManager {
     // not read as news about usage.
     log.info('relaunching', { run: r.id, session: r.session_id, reason, trigger, force, status: r.status, attached: this.conns.has(r.id) });
     this.lastRespawn.set(r.id, Date.now());
+    this.spendCapped.delete(r.id);
     if (r.status === 'exited') {
       // It ended — on its own, or because the machine did. Clear that so it is a live run again.
       this.db.run("UPDATE runs SET ended_at = NULL, exit_code = NULL WHERE id = ?", r.id);
@@ -2675,8 +2680,18 @@ export class RunManager {
    * three seconds old was written off that way, and the session started another one half a second
    * later. Losing track of a live subagent is how a respawn takes a session out from under one.
    */
+  /**
+   * Whatever the status reads, a session on a spend cap has stopped, and so has everything it
+   * started: the cap is the account's, not one model's window. A spend cap seen on screen never
+   * marked the session limited, and the StopFailure after it set the status back to idle, so
+   * "launch specs" sat with its swap queued behind three subagents that had hit the same cap and
+   * would never report anything. A window limit is left to the status: one model's weekly window
+   * running out does not stop subagents running on another.
+   */
   private dropWorkOfStoppedSession(sessionId: string): number {
-    if (this.coord.agent(sessionId)?.status !== 'limited') return 0;
+    const r = this.bySession(sessionId);
+    const spent = !!r && this.spendCapped.has(r.id);
+    if (!spent && this.coord.agent(sessionId)?.status !== 'limited') return 0;
     const dead = this.coord.endSessionWork(sessionId, 'the session stopped on a usage limit');
     if (dead) this.onWorkSettled(sessionId);
     return dead;
@@ -2699,6 +2714,7 @@ export class RunManager {
       // Not news, but still evidence: if the session is marked limited then it is stopped as we
       // speak, and anything the work table still credits it with died with the turn. Saying so is
       // what lets the queued swap go.
+      if (cause === 'spend') this.spendCapped.add(r.id);
       const dead = this.dropWorkOfStoppedSession(sessionId);
       log.info('the limit is already answered and the swap for it is still queued', { run: r.id, detail, cleared: dead });
       return;
@@ -2769,6 +2785,7 @@ export class RunManager {
        * has to come back to it. A spend cap especially: no usage number will ever move to say it is
        * over, so the only way back is to try again later.
        */
+      if (cause === 'spend') this.spendCapped.add(r.id);
       this.dropWorkOfStoppedSession(sessionId);
       this.markStalled(this.row(r.id) ?? r, cause === 'spend' ? 'a spend cap' : 'rate_limit');
       const settings = getSettings(this.db);
