@@ -340,6 +340,7 @@ export function createServer(s: Services): http.Server {
   route('PATCH', '/api/runs/:id', ({ params, body }) => {
     if (typeof body.continueOnResume === 'boolean') return s.runs.setContinueOnResume(params[0], body.continueOnResume);
     if (typeof body.name === 'string') return s.runs.rename(params[0], body.name);
+    if (typeof body.model === 'string' || body.model === null) return s.runs.setModel(params[0], body.model);
     return fail(400, 'Nothing to change');
   });
   route('POST', '/api/runs/:id/relaunch', ({ params, body }) => s.runs.relaunch(params[0], body.force === true, 'you asked', 'manual'));
