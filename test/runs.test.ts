@@ -25,6 +25,7 @@ import {
   respawnPlacement,
   swapMethod,
   handoffDecision,
+  hookOwner,
   handoffPrompt,
   HANDOFF_GRACE_MS,
   HANDOFF_GIVE_UP_MS,
@@ -1254,5 +1255,29 @@ describe('a session another agent started, and the task it was handed', () => {
     assert.match(text, /#5020/);
     assert.match(text, /sb_inbox/);
     assert.ok(!text.includes('\n'), 'one line: a newline typed into the prompt would send half of it');
+  });
+});
+
+describe('which run a hook belongs to', () => {
+  it('goes by the conversation: a run already on it owns it, whatever the header says', () => {
+    // The header is SWITCHBOARD_RUN_ID out of the environment, and a background job inherits the
+    // environment of whichever session first started Claude Code's daemon for that profile.
+    assert.equal(hookOwner({ headerRunId: 'first-session', sessionOwner: 'mine', parkedOwner: null }), 'mine');
+  });
+
+  it('then by the run whose own process moved that conversation into a background job', () => {
+    assert.equal(hookOwner({ headerRunId: 'first-session', sessionOwner: null, parkedOwner: 'mine' }), 'mine');
+  });
+
+  it('and only then by the header, which is what an ordinary session has', () => {
+    assert.equal(hookOwner({ headerRunId: 'mine', sessionOwner: null, parkedOwner: null }), 'mine');
+  });
+
+  it('leaves a conversation nothing claims to nobody', () => {
+    assert.equal(hookOwner({ headerRunId: null, sessionOwner: null, parkedOwner: null }), null);
+  });
+
+  it('prefers the conversation over a job somebody else parked under the same id', () => {
+    assert.equal(hookOwner({ headerRunId: 'stale', sessionOwner: 'mine', parkedOwner: 'other' }), 'mine');
   });
 });

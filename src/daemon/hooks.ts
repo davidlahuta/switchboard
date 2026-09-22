@@ -84,12 +84,17 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
     const transcript = typeof p.transcript_path === 'string' ? p.transcript_path : null;
     if (!sid) return {};
     const runId = runHeader && !runHeader.startsWith('$') ? runHeader : null;
-    // A session the run disowns gets nothing here: no board row under the run's name, no status, no
-    // messages meant for the session it failed to become. Either it is a resume that came up on a
-    // conversation of its own, which RunManager has already stopped and said so, or it is another
-    // claude carrying this run's id in its environment and speaking for a terminal it is not in.
-    // Which of the two it is turns on where the id came from, so that goes with it.
-    if (runId && !runs.rebind(runId, sid, { kind: 'hook', event, source: typeof p.source === 'string' ? p.source : null })) return {};
+    /*
+     * Which run this is about is asked of the conversation rather than taken from the header, which
+     * is an environment variable and can belong to another session entirely; see hookOwner. A hook
+     * that carries a run id and is owned by nobody gets nothing here: no board row under the run's
+     * name, no status, no messages meant for the session it failed to become. Either it is a resume
+     * that came up on a conversation of its own, which RunManager has already stopped and said so,
+     * or it is another claude carrying a run id in its environment and speaking for a terminal it is
+     * not in.
+     */
+    const owner = runs.ownerOfHook(runId, sid, { kind: 'hook', event, source: typeof p.source === 'string' ? p.source : null });
+    if (runId && owner === null) return {};
 
     /*
      * A session we have never heard of that is telling us it has ended has nothing to join. Claude
