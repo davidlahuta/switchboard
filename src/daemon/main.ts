@@ -13,6 +13,7 @@ import { Launcher } from './launcher.ts';
 import { getSettings } from './settings.ts';
 import { ModelCatalog } from './models.ts';
 import { ensureNormalPriority } from './priority.ts';
+import { runNewSessionTool } from './newSessionTool.ts';
 import { RunManager } from './runs.ts';
 import { createServer } from './server.ts';
 import { SubscriptionManager } from './subscriptions.ts';
@@ -47,6 +48,15 @@ export async function startDaemon(): Promise<void> {
   coord.setPushTarget(hub);
   coord.setSessionGone((sessionId) => runs.sessionOver(sessionId));
   coord.setRunName((runId) => runs.row(runId)?.name ?? null);
+  coord.setSessionStarter(async (caller, args) => {
+    const { run, text } = await runNewSessionTool(args, caller, {
+      settings: () => getSettings(db),
+      subscriptions: () => subs.list().map((s) => ({ id: s.id, label: s.label, ready: s.status === 'ready' })),
+      create: (req) => runs.create(req),
+    });
+    log.info('an agent started a session', { by: caller.name, run: run.id, name: run.name, cwd: run.cwd });
+    return { runId: run.id, text };
+  });
   coord.setWorkSwept((sessionId) => runs.onWorkSettled(sessionId));
   const auth = new Auth(db);
   const updater = new Updater(db, bus, runs);

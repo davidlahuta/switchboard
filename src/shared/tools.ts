@@ -1,6 +1,8 @@
 // MCP tool definitions, shared by the stdio shim (which advertises them) and the daemon (which
 // executes them). Descriptions are deliberately terse: they sit in every session's context.
 
+import { NEW_SESSION_TOOL_PROPERTIES } from './newSession.ts';
+
 export interface ToolDef {
   name: string;
   description: string;
@@ -120,6 +122,12 @@ export const TOOLS: ToolDef[] = [
     name: 'sb_who_touches',
     description: 'Which agents recently edited or claimed these paths. Check before changing shared code.',
     inputSchema: { type: 'object', properties: { paths }, required: ['paths'], additionalProperties: false },
+  },
+  {
+    name: 'sb_new_session',
+    description:
+      "Start a new Switchboard session (its own Claude Code terminal), with the same options and defaults as the web UI's New session dialog. Every option is optional: by default it starts in your worktree on the subscription with the most headroom. Pass task to hand it its work.",
+    inputSchema: { type: 'object', properties: NEW_SESSION_TOOL_PROPERTIES, additionalProperties: false },
   },
 ];
 
