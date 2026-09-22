@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { scopedBinds } from '@shared/limits.ts';
 import type { Run, Subscription, SwapRequest } from '@shared/types.ts';
 import { api } from '../lib/api.ts';
 import { pctText, usableSubs, usageLevel } from '../lib/format.ts';
@@ -22,7 +23,7 @@ export function SwapMenu({
   const options = usableSubs(subs);
   const disabled = run.status === 'exited' || run.status === 'swapping' || busy;
   // Mid-turn a swap is queued rather than refused, so say which one picking a subscription asks for.
-  const queues = willWaitForTurn(run, force);
+  const queues = !run.swapsInPlace && willWaitForTurn(run, force);
 
   const swap = async (subscriptionId: string, close: () => void) => {
     close();
@@ -81,19 +82,33 @@ export function SwapMenu({
                 <span className="menu-usage">
                   <span className={`lvl-${usageLevel(s.usage?.fiveHour?.pct)}`}>5h {pctText(s.usage?.fiveHour)}</span>
                   <span className={`lvl-${usageLevel(s.usage?.sevenDay?.pct)}`}>7d {pctText(s.usage?.sevenDay)}</span>
+                  {/* A session on a model with a week of its own is held to that week too. */}
+                  {(s.usage?.scoped ?? [])
+                    .filter((w) => scopedBinds(w.label, run.model))
+                    .map((w) => (
+                      <span key={w.label} className={`lvl-${usageLevel(w.pct)}`}>
+                        {w.label} {pctText(w)}
+                      </span>
+                    ))}
                 </span>
               </button>
             );
           })}
           {options.length === 0 && <div className="menu-empty">No ready subscriptions</div>}
-          <label className="menu-check">
-            <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
-            Force now (even mid-turn)
-          </label>
-          <p className="menu-note">
-            Without this, a session that is mid-turn is queued and moved the moment the turn ends — nothing in flight is
-            lost. Forcing kills the turn where it stands.
-          </p>
+          {run.swapsInPlace ? (
+            <p className="menu-note">Moves at once without restarting: the turn in flight carries on, on the new subscription.</p>
+          ) : (
+            <>
+              <label className="menu-check">
+                <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
+                Force now (even mid-turn)
+              </label>
+              <p className="menu-note">
+                Without this, a session that is mid-turn is queued and moved the moment the turn ends — nothing in flight is
+                lost. Forcing kills the turn where it stands.
+              </p>
+            </>
+          )}
         </div>
       )}
     </Popover>

@@ -148,13 +148,27 @@ export const SWAP_MARGIN = 1.25;
  * What is actually usable right now. Both windows gate every request, so the tighter one decides;
  * scaling by plan weight makes a 20x Max at 80% outrank a Pro at 10%, which is what "most usage
  * available" means in tokens rather than percent.
+ *
+ * Given the model a session runs, a weekly window scoped to that model gates it too, and is counted
+ * with the other two: a session on Fable has what is left of the Fable week, however much of the
+ * account-wide week is still free. The binding window it reports stays one of the two account-wide
+ * ones, which is what the subscription list shows.
  */
-export function headroomOf(usage: Usage | null, weight: number): { headroom: number; bindingWindow: 'fiveHour' | 'sevenDay' | null } {
+export function headroomOf(
+  usage: Usage | null,
+  weight: number,
+  model: string | null = null,
+): { headroom: number; bindingWindow: 'fiveHour' | 'sevenDay' | null } {
   const five = usage?.fiveHour?.pct ?? null;
   const seven = usage?.sevenDay?.pct ?? null;
-  const used = Math.max(five ?? ASSUMED_PCT, seven ?? ASSUMED_PCT);
+  const used = Math.max(five ?? ASSUMED_PCT, seven ?? ASSUMED_PCT, ...modelWindows(usage, model).map((w) => w.pct));
   const bindingWindow = five === null && seven === null ? null : (five ?? ASSUMED_PCT) >= (seven ?? ASSUMED_PCT) ? 'fiveHour' : 'sevenDay';
   return { headroom: Math.max(0, (100 - used) / 100) * weight, bindingWindow };
+}
+
+/** The weekly windows scoped to the model a session runs: the ones that gate it beside the account-wide two. */
+export function modelWindows(usage: Usage | null, model: string | null): Usage['scoped'] {
+  return (usage?.scoped ?? []).filter((w) => scopedBinds(w.label, model));
 }
 
 /**
@@ -393,27 +407,28 @@ export class SubscriptionManager {
       if (r.id === excludeId) continue;
       const sub = this.dto(r);
       if (!sub.enabled || sub.status !== 'ready') continue;
-      const used = Math.max(sub.usage?.fiveHour?.pct ?? ASSUMED_PCT, sub.usage?.sevenDay?.pct ?? ASSUMED_PCT);
-      if (used >= Math.min(SPENT_PCT, threshold)) continue;
       /*
        * A weekly window scoped to one model is a second ceiling under the account-wide week, not a
        * share of it: spending on that model counts against both, and spending on any other model
-       * counts against the seven-day window alone. So it takes a subscription out of the running
-       * only for a session that actually runs that model — reading it as usage in general is how a
-       * desk with most of its week still in hand refuses to place anything.
+       * counts against the seven-day window alone. So it counts only for a session that actually
+       * runs that model — reading it as usage in general is how a desk with most of its week still in
+       * hand refuses to place anything — and for one that does, it counts exactly as the other two
+       * do: against the threshold, in the headroom and in when capacity comes back. Checked only
+       * when it was spent, a session on Fable was sent to a subscription with 95% of its Fable week
+       * gone because its account-wide week looked empty.
        */
-      const scoped = sub.usage?.scoped?.find((w) => w.pct >= SPENT_PCT && scopedBinds(w.label, model));
-      if (scoped) continue;
+      const used = this.usedPct(r.id, model);
+      if (used >= Math.min(SPENT_PCT, threshold)) continue;
       const score = subscriptionScore({
         // Numbers nobody could refresh are a guess about the present, and the usage endpoint goes
         // quiet for minutes at a time when it rate-limits everyone at once. Still usable — a guess
         // beats a subscription known to be spent — but not preferred over one that is answering.
         stale: !!sub.usage?.stale,
-        headroom: sub.headroom,
+        headroom: this.headroomFor(sub, model),
         fullHeadroom: weightFor(r.plan, r.rate_tier),
         liveRuns: Math.max(0, this.liveRunsFor(r.id) + (pending?.get(r.id) ?? 0)),
         priority: r.priority,
-        resetsInMs: this.resetsInMs(sub),
+        resetsInMs: this.resetsInMs(sub, model),
         recentlyLeft: left.has(r.id),
       });
       if (!best || score > best.score) best = { row: r, score };
@@ -437,32 +452,39 @@ export class SubscriptionManager {
     const r = this.row(id);
     const usage = r ? this.dto(r).usage : null;
     if (!usage) return ASSUMED_PCT;
-    const mine = (usage.scoped ?? []).filter((w) => scopedBinds(w.label, model)).map((w) => w.pct);
+    const mine = modelWindows(usage, model).map((w) => w.pct);
     return Math.max(usage.fiveHour?.pct ?? ASSUMED_PCT, usage.sevenDay?.pct ?? ASSUMED_PCT, ...mine);
   }
 
-  /** What the subscription a session is on now is worth, to compare a proposed move against. */
-  scoreOf(id: string, pending?: ReadonlyMap<string, number>): number {
+  /** A subscription's headroom for a session running `model`; nothing when it cannot be used at all. */
+  private headroomFor(sub: Subscription, model: string | null): number {
+    return sub.headroom > 0 ? headroomOf(sub.usage, sub.weight, model).headroom : 0;
+  }
+
+  /** What the subscription a session running `model` is on now is worth, to compare a proposed move against. */
+  scoreOf(id: string, pending?: ReadonlyMap<string, number>, model: string | null = null): number {
     const r = this.row(id);
     if (!r) return 0;
     const sub = this.dto(r);
     return subscriptionScore({
-      headroom: sub.headroom,
+      headroom: this.headroomFor(sub, model),
       fullHeadroom: weightFor(r.plan, r.rate_tier),
       // Not counting the session asking, and counting whatever a rebalance in progress has already
       // sent here or taken away: staying put gets better as the neighbours leave.
       liveRuns: Math.max(0, this.liveRunsFor(id) - 1 + (pending?.get(id) ?? 0)),
       priority: r.priority,
-      resetsInMs: this.resetsInMs(sub),
+      resetsInMs: this.resetsInMs(sub, model),
       recentlyLeft: false,
     });
   }
 
-  /** Milliseconds until the window that is currently binding turns over, when that is known. */
-  private resetsInMs(sub: Subscription): number | null {
-    const five = sub.usage?.fiveHour ?? null;
-    const seven = sub.usage?.sevenDay ?? null;
-    const binding = (five?.pct ?? 0) >= (seven?.pct ?? 0) ? five : seven;
+  /**
+   * Milliseconds until the window that is currently binding a session running `model` turns over,
+   * when that is known. A Fable week at 100% is not freed by the five-hour window turning over.
+   */
+  private resetsInMs(sub: Subscription, model: string | null = null): number | null {
+    const windows = [sub.usage?.fiveHour ?? null, sub.usage?.sevenDay ?? null, ...modelWindows(sub.usage, model)];
+    const binding = windows.reduce<(typeof windows)[number]>((a, w) => (w && (!a || w.pct > a.pct) ? w : a), null);
     if (!binding?.resetsAt) return null;
     return Date.parse(binding.resetsAt) - Date.now();
   }
