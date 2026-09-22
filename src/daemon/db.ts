@@ -353,6 +353,12 @@ const MIGRATIONS: string[] = [
   -- 1 for a swap made in place, by rewriting the session's own login rather than restarting it.
   ALTER TABLE swaps ADD COLUMN hot INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- The model a session is to come back on, set while it is running on another one. The model column
+  -- follows what the session is actually on, so it cannot hold this: the transcript would overwrite
+  -- it within seconds (see syncModel).
+  ALTER TABLE runs ADD COLUMN model_wanted TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

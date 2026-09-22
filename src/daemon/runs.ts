@@ -67,6 +67,7 @@ interface RunRow {
   extra_args: string | null;
   version: string | null;
   model: string | null;
+  model_wanted: string | null;
   auto_compact: number | null;
   auto_compact_tokens: number | null;
   skip_permissions: number | null;
@@ -1366,9 +1367,14 @@ export class RunManager {
   setModel(runId: string, model: string | null): Run {
     const r = this.liveRun(runId);
     if (model) this.models.validate(model);
-    if ((r.model ?? null) === model) return this.dto(r);
-    this.db.run('UPDATE runs SET model = ? WHERE id = ?', model, runId);
-    log.info('session model set', { run: runId, model, was: r.model });
+    if ((r.model ?? null) === model && r.model_wanted === null) return this.dto(r);
+    /*
+     * Held apart from `model`, which says what the session is running now and is rewritten from the
+     * transcript every few seconds: a model set on a live session and written there was gone before
+     * the relaunch that would have used it, and nine sessions came back on the model they left.
+     */
+    this.db.run('UPDATE runs SET model_wanted = ? WHERE id = ?', model, runId);
+    log.info('session will come back on another model', { run: runId, model, running: r.model });
     this.bus.invalidate('state');
     return this.dto(this.row(runId)!);
   }
@@ -1552,7 +1558,10 @@ export class RunManager {
     };
     if (!hooksInstalledIn(path.join(sub.config_dir, 'settings.json'))) runSettings.hooks = hooksConfig();
     args.push('--settings', writeRuntimeJson(`settings-${r.id}.json`, runSettings));
-    if (r.model) args.push('--model', r.model);
+    // What it was asked to come back on, if anything, and otherwise what it is on now.
+    const model = r.model_wanted ?? r.model;
+    if (model) args.push('--model', model);
+    if (r.model_wanted !== null) this.db.run('UPDATE runs SET model = ?, model_wanted = NULL WHERE id = ?', r.model_wanted, r.id);
     if (this.dto(r).skipPermissions) args.push('--dangerously-skip-permissions');
     if (!resume && r.worktree) args.push('--worktree', r.worktree);
     if (!resume) args.push('--name', r.name);
