@@ -15,6 +15,7 @@ import {
   processIsHost,
   reporterOf,
   reviveDecision,
+  terminalEscape,
   sessionFileKey,
   rescueDecision,
   respawnGuard,
@@ -678,6 +679,41 @@ describe('whether a session whose terminal seems gone is brought back', () => {
 
   it('brings back a session whose claude is gone', () => {
     assert.equal(reviveDecision({ connected: false, claudeAlive: false, heldForMs: null }), 'revive');
+  });
+});
+
+describe('a terminal that was opened for a session and stayed empty', () => {
+  const alive = { connected: false, alive: true };
+
+  it('asks for nothing when the runner turned up after all', () => {
+    // wt exits 0 the moment it has handed the request over, so the only proof a terminal worked is
+    // the runner saying hello — which it may do on the last of the forty-five seconds.
+    assert.deepEqual(terminalEscape({ tries: 1, connected: true, alive: true }), { do: 'nothing' });
+  });
+
+  it('asks for nothing for a session that is over', () => {
+    // Stopped or exited: nobody is waiting for this terminal.
+    assert.deepEqual(terminalEscape({ tries: 1, connected: false, alive: false }), { do: 'nothing' });
+  });
+
+  it('moves the session out of the window that would not start it', () => {
+    /*
+     * The 2026-09-22 failure: one Windows Terminal window stopped starting processes, six sessions
+     * lost their terminal to a restart in the same second, and every wt still exited 0. A window of
+     * its own works on the same desk in the same second.
+     */
+    assert.deepEqual(terminalEscape({ ...alive, tries: 1 }), { do: 'try-elsewhere', step: 1 });
+  });
+
+  it('gives up Windows Terminal altogether when a window of its own is empty too', () => {
+    assert.deepEqual(terminalEscape({ ...alive, tries: 2 }), { do: 'try-elsewhere', step: 2 });
+  });
+
+  it('stops opening terminals once there is nowhere left to open one', () => {
+    // Not the session abandoned: the revive backoff takes it, and each of its attempts is watched
+    // by this same rule.
+    assert.deepEqual(terminalEscape({ ...alive, tries: 3 }), { do: 'give-up' });
+    assert.deepEqual(terminalEscape({ ...alive, tries: 9 }), { do: 'give-up' });
   });
 });
 

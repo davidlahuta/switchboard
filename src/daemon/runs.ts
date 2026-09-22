@@ -245,6 +245,44 @@ const REVIVE_BACKOFF_MS = [30_000, 2 * 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_
 /** How long a revive waits on a claude that is still running before deciding its runner is gone; see reviveDecision. */
 const REVIVE_HOLD_MAX_MS = 5 * 60_000;
 /**
+ * How long a terminal opened for a session has to produce a runner before it is treated as never
+ * having opened at all.
+ *
+ * A tab that works connects in a couple of seconds: Windows Terminal starts the process, it strips
+ * its own TypeScript and says hello. This is the ceiling for a cold one, wide enough that a busy
+ * machine is not mistaken for a broken one.
+ */
+const TERMINAL_ATTACH_MS = 45_000;
+/**
+ * Where a session's terminal is opened, in the order tried, when the place before it turned out not
+ * to start processes.
+ *
+ * Each step gives up something to depend on less. A window of its own escapes one Windows Terminal
+ * window that has stopped working while the rest of the desk is fine — the 2026-09-22 failure, and
+ * the one that actually happens. A plain console escapes Windows Terminal altogether, which is the
+ * only step left if it is the terminal itself that is broken, and the point of having it is that a
+ * desk being watched from somewhere else still comes back without anybody at the machine.
+ */
+const ESCAPES = [
+  { what: 'the window it was asked for', said: '' },
+  { what: 'a Windows Terminal window of its own', said: 'in a new window' },
+  { what: 'a plain console, without Windows Terminal', said: 'without Windows Terminal' },
+] as const;
+
+/**
+ * What to do about a terminal that was opened for a session and never produced a runner.
+ *
+ * `try-elsewhere` means the step named is worth taking. `give-up` means every step has been taken,
+ * which is not a session abandoned: it is handed to the revive backoff, whose own attempts open
+ * terminals that are watched by this same rule.
+ */
+export function terminalEscape(input: { tries: number; connected: boolean; alive: boolean }): { do: 'nothing' } | { do: 'try-elsewhere'; step: number } | { do: 'give-up' } {
+  // It arrived late, or the session is over: either way nothing is owed another terminal.
+  if (input.connected || !input.alive) return { do: 'nothing' };
+  if (input.tries < ESCAPES.length) return { do: 'try-elsewhere', step: input.tries };
+  return { do: 'give-up' };
+}
+/**
  * How long after a respawn the terminal's output says nothing about usage limits.
  *
  * This covers the milliseconds: a limit already on its way here when the swap happened, which would
@@ -856,6 +894,33 @@ export class RunManager {
   private readonly runnerStartedAt = new Map<string, number>();
   /** Runs waiting for their terminal to close so a fresh one can be opened for them. */
   private readonly relaunching = new Set<string>();
+  /**
+   * Terminals opened for a session whose runner has not reported in yet, and how many have been
+   * opened for it in a row without one. See watchTerminal.
+   */
+  private readonly openingTerminal = new Map<string, { tries: number; timer: NodeJS.Timeout }>();
+  /** How far down ESCAPES terminals are currently being opened, and the window that step named. */
+  private escaped = 0;
+  private escapeWindow: string | null = null;
+  private escapes = 0;
+
+  /**
+   * Stop opening terminals where the last one opened empty.
+   *
+   * Applied to the whole desk rather than to the session that found it, because the window is the
+   * thing that is broken: nine sessions sent to it would otherwise each wait out their own
+   * forty-five seconds before reaching the same conclusion. A step back down is never taken — a
+   * window that has stopped starting processes does not recover — but a daemon restart begins again
+   * at the operator's setting, which is right, because the window it named is usually gone by then.
+   */
+  private escapeFrom(step: number): void {
+    if (step <= this.escaped) return;
+    this.escaped = step;
+    // A name, not 'new': the first session to escape makes the window and the rest join it there,
+    // so the desk ends up in one window again instead of one window each.
+    this.escapeWindow = step === 1 ? `switchboard-${++this.escapes}` : this.escapeWindow;
+    log.warn('opening session terminals somewhere else', { step, where: ESCAPES[step]?.what, window: this.escapeWindow });
+  }
 
   private runnerStale(runId: string): boolean {
     const started = this.runnerStartedAt.get(runId);
@@ -1322,7 +1387,16 @@ export class RunManager {
   async create(req: CreateRunRequest): Promise<Run> {
     if (!findClaude()) throw httpError(500, 'claude executable not found on PATH');
     const r = await this.insertRun(req);
-    this.launcher.openTerminal({ title: r.name, cwd: r.cwd, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
+    this.launcher.openTerminal({
+      title: r.name,
+      cwd: r.cwd,
+      args: ['run', '--run-id', r.id],
+      window: this.escapeWindow ?? this.terminalWindow(),
+      withoutWindowsTerminal: this.escaped >= 2,
+    });
+    // A new session's terminal can open empty just as a relaunched one's can, and a session that
+    // never starts is the easiest of all to miss. See watchTerminal.
+    this.watchTerminal(r.id, r.name, this.escaped + 1);
     log.info('run created', { id: r.id, name: r.name, subscription: r.subscription_id });
     return this.dto(r);
   }
@@ -1505,6 +1579,8 @@ export class RunManager {
     const previous = this.conns.get(r.id);
     if (previous && previous !== ws) previous.close();
     this.conns.set(r.id, ws);
+    // Whatever terminal it was opened in started a process, so the watchdog has its answer.
+    this.terminalArrived(r.id);
     // A runner that does not report its start time predates the field, which makes it stale by
     // definition — the opposite of what treating it as new would say.
     this.runnerStartedAt.set(r.id, msg.startedAt ? Date.parse(msg.startedAt) : 0);
@@ -2509,6 +2585,65 @@ export class RunManager {
     return sessionDir(r.cwd, r.last_cwd, fs.existsSync);
   }
 
+  /**
+   * Wait for the terminal just opened for a session to produce a runner, and open another one
+   * somewhere else if it does not.
+   *
+   * Opening a terminal is the one step in a relaunch with nothing on the other end of it. `wt.exe`
+   * delivers the request to the window that already exists and exits 0 whatever becomes of it, so
+   * "the tab was asked for" was being read as "the session is coming back". On 2026-09-22 a Windows
+   * Terminal window stopped starting processes — tabs appeared empty, every `wt` still exited 0 —
+   * and six sessions sat disconnected until somebody noticed, because the ordinary safety net does
+   * not cover this: `scheduleRevive` is deliberately skipped for a socket that closed because we
+   * just replaced it (`justReplaced`), which is exactly this case.
+   *
+   * So the second try goes to a window of its own. A window that has stopped starting processes
+   * does not recover, and it is the window rather than the machine that is broken — a fresh one
+   * works on the same desk in the same second. Only then is it handed to the revive backoff, which
+   * is the right home for "this is not working and it is not about to".
+   */
+  private watchTerminal(runId: string, name: string, tries: number): void {
+    const previous = this.openingTerminal.get(runId);
+    if (previous) clearTimeout(previous.timer);
+    const timer = setTimeout(() => {
+      this.openingTerminal.delete(runId);
+      const fresh = this.row(runId);
+      const decision = terminalEscape({
+        tries,
+        connected: this.conns.has(runId),
+        alive: !!fresh && fresh.ended_at === null && !this.stopping.has(runId),
+      });
+      if (decision.do === 'nothing') return;
+      if (!fresh) return;
+      if (decision.do === 'try-elsewhere') {
+        const next = ESCAPES[decision.step];
+        log.warn('a terminal was opened for a session and nothing started in it', { run: runId, name, tries, next: next.what });
+        this.bus.toast('warn', `${name}: its terminal opened empty, so it is being reopened ${next.said}.`);
+        // Whatever it was opened in is not starting processes, and it will not start starting: every
+        // session opened there from here on goes somewhere else too, rather than each discovering it
+        // in turn forty-five seconds apart.
+        this.escapeFrom(decision.step);
+        this.openTerminalFor(fresh);
+        return;
+      }
+      log.error('a session could not be given a working terminal', { run: runId, name, tries });
+      this.bus.toast('error', `${name}: no terminal will start a process on this machine. Its conversation is safe and it will keep trying.`);
+      // Handed to the backoff rather than dropped: each of its attempts is watched by this same
+      // timer and escapes the same way, so a desk left alone keeps trying to reach itself.
+      this.scheduleRevive(fresh, 'its terminal opened empty');
+    }, TERMINAL_ATTACH_MS);
+    timer.unref?.();
+    this.openingTerminal.set(runId, { tries, timer });
+  }
+
+  /** Its runner is talking, so the terminal it was opened in worked. */
+  private terminalArrived(runId: string): void {
+    const watch = this.openingTerminal.get(runId);
+    if (!watch) return;
+    clearTimeout(watch.timer);
+    this.openingTerminal.delete(runId);
+  }
+
   private openTerminalFor(r: RunRow): void {
     this.relaunching.delete(r.id);
     if (!this.workDir(r)) {
@@ -2528,8 +2663,16 @@ export class RunManager {
     const dir = this.homeDir(r);
     // Names where the session was last seen when that is not where it is being opened, so the choice is visible.
     const lastCwd = r.last_cwd && r.last_cwd !== dir ? r.last_cwd : undefined;
-    log.info('opening a terminal for a session', { run: r.id, session: r.session_id, subscription: r.subscription_id, cwd: dir, lastCwd });
-    this.launcher.openTerminal({ title: r.name, cwd: dir, args: ['run', '--run-id', r.id], window: this.terminalWindow() });
+    log.info('opening a terminal for a session', { run: r.id, session: r.session_id, subscription: r.subscription_id, cwd: dir, lastCwd, escape: this.escaped || undefined });
+    this.launcher.openTerminal({
+      title: r.name,
+      cwd: dir,
+      args: ['run', '--run-id', r.id],
+      window: this.escapeWindow ?? this.terminalWindow(),
+      withoutWindowsTerminal: this.escaped >= 2,
+    });
+    // Nothing else checks that this worked: wt exits 0 either way. See watchTerminal.
+    this.watchTerminal(r.id, r.name, this.escaped + 1);
   }
 
   /**
@@ -2598,6 +2741,8 @@ export class RunManager {
     if (!r) throw httpError(404, 'Unknown run');
     this.stopping.add(runId);
     this.cancelRevive(runId);
+    // A session the operator stopped is not owed a terminal, so nothing is reopened for it.
+    this.terminalArrived(runId);
     this.clearStall(runId);
     const markExited = (): void => {
       this.db.run('UPDATE runs SET ended_at = ? WHERE id = ?', now(), runId);
