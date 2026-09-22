@@ -390,6 +390,8 @@ export class Coordinator {
   private runName: (runId: string) => string | null = () => null;
   /** Starts a session for an agent's sb_new_session; see newSessionTool.ts. */
   private sessionStarter: ((caller: AgentRow, args: Record<string, unknown>) => Promise<{ runId: string; text: string }>) | null = null;
+  /** Told when a started session has been sent its task, so its taking it up can be watched; see watchHandoff. */
+  private handedOver: (runId: string, from: string, messageId: number) => void = () => {};
   /** Tasks for sessions an agent started, handed over when each one joins the board. */
   private readonly handoffs = new Map<string, { from: string; task: string }>();
 
@@ -413,6 +415,10 @@ export class Coordinator {
   /** Teach the board the operator's names for the sessions Switchboard hosts. See alignHostedNames. */
   setSessionStarter(fn: (caller: AgentRow, args: Record<string, unknown>) => Promise<{ runId: string; text: string }>): void {
     this.sessionStarter = fn;
+  }
+
+  setHandedOver(fn: (runId: string, from: string, messageId: number) => void): void {
+    this.handedOver = fn;
   }
 
   setRunName(fn: (runId: string) => string | null): void {
@@ -558,8 +564,9 @@ export class Coordinator {
     const handoff = input.runId ? this.handoffs.get(input.runId) : undefined;
     if (handoff && this.agent(handoff.from)) {
       this.handoffs.delete(input.runId!);
-      this.send(handoff.from, repo.id, input.sessionId, 'request', handoff.task);
-      log.info('handed a started session its task', { run: input.runId, from: this.nameOf(handoff.from) });
+      const m = this.send(handoff.from, repo.id, input.sessionId, 'request', handoff.task);
+      log.info('handed a started session its task', { run: input.runId, from: this.nameOf(handoff.from), message: m.id });
+      this.handedOver(input.runId!, this.nameOf(handoff.from), m.id);
     }
     this.bus.invalidate('state', `repo:${repo.id}`);
     return this.agent(input.sessionId)!;

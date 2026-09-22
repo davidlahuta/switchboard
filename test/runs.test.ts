@@ -24,6 +24,10 @@ import {
   mergePending,
   respawnPlacement,
   swapMethod,
+  handoffDecision,
+  handoffPrompt,
+  HANDOFF_GRACE_MS,
+  HANDOFF_GIVE_UP_MS,
   sessionDir,
   titleDecision,
   type PendingRespawn,
@@ -1204,5 +1208,36 @@ describe('how a session is moved to another subscription', () => {
   it('restarts it when hot swap is off, or when it was to come back in a new terminal anyway', () => {
     assert.equal(swapMethod({ ...live, hotSwapOn: false }), 'restart');
     assert.equal(swapMethod({ ...live, fresh: true }), 'restart');
+  });
+});
+
+describe('a session another agent started, and the task it was handed', () => {
+  it('is left alone once it shows any sign of a turn: the channel got the task through', () => {
+    for (const agentStatus of ['working', 'idle', 'waiting', 'limited']) {
+      assert.equal(handoffDecision({ agentStatus, promptSinceMs: 60_000, waitedMs: 60_000 }), 'taken', agentStatus);
+    }
+  });
+
+  it('is told where its task is once its prompt has sat idle: the spec-0464 case', () => {
+    // Joined, sent the task a millisecond later, and never did a thing: still "starting", prompt on screen.
+    assert.equal(handoffDecision({ agentStatus: 'starting', promptSinceMs: HANDOFF_GRACE_MS, waitedMs: 30_000 }), 'type');
+    assert.equal(handoffDecision({ agentStatus: undefined, promptSinceMs: HANDOFF_GRACE_MS + 1, waitedMs: 30_000 }), 'type', 'no agent row yet');
+  });
+
+  it('waits while it is still starting, or its prompt has only just appeared', () => {
+    assert.equal(handoffDecision({ agentStatus: 'starting', promptSinceMs: null, waitedMs: 5_000 }), 'wait', 'a startup dialog, or loading');
+    assert.equal(handoffDecision({ agentStatus: 'starting', promptSinceMs: 2_000, waitedMs: 5_000 }), 'wait', 'the channel may be about to start a turn');
+  });
+
+  it('gives up, and says so, on a session that never reaches its prompt', () => {
+    assert.equal(handoffDecision({ agentStatus: 'starting', promptSinceMs: null, waitedMs: HANDOFF_GIVE_UP_MS }), 'give-up');
+  });
+
+  it('points it at the message rather than retyping the task, which can run to pages', () => {
+    const text = handoffPrompt('spec-0488', 5020);
+    assert.match(text, /spec-0488/);
+    assert.match(text, /#5020/);
+    assert.match(text, /sb_inbox/);
+    assert.ok(!text.includes('\n'), 'one line: a newline typed into the prompt would send half of it');
   });
 });

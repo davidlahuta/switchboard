@@ -48,6 +48,7 @@ export async function startDaemon(): Promise<void> {
   coord.setPushTarget(hub);
   coord.setSessionGone((sessionId) => runs.sessionOver(sessionId));
   coord.setRunName((runId) => runs.row(runId)?.name ?? null);
+  coord.setHandedOver((runId, from, messageId) => runs.watchHandoff(runId, from, messageId));
   coord.setSessionStarter(async (caller, args) => {
     const { run, text } = await runNewSessionTool(args, caller, {
       settings: () => getSettings(db),

@@ -168,6 +168,38 @@ export function atPrompt(screen: string): boolean {
   return PROMPT_FOOTER.test(screen) && !CONFIRM_FOOTER.test(screen);
 }
 
+/** How long a started session's prompt has to be on screen, idle, before it is told where its task is. */
+export const HANDOFF_GRACE_MS = 8000;
+/** How long a started session is watched for taking up its task before it is left to the operator. */
+export const HANDOFF_GIVE_UP_MS = 5 * 60_000;
+
+/**
+ * Whether a session another agent started has taken up the task it was handed, and if not, what to do.
+ *
+ * The task goes to it as a board message the moment it joins, pushed down its channel — and a
+ * channel message that arrives while Claude Code is still starting is dropped without a word, while
+ * the board records it as delivered. spec 0488 started spec-0464 that way: the message was pushed a
+ * millisecond after it joined, and the session sat at an empty prompt with the task nowhere in its
+ * conversation. So the push is not trusted. Any sign of a turn — a status other than "starting" —
+ * means it arrived; a prompt that has sat idle for HANDOFF_GRACE_MS means it did not, and the session
+ * is told, by typing into its terminal, where to find it.
+ */
+export function handoffDecision(input: {
+  agentStatus: string | null | undefined;
+  promptSinceMs: number | null;
+  waitedMs: number;
+}): 'taken' | 'type' | 'wait' | 'give-up' {
+  if (input.agentStatus && input.agentStatus !== 'starting' && input.agentStatus !== 'offline') return 'taken';
+  if (input.promptSinceMs !== null && input.promptSinceMs >= HANDOFF_GRACE_MS) return 'type';
+  if (input.waitedMs >= HANDOFF_GIVE_UP_MS) return 'give-up';
+  return 'wait';
+}
+
+/** What a started session whose task did not arrive is told. */
+export function handoffPrompt(from: string, messageId: number): string {
+  return `${from} started this session to do a task for it, sent to you as Switchboard message #${messageId}. Read it with sb_inbox and carry it out.`;
+}
+
 /** How much of the end of a transcript is read for a question left unanswered; see pendingQuestion. */
 const TRANSCRIPT_TAIL_BYTES = 1024 * 1024;
 
@@ -2162,6 +2194,46 @@ export class RunManager {
       log.info('telling a stalled session to carry on', { run: r.id, reason: r.stall_reason, attempt: tries });
       this.sendContinue(r, `it stopped on ${r.stall_reason ?? 'an error'}`);
     }
+  }
+
+  /**
+   * Make sure a session another agent started takes up the task it was handed; see handoffDecision.
+   * Watched from the screen, which is there from the first byte, rather than from any hook, which a
+   * session that has done nothing yet has not sent.
+   */
+  watchHandoff(runId: string, from: string, messageId: number): void {
+    const armedAt = Date.now();
+    let promptSince: number | null = null;
+    const check = (): void => {
+      const r = this.row(runId);
+      if (!r || r.status === 'exited') return;
+      const onScreen = atPrompt(this.mirrors.get(runId)?.screenText() ?? '');
+      if (!onScreen) promptSince = null;
+      else if (promptSince === null) promptSince = Date.now();
+      const decision = handoffDecision({
+        agentStatus: this.coord.agent(r.session_id)?.status,
+        promptSinceMs: promptSince === null ? null : Date.now() - promptSince,
+        waitedMs: Date.now() - armedAt,
+      });
+      if (decision === 'wait') {
+        setTimeout(check, CONTINUE_POLL_MS);
+        return;
+      }
+      if (decision === 'taken') {
+        log.info('a started session took up its task', { run: runId, message: messageId, afterMs: Date.now() - armedAt });
+        return;
+      }
+      if (decision === 'give-up') {
+        log.warn('a started session never reached its prompt to be handed its task', { run: runId, message: messageId });
+        this.bus.toast('warn', `${r.name} was started by ${from} with a task, but never reached its prompt to take it up — check its terminal.`);
+        return;
+      }
+      log.warn('a started session did not get its task over the channel; typing where to find it', { run: runId, message: messageId });
+      const old = this.pendingContinue.get(runId);
+      if (old) clearTimeout(old.timer);
+      this.pendingContinue.set(runId, { text: handoffPrompt(from, messageId), released: true, timer: setTimeout(() => this.typeContinue(runId), 0) });
+    };
+    setTimeout(check, CONTINUE_POLL_MS);
   }
 
   /** Queue the continue message to go in as soon as the session can take it. */
