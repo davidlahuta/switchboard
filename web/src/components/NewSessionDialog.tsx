@@ -8,10 +8,7 @@ import { href, openTerminal } from '../lib/router.ts';
 import { timeAgo } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
 import { Badge, Dialog } from './ui.tsx';
-
-const COMPACT_MIN = 20_000;
-const COMPACT_MAX = 990_000;
-const COMPACT_STEP = 10_000;
+import { clampCompactTokens as clampTokens, COMPACT_MAX, COMPACT_MIN, COMPACT_STEP, newSessionDefaults, newSessionRequest } from '@shared/newSession.ts';
 
 /** Loose on purpose: the daemon owns the real check, this only catches obvious typos. */
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -35,22 +32,24 @@ export function NewSessionDialog({
   initialCwd?: string;
 }) {
   const fieldId = useId();
-  const [cwd, setCwd] = useState('');
-  const [sub, setSub] = useState('auto');
-  const [name, setName] = useState('');
-  const [worktree, setWorktree] = useState('');
+  // The same defaults an agent's sb_new_session starts from; see src/shared/newSession.ts.
+  const initial = newSessionDefaults(state.settings, '');
+  const [cwd, setCwd] = useState(initial.cwd);
+  const [sub, setSub] = useState(initial.subscriptionId);
+  const [name, setName] = useState(initial.name);
+  const [worktree, setWorktree] = useState(initial.worktree);
   /** "" (new session), a session GUID from the recent list, or PASTE. */
   const [sessionChoice, setSessionChoice] = useState('');
   /** Only meaningful while `sessionChoice === PASTE`; cleared whenever that stops being true. */
   const [pastedId, setPastedId] = useState('');
-  const [autoSwap, setAutoSwap] = useState(state.settings.autoSwap);
-  const [model, setModel] = useState('');
-  const [autoCompact, setAutoCompact] = useState(state.settings.defaultAutoCompact);
-  const [compactTokens, setCompactTokens] = useState(state.settings.defaultAutoCompactTokens);
-  const [continueOnResume, setContinueOnResume] = useState(state.settings.continueOnResume);
-  const [skipPermissions, setSkipPermissions] = useState(state.settings.defaultSkipPermissions);
-  const [diffPanel, setDiffPanel] = useState(state.settings.defaultDiffPanel);
-  const [argsText, setArgsText] = useState('');
+  const [autoSwap, setAutoSwap] = useState(initial.autoSwap);
+  const [model, setModel] = useState(initial.model);
+  const [autoCompact, setAutoCompact] = useState(initial.autoCompact);
+  const [compactTokens, setCompactTokens] = useState(initial.autoCompactTokens);
+  const [continueOnResume, setContinueOnResume] = useState(initial.continueOnResume);
+  const [skipPermissions, setSkipPermissions] = useState(initial.skipPermissions);
+  const [diffPanel, setDiffPanel] = useState(initial.diffPanel);
+  const [argsText, setArgsText] = useState(initial.args.join(' '));
   const [recent, setRecent] = useState<RecentSession[] | null>(null);
   const [discovered, setDiscovered] = useState<DiscoveredRepo[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -59,21 +58,22 @@ export function NewSessionDialog({
 
   useEffect(() => {
     if (!open) return;
-    setCwd(initialCwd ?? state.repos[0]?.root ?? '');
-    setSub('auto');
-    setName('');
-    setWorktree('');
+    const d = newSessionDefaults(state.settings, initialCwd ?? state.repos[0]?.root ?? '');
+    setCwd(d.cwd);
+    setSub(d.subscriptionId);
+    setName(d.name);
+    setWorktree(d.worktree);
     setSessionChoice('');
     setPastedId('');
-    setAutoSwap(state.settings.autoSwap);
+    setAutoSwap(d.autoSwap);
     // "" means "leave it to the daemon", which applies the default from Settings.
-    setModel('');
-    setAutoCompact(state.settings.defaultAutoCompact);
-    setCompactTokens(state.settings.defaultAutoCompactTokens);
-    setSkipPermissions(state.settings.defaultSkipPermissions);
-    setDiffPanel(state.settings.defaultDiffPanel);
-    setContinueOnResume(state.settings.continueOnResume);
-    setArgsText('');
+    setModel(d.model);
+    setAutoCompact(d.autoCompact);
+    setCompactTokens(d.autoCompactTokens);
+    setSkipPermissions(d.skipPermissions);
+    setDiffPanel(d.diffPanel);
+    setContinueOnResume(d.continueOnResume);
+    setArgsText(d.args.join(' '));
     setError(null);
     setAdvOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -143,22 +143,22 @@ export function NewSessionDialog({
       setError('Choose a directory.');
       return;
     }
-    const body: CreateRunRequest = {
+    // Built by the same function as an agent's sb_new_session, from every field of the form.
+    const body: CreateRunRequest = newSessionRequest({
       cwd: dir,
       subscriptionId: sub,
-      autoSwap,
+      name,
+      worktree,
+      resumeSessionId: resumeId,
+      model,
       autoCompact,
-      autoCompactTokens: clampTokens(compactTokens),
+      autoCompactTokens: compactTokens,
       skipPermissions,
       diffPanel,
+      autoSwap,
       continueOnResume,
-      ...(name.trim() ? { name: name.trim() } : {}),
-      ...(worktree.trim() && !resumeId ? { worktree: worktree.trim() } : {}),
-      // Sessions are addressed by GUID; the title next to it is only a label.
-      ...(resumeId ? { resumeSessionId: resumeId } : {}),
-      ...(model ? { model } : {}),
-      ...(parsed.args.length ? { args: parsed.args } : {}),
-    };
+      args: parsed.args,
+    });
     setBusy(true);
     setError(null);
     try {
@@ -628,7 +628,3 @@ function DirectoryField({
   );
 }
 
-function clampTokens(v: number): number {
-  if (!Number.isFinite(v)) return COMPACT_MIN;
-  return Math.min(COMPACT_MAX, Math.max(COMPACT_MIN, Math.round(v)));
-}

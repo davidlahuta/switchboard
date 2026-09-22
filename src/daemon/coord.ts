@@ -388,6 +388,10 @@ export class Coordinator {
   private workSwept: (sessionId: string) => void = () => {};
   /** The name the operator gave a hosted session, which its agent is named after. */
   private runName: (runId: string) => string | null = () => null;
+  /** Starts a session for an agent's sb_new_session; see newSessionTool.ts. */
+  private sessionStarter: ((caller: AgentRow, args: Record<string, unknown>) => Promise<{ runId: string; text: string }>) | null = null;
+  /** Tasks for sessions an agent started, handed over when each one joins the board. */
+  private readonly handoffs = new Map<string, { from: string; task: string }>();
 
   constructor(db: Db, bus: Bus) {
     this.db = db;
@@ -407,6 +411,10 @@ export class Coordinator {
   }
 
   /** Teach the board the operator's names for the sessions Switchboard hosts. See alignHostedNames. */
+  setSessionStarter(fn: (caller: AgentRow, args: Record<string, unknown>) => Promise<{ runId: string; text: string }>): void {
+    this.sessionStarter = fn;
+  }
+
   setRunName(fn: (runId: string) => string | null): void {
     this.runName = fn;
   }
@@ -546,6 +554,13 @@ export class Coordinator {
     // Whatever its tools did before, they are here now.
     this.shimGone.delete(input.sessionId);
     this.repoTouched(repo.id);
+    // A session another agent started with a task: this is the first moment it can be handed over.
+    const handoff = input.runId ? this.handoffs.get(input.runId) : undefined;
+    if (handoff && this.agent(handoff.from)) {
+      this.handoffs.delete(input.runId!);
+      this.send(handoff.from, repo.id, input.sessionId, 'request', handoff.task);
+      log.info('handed a started session its task', { run: input.runId, from: this.nameOf(handoff.from) });
+    }
     this.bus.invalidate('state', `repo:${repo.id}`);
     return this.agent(input.sessionId)!;
   }
@@ -2409,6 +2424,14 @@ export class Coordinator {
           const paths = list(args.paths);
           if (!paths.length) return { text: 'paths is required', isError: true };
           return { text: this.whoTouches(agentId, paths), isError: false };
+        }
+        case 'sb_new_session': {
+          if (!this.sessionStarter) return { text: 'Starting sessions is not available here.', isError: true };
+          const started = await this.sessionStarter(a, args);
+          const task = str(args.task);
+          if (task) this.handoffs.set(started.runId, { from: agentId, task: task.trim() });
+          this.event(a.repo_id, agentId, 'session', `${a.name} started a session: ${clip(started.text, 200)}`);
+          return { text: started.text, isError: false };
         }
         default:
           return { text: `Unknown tool ${tool}`, isError: true };
