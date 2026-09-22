@@ -195,6 +195,25 @@ export function handoffDecision(input: {
   return 'wait';
 }
 
+/**
+ * Which run a hook belongs to, when the three things that can say disagree.
+ *
+ * The header a hook carries is Claude Code expanding SWITCHBOARD_RUN_ID out of the process
+ * environment, and that environment is not always this session's. Claude Code runs one background
+ * daemon per profile, started by whichever session first needed it and keeping that session's
+ * environment for its life: every job it later starts for any session on that subscription carries
+ * the first session's run id. Other things inherit it too — a `claude update` run from a session's
+ * own shell fires a lone SessionEnd under its parent's id.
+ *
+ * So the conversation decides, and the header is only the last word. A run already on this
+ * conversation owns it. Failing that, a run whose own process says it moved this conversation into a
+ * background job owns it (see reporterOf). Only then the header, which is what a plain session
+ * launched by Switchboard has and nothing else does.
+ */
+export function hookOwner(input: { headerRunId: string | null; sessionOwner: string | null; parkedOwner: string | null }): string | null {
+  return input.sessionOwner ?? input.parkedOwner ?? input.headerRunId;
+}
+
 /** What a started session whose task did not arrive is told. */
 export function handoffPrompt(from: string, messageId: number): string {
   return `${from} started this session to do a task for it, sent to you as Switchboard message #${messageId}. Read it with sb_inbox and carry it out.`;
@@ -2878,6 +2897,31 @@ export class RunManager {
    * session reporting is not the one this run asked for, so the caller drops it on the floor
    * rather than putting it on the board under this run's name.
    */
+  /**
+   * The run a hook is about, and its conversation brought up to date; null when nothing owns it.
+   *
+   * Every hook comes through here, so this is where a session that has moved — a `/clear`, a
+   * background job, a resume — is followed, and where one that belongs to nobody is dropped.
+   */
+  ownerOfHook(headerRunId: string | null, sessionId: string, witness: RebindWitness): string | null {
+    const owner = hookOwner({
+      headerRunId,
+      sessionOwner: this.bySession(sessionId)?.id ?? null,
+      parkedOwner: this.runOfParkedJob(sessionId),
+    });
+    if (owner === null) return null;
+    return this.rebind(owner, sessionId, witness) ? owner : null;
+  }
+
+  /** The run whose own process moved this conversation into a Claude Code background job, if any. */
+  private runOfParkedJob(sessionId: string): string | null {
+    for (const r of this.db.all<RunRow>("SELECT * FROM runs WHERE status <> 'exited' AND pid IS NOT NULL")) {
+      const parked = this.registryEntry(r, r.pid!)?.parkedJobId;
+      if (parked && sessionId.startsWith(parked)) return r.id;
+    }
+    return null;
+  }
+
   rebind(runId: string, sessionId: string, witness: RebindWitness): boolean {
     const r = this.row(runId);
     if (!r) return true;
