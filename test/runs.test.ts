@@ -22,6 +22,7 @@ import {
   earlierDeadline,
   mergePending,
   respawnPlacement,
+  swapMethod,
   sessionDir,
   titleDecision,
   type PendingRespawn,
@@ -1131,5 +1132,23 @@ describe('one mark, wherever a session is shown', () => {
     ];
     const tones = states.map((s) => sessionMark(run(s))!.tone);
     assert.equal(new Set(tones).size, states.length, 'each state is its own tone, or two would look alike');
+  });
+});
+
+describe('how a session is moved to another subscription', () => {
+  const live = { hotSwapOn: true, privateCopy: true, attached: true, running: true };
+  it('moves a running session on its own copy of its login in place', () => {
+    assert.equal(swapMethod(live), 'hot');
+  });
+
+  it('restarts it when there is no copy to rewrite, or no process reading one', () => {
+    assert.equal(swapMethod({ ...live, privateCopy: false }), 'restart', 'started before hot swap, or on macOS');
+    assert.equal(swapMethod({ ...live, attached: false }), 'restart', 'no terminal attached');
+    assert.equal(swapMethod({ ...live, running: false }), 'restart', 'its claude is gone');
+  });
+
+  it('restarts it when hot swap is off, or when it was to come back in a new terminal anyway', () => {
+    assert.equal(swapMethod({ ...live, hotSwapOn: false }), 'restart');
+    assert.equal(swapMethod({ ...live, fresh: true }), 'restart');
   });
 });

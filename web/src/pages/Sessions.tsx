@@ -336,7 +336,8 @@ function SessionRow({
                   {r.lastSwap && (
                     <span className="dim small">
                       {' '}
-                      · {r.lastSwap.trigger ? triggerLabel(r.lastSwap.trigger) : r.lastSwap.reason} {timeAgo(r.lastSwap.ts, now)}
+                      · {r.lastSwap.trigger ? triggerLabel(r.lastSwap.trigger) : r.lastSwap.reason}
+                      {r.lastSwap.hot ? ', in place' : ''} {timeAgo(r.lastSwap.ts, now)}
                     </span>
                   )}
                 </span>

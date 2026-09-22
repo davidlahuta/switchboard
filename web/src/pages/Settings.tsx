@@ -329,6 +329,18 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
 
         <div className="setting">
           <div className="setting-text">
+            <div className="setting-name">Swap without restarting</div>
+            <div className="setting-desc">
+              Give each session its own copy of its login, so a swap only rewrites that copy: the session keeps running, mid-turn
+              and with its subagents, and its next request goes out on the other subscription. Applies to sessions started or
+              restarted while it is on; the rest swap by restarting.
+            </div>
+          </div>
+          <Toggle checked={draft.hotSwap} onChange={(v) => set('hotSwap', v)} label="Swap without restarting" />
+        </div>
+
+        <div className="setting">
+          <div className="setting-text">
             <div className="setting-name">Proactive swap</div>
             <div className="setting-desc">
               Swap idle sessions before they hit the limit, once their subscription crosses the threshold. A swap can only

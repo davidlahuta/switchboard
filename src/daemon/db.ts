@@ -349,6 +349,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE runs ADD COLUMN creds_sub TEXT;
   ALTER TABLE runs ADD COLUMN host_sub TEXT;
   `,
+  `
+  -- 1 for a swap made in place, by rewriting the session's own login rather than restarting it.
+  ALTER TABLE swaps ADD COLUMN hot INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;
