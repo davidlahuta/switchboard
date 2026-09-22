@@ -23,6 +23,7 @@ import type {
 } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, readJson, writeRuntimeJson } from './claude.ts';
+import { CredentialSync } from './credsync.ts';
 import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
 import { newestSourceMtime } from './source.ts';
@@ -70,6 +71,8 @@ interface RunRow {
   auto_compact_tokens: number | null;
   skip_permissions: number | null;
   diff_panel: number | null;
+  creds_sub: string | null;
+  host_sub: string | null;
   claude_title: string | null;
   continue_on_resume: number | null;
   last_viewed_at: string | null;
@@ -738,7 +741,41 @@ export class RunManager {
     this.coord = coord;
     this.launcher = launcher;
     this.models = models;
+    this.creds = new CredentialSync({
+      holders: () =>
+        this.db
+          .all<{ id: string; creds_sub: string }>("SELECT id, creds_sub FROM runs WHERE creds_sub IS NOT NULL AND status <> 'exited'")
+          .map((r) => ({ runId: r.id, subscriptionId: r.creds_sub })),
+      canonicalFile: (id) => this.subs.credentialsFile(id),
+      subscriptionOfAccount: (email) => this.subs.subscriptionOfAccount(email),
+      accountOf: (token) => this.subs.accountOfToken(token),
+      renew: (id) => this.subs.renewLogin(id),
+    });
     this.loadPending();
+  }
+
+  /** Each session's own copy of its login; see CredentialSync. */
+  readonly creds: CredentialSync;
+
+  /**
+   * Keep every session's login current, and let go of the copies of sessions that have ended. A run
+   * that exits keeps its row, and its copy would otherwise go on being renewed for nobody.
+   */
+  async syncCredentials(): Promise<void> {
+    for (const r of this.db.all<{ id: string }>("SELECT id FROM runs WHERE creds_sub IS NOT NULL AND status = 'exited'")) {
+      this.creds.release(r.id);
+      this.db.run('UPDATE runs SET creds_sub = NULL WHERE id = ?', r.id);
+    }
+    await this.creds.tick();
+  }
+
+  /**
+   * The profile a run's process was launched in. It is the subscription's, except after a hot swap,
+   * which changes the account a process bills without moving it: the files it keeps about itself are
+   * still where it started.
+   */
+  private hostDir(r: RunRow): string | undefined {
+    return this.subs.row(r.host_sub ?? r.subscription_id)?.config_dir;
   }
 
   start(): void {
@@ -930,7 +967,7 @@ export class RunManager {
     const key = sessionFileKey(r.id, r.session_id, name);
     const cached = this.sessionFiles.get(key);
     if (cached && fs.existsSync(cached)) return cached;
-    const roots = [this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR].filter((x): x is string => !!x);
+    const roots = [...new Set([this.hostDir(r), this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR])].filter((x): x is string => !!x);
     const remember = (file: string): string => {
       this.sessionFiles.set(key, file);
       return file;
@@ -1255,6 +1292,19 @@ export class RunManager {
     return this.dto(r);
   }
 
+  /**
+   * The directory a process about to start on a subscription reads its login from, or null to leave
+   * it on the profile's own file. Private whenever hot swap is on; not on macOS, where the login is in
+   * the keychain under a name derived from this same directory, so a fresh one would find nothing.
+   * Recorded on the run either way, along with the profile it is being launched in.
+   */
+  private privateLogin(r: RunRow, subscriptionId: string): string | null {
+    const dir = getSettings(this.db).hotSwap && process.platform !== 'darwin' ? this.creds.assign(r.id, subscriptionId) : null;
+    if (!dir) this.creds.release(r.id);
+    this.db.run('UPDATE runs SET creds_sub = ?, host_sub = ? WHERE id = ?', dir ? subscriptionId : null, subscriptionId, r.id);
+    return dir;
+  }
+
   private buildSpec(r: RunRow, subscriptionId: string, resume: boolean): SpawnSpec {
     const claude = findClaude();
     if (!claude) throw new Error('claude executable not found on PATH');
@@ -1314,7 +1364,7 @@ export class RunManager {
       cwd: resume ? this.homeDir(r) : r.cwd,
       file: cmd.file,
       args: cmd.args,
-      env: { ...this.subs.envFor(subscriptionId), SWITCHBOARD_RUN_ID: r.id, SWITCHBOARD_URL: DAEMON_URL },
+      env: { ...this.subs.envFor(subscriptionId), CLAUDE_SECURESTORAGE_CONFIG_DIR: this.privateLogin(r, subscriptionId), SWITCHBOARD_RUN_ID: r.id, SWITCHBOARD_URL: DAEMON_URL },
       title: r.name,
       subscriptionLabel: sub.label,
     };
@@ -2513,7 +2563,7 @@ export class RunManager {
 
   /** The conversation Claude Code says a process is in, or null if it does not say. */
   private registrySession(r: RunRow, pid: number): string | null {
-    for (const root of [this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR]) {
+    for (const root of new Set([this.hostDir(r), this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR])) {
       if (!root) continue;
       const entry = readJson<{ sessionId?: unknown }>(path.join(root, 'sessions', `${pid}.json`));
       if (typeof entry?.sessionId === 'string') return entry.sessionId;

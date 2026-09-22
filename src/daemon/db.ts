@@ -340,6 +340,15 @@ const MIGRATIONS: string[] = [
   -- Whether Claude Code's diff panel opens beside this session. NULL follows the global default.
   ALTER TABLE runs ADD COLUMN diff_panel INTEGER;
   `,
+  `
+  -- A session's own copy of its login, for moving it between subscriptions without restarting it.
+  -- creds_sub is the subscription whose login that copy holds (NULL: the session reads its profile's
+  -- own file, as sessions launched before this did). host_sub is the subscription whose profile the
+  -- process was launched in, which a hot swap does not change: the files a process keeps about
+  -- itself, like sessions/<pid>.json, are in that profile whatever account it is billing.
+  ALTER TABLE runs ADD COLUMN creds_sub TEXT;
+  ALTER TABLE runs ADD COLUMN host_sub TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

@@ -397,6 +397,12 @@ export interface Settings {
   defaultSkipPermissions: boolean;
   /** Pre-tick "open the diff panel" in the new-session dialog */
   defaultDiffPanel: boolean;
+  /**
+   * Move a session to another subscription without restarting it, by changing the login it reads.
+   * Needs the session to have been started with its own copy of its login, which every session is
+   * while this is on; sessions started before fall back to a restart.
+   */
+  hotSwap: boolean;
   /** Swap automatically when a session hits a usage limit */
   autoSwap: boolean;
   /**

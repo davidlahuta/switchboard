@@ -60,6 +60,12 @@ const PARENT_SESSION_ENV = new Set([
    * transcript sat untouched on disk; see rebindDecision for the other half of the fix.
    */
   'SWITCHBOARD_RUN_ID',
+  /*
+   * Where a hosted session keeps its own copy of its login (see CredentialSync). A claude started
+   * from inside that session would otherwise read and renew that copy as its own; anything
+   * Switchboard launches is given its own value, or none, explicitly.
+   */
+  'CLAUDE_SECURESTORAGE_CONFIG_DIR',
 ]);
 
 /**
