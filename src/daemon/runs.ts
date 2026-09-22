@@ -1358,6 +1358,21 @@ export class RunManager {
     return this.dto(this.row(runId)!);
   }
 
+  /**
+   * Put a session on another model, from the next time it comes back: the model is a launch flag, so
+   * nothing changes in the conversation that is running now. A `/model` inside the session still
+   * wins afterwards, the same as for a session started on it (see syncModel).
+   */
+  setModel(runId: string, model: string | null): Run {
+    const r = this.liveRun(runId);
+    if (model) this.models.validate(model);
+    if ((r.model ?? null) === model) return this.dto(r);
+    this.db.run('UPDATE runs SET model = ? WHERE id = ?', model, runId);
+    log.info('session model set', { run: runId, model, was: r.model });
+    this.bus.invalidate('state');
+    return this.dto(this.row(runId)!);
+  }
+
   rename(runId: string, name: string): Run {
     const r = this.row(runId);
     if (!r) throw httpError(404, 'Unknown session');
