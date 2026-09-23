@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { WebSocket } from 'ws';
-import { DAEMON_URL, HOME_CLAUDE_DIR } from '../config.ts';
+import { DAEMON_URL, HOME_CLAUDE_DIR, RUNTIME_DIR } from '../config.ts';
 import { logger } from '../log.ts';
 import { tabTitle } from '../shared/marks.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
@@ -1572,6 +1572,13 @@ export class RunManager {
     const runSettings: Record<string, unknown> = {
       autoCompactEnabled: this.dto(r).autoCompact,
       autoCompactWindow: this.dto(r).autoCompactTokens,
+      /*
+       * Claude Code's full-screen renderer speeds the wheel up when wheel events come quickly. The web
+       * terminal turns a drag or a trackpad into wheel reports paced by distance, one per line, and
+       * acceleration read that pacing as a fast wheel: the same movement of a finger scrolled a
+       * different amount each time. Without it one report is one line, here and in any terminal.
+       */
+      wheelScrollAccelerationEnabled: false,
     };
     if (!hooksInstalledIn(path.join(sub.config_dir, 'settings.json'))) runSettings.hooks = hooksConfig();
     args.push('--settings', writeRuntimeJson(`settings-${r.id}.json`, runSettings));
@@ -1610,7 +1617,7 @@ export class RunManager {
   private mirror(r: RunRow, cols?: number, rows?: number): TermMirror {
     let m = this.mirrors.get(r.id);
     if (!m) {
-      m = new TermMirror(cols ?? r.cols, rows ?? r.rows);
+      m = new TermMirror(cols ?? r.cols, rows ?? r.rows, path.join(RUNTIME_DIR, 'screens', `${r.id}.log`));
       this.mirrors.set(r.id, m);
     } else if (cols && rows) {
       m.resize(cols, rows);
@@ -1710,7 +1717,8 @@ export class RunManager {
       this.setStatus(r.id, 'running');
       // Attached with its claude running is back, whichever of it and its shim reached us first.
       this.reviveSucceeded(r.id);
-      mirror.reset();
+      // Not reset: the copy was rebuilt from what the session printed before the daemon restarted,
+      // and that history is what a viewer scrolls back through. The redraw brings the screen current.
       this.send(r.id, { type: 'redraw' });
     } else {
       const spec = this.buildSpec(r, r.subscription_id, bool(r.resume));
@@ -2947,7 +2955,7 @@ export class RunManager {
     if (this.conns.has(runId)) throw httpError(409, 'Session is still connected; stop it first');
     this.db.run('DELETE FROM runs WHERE id = ?', runId);
     this.db.run('DELETE FROM swaps WHERE run_id = ?', runId);
-    this.mirrors.get(runId)?.dispose();
+    this.mirrors.get(runId)?.dispose(true);
     this.mirrors.delete(runId);
     this.resumeLostReported.delete(runId);
     this.bus.invalidate('state');

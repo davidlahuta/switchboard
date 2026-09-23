@@ -60,6 +60,69 @@ describe('how far back a viewer can scroll when it opens a session', () => {
   });
 });
 
+describe('a session’s screen history across a daemon restart', () => {
+  const fsMod = () => import('node:fs');
+  const tmpLog = async (): Promise<string> => {
+    const [{ default: fs }, { default: os }, { default: path }] = await Promise.all([fsMod(), import('node:os'), import('node:path')]);
+    return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sb-screen-')), 'run.log');
+  };
+
+  it('is rebuilt from what the session printed before the restart', async () => {
+    const log = await tmpLog();
+    const before = new TermMirror(80, 24, log);
+    for (let i = 1; i <= 1200; i++) before.write(`turn ${i}\r\n`);
+    before.dispose(); // the daemon going down
+    const after = new TermMirror(80, 24, log);
+    after.write('after the restart\r\n');
+    const data = await snapshotOf(after);
+    assert.match(data, /turn 1\b/, 'scrolled back past the restart to the start');
+    assert.match(data, /after the restart/);
+    after.dispose(true);
+  });
+
+  it('keeps the full-screen renderer’s modes too, so a viewer after a restart can still scroll it', async () => {
+    const log = await tmpLog();
+    const before = new TermMirror(80, 24, log);
+    before.write('\x1b[?1049h\x1b[?1003h\x1b[?1006h');
+    before.dispose();
+    const after = new TermMirror(80, 24, log);
+    const data = await snapshotOf(after);
+    assert.match(data, /\x1b\[\?1003h/);
+    assert.match(data, /\x1b\[\?1006h/);
+    after.dispose(true);
+  });
+
+  it('starts over for a new process, and is deleted with the session', async () => {
+    const { default: fs } = await fsMod();
+    const log = await tmpLog();
+    const mirror = new TermMirror(80, 24, log);
+    mirror.write('old process\r\n');
+    mirror.reset();
+    mirror.write('new process\r\n');
+    mirror.dispose();
+    const again = new TermMirror(80, 24, log);
+    const data = await snapshotOf(again);
+    assert.doesNotMatch(data, /old process/);
+    assert.match(data, /new process/);
+    again.dispose(true);
+    assert.equal(fs.existsSync(log), false);
+  });
+
+  it('stays bounded: a log past its limit keeps its most recent part, from a line start', async () => {
+    const { default: fs } = await fsMod();
+    const log = await tmpLog();
+    const mirror = new TermMirror(80, 24, log);
+    const line = 'x'.repeat(1000) + '\r\n';
+    for (let i = 0; i < 9000; i++) mirror.write(line); // about 9 MB
+    mirror.write('the very end\r\n');
+    const size = fs.statSync(log).size;
+    assert.ok(size <= 8 * 1024 * 1024, `cut back, at ${size} bytes`);
+    assert.ok(fs.readFileSync(log, 'utf8').startsWith('x'), 'starts at the beginning of a line');
+    assert.match(fs.readFileSync(log, 'utf8'), /the very end/);
+    mirror.dispose(true);
+  });
+});
+
 describe('what counts as a terminal host running old code', () => {
   it('is the runner and what it imports, not the daemon or the web UI', async () => {
     const { runnerSourceFiles } = await import('../src/daemon/source.ts');

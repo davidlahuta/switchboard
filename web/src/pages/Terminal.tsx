@@ -19,6 +19,29 @@ import { faviconFor, resetTab, setFavicon } from '../lib/tabmark.ts';
 
 const FONT = '"Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace';
 const FONT_KEY = 'sb.term.fontSize';
+
+/**
+ * The grid that fills the box, all of its width.
+ *
+ * FitAddon keeps room for a vertical scrollbar whenever the terminal has scrollback, and xterm
+ * reports that scrollbar as 15 px wide even when it is not drawn (it falls back to 15 when it
+ * measures nothing). This view hides it, so those pixels were a strip of empty space down the
+ * right of every session, a column or two lost from the grid. Same arithmetic as FitAddon, less
+ * the scrollbar.
+ */
+function fullWidthDimensions(term: XTerm, fitAddon: FitAddon): { cols: number; rows: number } | undefined {
+  const dims = fitAddon.proposeDimensions();
+  const cell = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number } } } } } })._core?._renderService
+    ?.dimensions?.css?.cell?.width;
+  const el = term.element;
+  const parent = el?.parentElement;
+  if (!dims || !cell || !el || !parent) return dims;
+  const px = (style: CSSStyleDeclaration, prop: string): number => parseInt(style.getPropertyValue(prop)) || 0;
+  const outer = window.getComputedStyle(parent);
+  const inner = window.getComputedStyle(el);
+  const width = Math.max(0, px(outer, 'width') - px(inner, 'padding-left') - px(inner, 'padding-right'));
+  return { cols: Math.max(2, Math.floor(width / cell)), rows: dims.rows };
+}
 const COMPOSER_KEY = 'sb.term.composer';
 const MIN_FONT = 6;
 const MAX_FONT = 28;
@@ -171,7 +194,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     if (!term || !fitAddon || !host || !box) return;
     host.style.top = '0';
     host.style.height = '';
-    const dims = fitAddon.proposeDimensions();
+    const dims = fullWidthDimensions(term, fitAddon);
     if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
     const cols = Math.max(20, dims.cols);
     const rows = Math.max(6, dims.rows);
@@ -210,8 +233,6 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
        * sending arrow keys · use PgUp/PgDn to scroll" and nothing moved.
        */
       scrollback: 10_000,
-      // The wheel glides a short way instead of jumping a block at a time.
-      smoothScrollDuration: 110,
       allowProposedApi: false,
       macOptionIsMeta: true,
       rightClickSelectsWord: true,
@@ -267,7 +288,9 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
      * going and slows to a stop.
      */
     const screen = host.querySelector('.xterm-screen') ?? host;
-    const APP_LINES_PER_REPORT = 3;
+    // Claude Code scrolls one line per wheel report (its "wheelup: scroll:lineUp"), with its wheel
+    // acceleration turned off for sessions Switchboard starts, so one report is one line of travel.
+    const APP_LINES_PER_REPORT = 1;
     const synthetic = new WeakSet<Event>();
     const tracking = (): boolean => term.modes.mouseTrackingMode !== 'none';
     const rowHeight = (): number => Math.max(8, screen.getBoundingClientRect().height / term.rows || 17);
