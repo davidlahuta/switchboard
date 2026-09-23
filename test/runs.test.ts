@@ -1003,6 +1003,23 @@ describe('session model sync', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('says nothing about a session relaunched on another model until it has run a turn there', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-transcript-'));
+    const file = path.join(dir, 't.jsonl');
+    const turn = (model: string, timestamp: string): string =>
+      JSON.stringify({ type: 'assistant', isSidechain: false, timestamp, message: { model } }) + '\n';
+    try {
+      // Idle on Opus 5 since the 18th; relaunched on Opus 5.5 on the 23rd.
+      fs.writeFileSync(file, turn('claude-opus-5', '2026-09-18T09:37:58.626Z'));
+      const launched = Date.parse('2026-09-23T18:14:00.000Z');
+      assert.equal(readSessionModel(file, launched), null, 'the old turn is not what it runs now');
+      fs.appendFileSync(file, turn('claude-opus-5-5', '2026-09-23T18:20:00.000Z'));
+      assert.equal(readSessionModel(file, launched), 'claude-opus-5-5');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('per-session claude arguments', () => {
