@@ -1580,6 +1580,8 @@ export class RunManager {
        * different amount each time. Without it one report is one line, here and in any terminal.
        */
       wheelScrollAccelerationEnabled: false,
+      // Full-screen renderer, always; see CLAUDE_CODE_NO_FLICKER in the environment below.
+      tui: 'fullscreen',
     };
     if (!hooksInstalledIn(path.join(sub.config_dir, 'settings.json'))) runSettings.hooks = hooksConfig();
     args.push('--settings', writeRuntimeJson(`settings-${r.id}.json`, runSettings));
@@ -1605,6 +1607,14 @@ export class RunManager {
         CLAUDE_SECURESTORAGE_CONFIG_DIR: this.privateLogin(r, subscriptionId),
         // One wheel report is the same number of lines in every session; see shared/scroll.ts.
         CLAUDE_CODE_SCROLL_SPEED: String(WHEEL_LINES),
+        /*
+         * Always the full-screen renderer. Left to Claude Code, the renderer is chosen per account by
+         * a server-side rollout, so sessions on one subscription drew full-screen and on another the
+         * classic way, and the web terminal had to serve two interfaces that scroll, select and copy
+         * differently. This is the first thing Claude Code checks, ahead of its own auto-disable
+         * after a crash; the per-run settings say the same, for anything that reads only those.
+         */
+        CLAUDE_CODE_NO_FLICKER: '1',
         SWITCHBOARD_RUN_ID: r.id,
         SWITCHBOARD_URL: DAEMON_URL,
       },

@@ -34,6 +34,7 @@ const ICONS = {
   zoomOut: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM21 21l-4.3-4.3M8 11h6',
   fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
   paste: 'M9 4h6v3H9zM7 5H5v16h14V5h-2',
+  copy: 'M9 9h11v12H9zM5 15V3h11',
   link: 'M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1',
   phone: 'M7 2h10v20H7zM11 18h2',
   warn: 'M12 3l10 18H2zM12 10v5M12 18h.01',
