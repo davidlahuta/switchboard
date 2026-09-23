@@ -7,6 +7,12 @@ const { SerializeAddon } = serializePkg;
 
 type Send = (frame: TermServerFrame) => void;
 
+/**
+ * Lines of history a viewer is sent when it opens a session. It was 500, and a session on the plain
+ * renderer could be scrolled back only that far in the browser: one long turn is more than that.
+ */
+export const SNAPSHOT_HISTORY = 5000;
+
 /** The DEC private mode that selects each mouse encoding xterm knows; DEFAULT needs none. */
 const ENCODING_MODE: Record<string, string> = { SGR: '[?1006h', SGR_PIXELS: '[?1016h', URXVT: '[?1015h', UTF8: '[?1005h' };
 
@@ -41,7 +47,8 @@ export class TermMirror {
   constructor(cols: number, rows: number) {
     this.cols = cols;
     this.rows = rows;
-    this.term = new Terminal({ cols, rows, scrollback: 2000, allowProposedApi: true });
+    // Enough history that a viewer opening the plain renderer can scroll back through the session.
+    this.term = new Terminal({ cols, rows, scrollback: 10_000, allowProposedApi: true });
     this.serializer = new SerializeAddon();
     this.term.loadAddon(this.serializer);
   }
@@ -92,7 +99,7 @@ export class TermMirror {
       if (!this.clients.has(client)) return;
       // xterm keeps the encoding on an internal service the public API does not expose.
       const encoding = (this.term as unknown as { _core?: { coreMouseService?: { activeEncoding?: string } } })._core?.coreMouseService?.activeEncoding;
-      const data = this.serializer.serialize({ scrollback: 500 }) + mouseEncodingSequence(encoding);
+      const data = this.serializer.serialize({ scrollback: SNAPSHOT_HISTORY }) + mouseEncodingSequence(encoding);
       send({ type: 'snapshot', data, cols: this.cols, rows: this.rows });
       const queued = client.queue ?? [];
       client.queue = null;

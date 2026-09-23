@@ -49,6 +49,17 @@ describe('what a web viewer is told about the mouse when it joins mid-session', 
   });
 });
 
+describe('how far back a viewer can scroll when it opens a session', () => {
+  it('gets thousands of lines of a plain-renderer session, not the last few hundred', async () => {
+    const mirror = new TermMirror(80, 24);
+    for (let i = 1; i <= 3000; i++) mirror.write(`line ${i}\r\n`);
+    const data = await snapshotOf(mirror);
+    assert.match(data, /line 1\b/, 'the first of 3000 lines is still there to scroll back to');
+    assert.match(data, /line 3000\b/);
+    mirror.dispose();
+  });
+});
+
 describe('what counts as a terminal host running old code', () => {
   it('is the runner and what it imports, not the daemon or the web UI', async () => {
     const { runnerSourceFiles } = await import('../src/daemon/source.ts');
