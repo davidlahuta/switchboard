@@ -26,7 +26,7 @@ import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, re
 import { CredentialSync } from './credsync.ts';
 import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
-import { newestSourceMtime } from './source.ts';
+import { newestRunnerSourceMtime } from './source.ts';
 import { readCustomTitle, readSessionModel } from './transcript.ts';
 import { hooksInstalledIn } from './integration.ts';
 import type { Launcher } from './launcher.ts';
@@ -1011,7 +1011,7 @@ export class RunManager {
 
   private runnerStale(runId: string): boolean {
     const started = this.runnerStartedAt.get(runId);
-    return started !== undefined && newestSourceMtime() > started;
+    return started !== undefined && newestRunnerSourceMtime() > started;
   }
 
   private dto(r: RunRow): Run {

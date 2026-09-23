@@ -201,10 +201,15 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       lineHeight: 1.1,
       theme: THEME,
       cursorBlink: true,
-      // No scrollback. This view mirrors a TUI that repaints its own frame: scrolling away from
-      // that frame shows history the session is about to overwrite, and leaves a scrollbar that
-      // does nothing useful. The desktop terminal keeps its own scrollback.
-      scrollback: 0,
+      /*
+       * Scrollback, because Claude Code has two renderers and picks one per account. The full-screen
+       * one draws on the alternate screen, which has no scrollback whatever this says, and takes
+       * the wheel itself through mouse tracking. The plain one writes the conversation into the
+       * terminal's own history like any command-line program — and with no history to scroll, the
+       * browser turned the wheel into arrow keys, which the session answered with "Scroll wheel is
+       * sending arrow keys · use PgUp/PgDn to scroll" and nothing moved.
+       */
+      scrollback: 5000,
       allowProposedApi: false,
       macOptionIsMeta: true,
       rightClickSelectsWord: true,
