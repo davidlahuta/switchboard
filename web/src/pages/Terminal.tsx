@@ -16,6 +16,7 @@ import { Icon, StatusPill } from '../components/ui.tsx';
 import { api, wsUrl } from '../lib/api.ts';
 import { href, navigate } from '../lib/router.ts';
 import { emitToast } from '../lib/toast.ts';
+import { osc52Text } from '../lib/clipboard.ts';
 import { faviconFor, resetTab, setFavicon } from '../lib/tabmark.ts';
 
 const FONT = '"Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace';
@@ -148,6 +149,10 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   // the grid goes through the browser's hidden input, where autocorrect and IME rewrite as they
   // please, and there is nowhere to see what you typed before you send it.
   const [composerOpen, setComposerOpen] = useState(() => readStorage(COMPOSER_KEY) !== '0');
+  /** Text the session copied that the browser would not let the page put on the clipboard unasked. */
+  const [copyReady, setCopyReady] = useState<string | null>(null);
+  const setCopyReadyRef = useRef(setCopyReady);
+  setCopyReadyRef.current = setCopyReady;
   const [draft, setDraft] = useState(() => {
     try {
       return sessionStorage.getItem(`sb.term.draft.${runId}`) ?? '';
@@ -265,6 +270,14 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
         }
         return false;
       }
+      // Ctrl/Cmd+C with text selected in the page (Shift+drag, which the session does not see) copies
+      // it, as in any terminal; with nothing selected it is ^C, the session's interrupt.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'c' && term.hasSelection()) {
+        e.preventDefault();
+        void navigator.clipboard?.writeText(term.getSelection()).catch(() => setCopyReadyRef.current(term.getSelection()));
+        term.clearSelection();
+        return false;
+      }
       // Hand Ctrl/Cmd+V back to the browser. xterm would otherwise claim it and send ^V to the
       // session, which is not a paste anywhere; letting the paste event through reaches xterm's
       // own paste handler, brackets included.
@@ -272,6 +285,17 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       return true;
     });
     if (window.matchMedia('(pointer: fine)').matches) term.focus();
+
+    // What the session copies lands on this device's clipboard; see osc52Text.
+    term.parser.registerOscHandler(52, (data) => {
+      const text = osc52Text(data);
+      if (text === null) return true;
+      const clipboard = navigator.clipboard;
+      if (!clipboard?.writeText) setCopyReadyRef.current(text);
+      // A phone's browser may refuse a write it cannot tie to a tap; the key bar then offers one.
+      else clipboard.writeText(text).then(() => setCopyReadyRef.current(null), () => setCopyReadyRef.current(text));
+      return true;
+    });
 
     /*
      * Scrolling, by distance rather than by event.
@@ -300,12 +324,31 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
      */
     let owed = 0;
     let pacer = 0;
+    /*
+     * Where the reports say the wheel is: the finger, or the pointer. xterm reports a wheel at the
+     * cell under it and sends nothing for one outside the grid, and a synthetic event has no position
+     * of its own — (0, 0), above the terminal — so every report was dropped and a drag moved nothing.
+     * Claude Code may also scroll whatever is under that point, so it has to be the real one.
+     */
+    let at = { x: 0, y: 0 };
+    const aimAt = (x: number, y: number): void => {
+      at = { x, y };
+    };
     const sendReport = (): void => {
       pacer = 0;
       if (!owed) return;
       const dir = Math.sign(owed);
       owed -= dir;
-      const ev = new WheelEvent('wheel', { deltaY: dir, deltaMode: WheelEvent.DOM_DELTA_LINE, bubbles: true, cancelable: true });
+      const r = screen.getBoundingClientRect();
+      const inside = at.x > r.left && at.x < r.right && at.y > r.top && at.y < r.bottom;
+      const ev = new WheelEvent('wheel', {
+        deltaY: dir,
+        deltaMode: WheelEvent.DOM_DELTA_LINE,
+        clientX: inside ? at.x : r.left + r.width / 2,
+        clientY: inside ? at.y : r.top + r.height / 2,
+        bubbles: true,
+        cancelable: true,
+      });
       synthetic.add(ev);
       screen.dispatchEvent(ev);
       if (owed) pacer = window.setTimeout(sendReport, WHEEL_REPORT_GAP_MS);
@@ -329,6 +372,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     // A trackpad or wheel on a session that scrolls itself: paced by distance, like a finger.
     term.attachCustomWheelEventHandler((e) => {
       if (synthetic.has(e) || !tracking()) return true;
+      aimAt(e.clientX, e.clientY);
       const px =
         e.deltaMode === WheelEvent.DOM_DELTA_LINE
           ? e.deltaY * rowHeight()
@@ -341,11 +385,21 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     });
 
     /*
-     * Touch. xterm's own touch scrolling gives up the moment a program tracks the mouse, which the
-     * full-screen renderer always does, and the touch then reached Safari with nothing to scroll and
-     * bounced the page. Taps are left alone so the session still receives them; only a deliberate
-     * vertical drag is taken, and a drag that moves selection handles belongs to the selection.
+     * Touch, through pointer events.
+     *
+     * Touch events stay with the element the finger first landed on, and here that is a run of text
+     * the session redraws the moment it scrolls: the element is replaced, the rest of the touch goes
+     * to a node no longer on the page and never reaches this handler, and the view moved a line or
+     * three and stopped — sooner or later depending on when the redraw came. Pointer events are
+     * delivered to whatever is under the finger at each move, and the drag captures the pointer once
+     * it is recognised, so it keeps coming however the screen changes beneath it.
+     *
+     * xterm's own touch scrolling gives up the moment a program tracks the mouse, which the
+     * full-screen renderer always does. Taps are left alone so the session still receives them; only
+     * a deliberate vertical drag is taken, and a drag that moves selection handles belongs to the
+     * selection.
      */
+    let finger: number | null = null; // the pointer being followed
     let startY = 0;
     let lastY = 0;
     let travelled = 0;
@@ -353,8 +407,8 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     let samples: Array<{ t: number; y: number }> = [];
     let glide = 0;
     /*
-     * Finger movement is collected and applied once per frame. Touch events arrive unevenly — two
-     * in one frame, none in the next — and applying each as it came moved the view in uneven jumps.
+     * Finger movement is collected and applied once per frame. Moves arrive unevenly — two in one
+     * frame, none in the next — and applying each as it came moved the view in uneven jumps.
      */
     let moved = 0;
     let moveFrame = 0;
@@ -372,18 +426,25 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       moved = 0;
       owed = 0; // a touch stops the view where it is, including reports not yet sent
     };
-    const onTouchStart = (e: TouchEvent) => {
+    const isTouch = (e: PointerEvent): boolean => e.pointerType === 'touch' || e.pointerType === 'pen';
+    const onPointerDown = (e: PointerEvent) => {
+      if (!isTouch(e)) return;
       stopGlide();
-      if (e.touches.length !== 1) return;
-      startY = lastY = e.touches[0].clientY;
+      if (finger !== null) {
+        finger = null; // a second finger: a pinch or a two-finger gesture, not a scroll
+        return;
+      }
+      finger = e.pointerId;
+      startY = lastY = e.clientY;
+      aimAt(e.clientX, e.clientY);
       travelled = 0;
       dragging = false;
       pending = 0;
       samples = [{ t: performance.now(), y: lastY }];
     };
-    const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length !== 1) return;
-      const y = e.touches[0].clientY;
+    const onPointerMove = (e: PointerEvent) => {
+      if (e.pointerId !== finger) return;
+      const y = e.clientY;
       const step = lastY - y;
       lastY = y;
       travelled += Math.abs(step);
@@ -392,6 +453,13 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       while (samples.length > 2 && now - samples[0].t > 100) samples.shift();
       if (!dragging && travelled < 8) return;
       if (!window.getSelection()?.isCollapsed) return;
+      if (!dragging) {
+        try {
+          host.setPointerCapture(e.pointerId);
+        } catch {
+          // already released: the move still counts
+        }
+      }
       e.preventDefault();
       e.stopPropagation();
       // The first frame of a drag carries the distance it took to recognise it as one.
@@ -399,12 +467,14 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       dragging = true;
       if (!moveFrame) moveFrame = requestAnimationFrame(flushMove);
     };
-    const onTouchEnd = () => {
+    const onPointerUp = (e: PointerEvent) => {
+      if (e.pointerId !== finger) return;
+      finger = null;
       if (moveFrame) {
         cancelAnimationFrame(moveFrame);
         flushMove();
       }
-      if (!dragging || samples.length < 2) return;
+      if (e.type === 'pointercancel' || !dragging || samples.length < 2) return;
       const first = samples[0];
       const last = samples[samples.length - 1];
       if (performance.now() - last.t > 60) return; // the finger stopped before it lifted
@@ -419,16 +489,18 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       };
       glide = requestAnimationFrame(frame);
     };
-    host.addEventListener('touchstart', onTouchStart, { capture: true, passive: true });
-    host.addEventListener('touchmove', onTouchMove, { capture: true, passive: false });
-    host.addEventListener('touchend', onTouchEnd, { capture: true, passive: true });
+    host.addEventListener('pointerdown', onPointerDown, { capture: true, passive: true });
+    host.addEventListener('pointermove', onPointerMove, { capture: true, passive: false });
+    host.addEventListener('pointerup', onPointerUp, { capture: true, passive: true });
+    host.addEventListener('pointercancel', onPointerUp, { capture: true, passive: true });
 
     return () => {
       stopGlide();
       window.clearTimeout(pacer);
-      host.removeEventListener('touchstart', onTouchStart, { capture: true });
-      host.removeEventListener('touchmove', onTouchMove, { capture: true });
-      host.removeEventListener('touchend', onTouchEnd, { capture: true });
+      host.removeEventListener('pointerdown', onPointerDown, { capture: true });
+      host.removeEventListener('pointermove', onPointerMove, { capture: true });
+      host.removeEventListener('pointerup', onPointerUp, { capture: true });
+      host.removeEventListener('pointercancel', onPointerUp, { capture: true });
       sub.dispose();
       term.dispose();
       termRef.current = null;
@@ -910,6 +982,23 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             {k.label}
           </button>
         ))}
+        {copyReady !== null && (
+          <button
+            type="button"
+            className="key key-wide key-ready"
+            onMouseDown={keepFocus}
+            onClick={() => {
+              void navigator.clipboard?.writeText(copyReady).then(
+                () => emitToast('success', 'Copied'),
+                () => emitToast('error', 'This browser would not allow copying'),
+              );
+              setCopyReady(null);
+            }}
+            aria-label="Copy the selection"
+          >
+            <Icon name="copy" size={14} /> Copy
+          </button>
+        )}
         <button type="button" className="key key-wide" onMouseDown={keepFocus} onClick={() => void paste()} aria-label="Paste from clipboard" disabled={exited}>
           <Icon name="paste" size={14} /> Paste
         </button>

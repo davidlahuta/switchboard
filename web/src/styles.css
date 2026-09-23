@@ -2798,6 +2798,11 @@ a.list-main:hover {
 .key:disabled {
   opacity: 0.4;
 }
+/* A copy the browser would not make unasked, waiting for a tap. */
+.key-ready {
+  border-color: #5aa2ff;
+  color: #8cc2ff;
+}
 .key-wide {
   min-width: 60px;
 }
