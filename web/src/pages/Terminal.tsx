@@ -209,7 +209,9 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
        * browser turned the wheel into arrow keys, which the session answered with "Scroll wheel is
        * sending arrow keys · use PgUp/PgDn to scroll" and nothing moved.
        */
-      scrollback: 5000,
+      scrollback: 10_000,
+      // The wheel glides a short way instead of jumping a block at a time.
+      smoothScrollDuration: 110,
       allowProposedApi: false,
       macOptionIsMeta: true,
       rightClickSelectsWord: true,
@@ -249,46 +251,123 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     });
     if (window.matchMedia('(pointer: fine)').matches) term.focus();
 
-    /**
-     * Drag to scroll, by turning the drag into the wheel events xterm already knows what to do
-     * with — which, while the session is tracking the mouse, means handing them to it so it
-     * scrolls its own view, exactly as a mouse wheel does on the desktop.
+    /*
+     * Scrolling, by distance rather than by event.
      *
-     * xterm has touch scrolling of its own but gives up the moment a program tracks the mouse,
-     * which Claude Code's interface always does. The touch then reached Safari with nothing to
-     * scroll and it bounced the whole page instead. Taps are left alone so the session still
-     * receives them; only a deliberate vertical drag is taken, and taking it stops the bounce.
+     * Claude Code draws one of two ways. The plain renderer writes into the terminal's own history,
+     * which xterm scrolls line by line. The full-screen renderer tracks the mouse and scrolls its own
+     * view a few lines for every wheel report it receives, and xterm sends one report per wheel
+     * event however small or large. So a trackpad, which fires a stream of tiny events, and a drag
+     * turned into one wheel event per touchmove, both drove it at the speed of the event stream
+     * rather than of the finger: a flick lurched, a slow drag stuttered, and nothing carried on after
+     * the finger lifted.
+     *
+     * So movement is measured in pixels and paid out in whole lines: to xterm's history directly, or
+     * to the session as one wheel report per APP_LINES_PER_REPORT lines of travel. A flick keeps
+     * going and slows to a stop.
      */
     const screen = host.querySelector('.xterm-screen') ?? host;
-    let anchor = 0;
+    const APP_LINES_PER_REPORT = 3;
+    const synthetic = new WeakSet<Event>();
+    const tracking = (): boolean => term.modes.mouseTrackingMode !== 'none';
+    const rowHeight = (): number => Math.max(8, screen.getBoundingClientRect().height / term.rows || 17);
+    let pending = 0; // pixels travelled and not yet scrolled
+    const scrollPixels = (px: number): void => {
+      pending += px;
+      const perStep = rowHeight() * (tracking() ? APP_LINES_PER_REPORT : 1);
+      const steps = Math.trunc(pending / perStep);
+      if (!steps) return;
+      pending -= steps * perStep;
+      if (!tracking()) {
+        term.scrollLines(steps);
+        return;
+      }
+      for (let i = 0; i < Math.abs(steps); i++) {
+        const ev = new WheelEvent('wheel', { deltaY: Math.sign(steps), deltaMode: WheelEvent.DOM_DELTA_LINE, bubbles: true, cancelable: true });
+        synthetic.add(ev);
+        screen.dispatchEvent(ev);
+      }
+    };
+
+    // A trackpad or wheel on a session that scrolls itself: paced by distance, like a finger.
+    term.attachCustomWheelEventHandler((e) => {
+      if (synthetic.has(e) || !tracking()) return true;
+      const px =
+        e.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? e.deltaY * rowHeight()
+          : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? e.deltaY * rowHeight() * term.rows
+            : e.deltaY;
+      scrollPixels(px);
+      e.preventDefault();
+      return false;
+    });
+
+    /*
+     * Touch. xterm's own touch scrolling gives up the moment a program tracks the mouse, which the
+     * full-screen renderer always does, and the touch then reached Safari with nothing to scroll and
+     * bounced the page. Taps are left alone so the session still receives them; only a deliberate
+     * vertical drag is taken, and a drag that moves selection handles belongs to the selection.
+     */
+    let lastY = 0;
     let travelled = 0;
     let dragging = false;
+    let samples: Array<{ t: number; y: number }> = [];
+    let glide = 0;
+    const stopGlide = (): void => {
+      if (glide) cancelAnimationFrame(glide);
+      glide = 0;
+    };
     const onTouchStart = (e: TouchEvent) => {
+      stopGlide();
       if (e.touches.length !== 1) return;
-      anchor = e.touches[0].clientY;
+      lastY = e.touches[0].clientY;
       travelled = 0;
       dragging = false;
+      pending = 0;
+      samples = [{ t: performance.now(), y: lastY }];
     };
     const onTouchMove = (e: TouchEvent) => {
       if (e.touches.length !== 1) return;
       const y = e.touches[0].clientY;
-      const step = anchor - y;
-      anchor = y;
+      const step = lastY - y;
+      lastY = y;
       travelled += Math.abs(step);
+      const now = performance.now();
+      samples.push({ t: now, y });
+      while (samples.length > 2 && now - samples[0].t > 100) samples.shift();
       if (!dragging && travelled < 8) return;
-      // A drag that is moving selection handles belongs to the selection, not to scrolling.
       if (!window.getSelection()?.isCollapsed) return;
       dragging = true;
       e.preventDefault();
       e.stopPropagation();
-      screen.dispatchEvent(new WheelEvent('wheel', { deltaY: step, deltaMode: 0, bubbles: true, cancelable: true }));
+      scrollPixels(step);
+    };
+    const onTouchEnd = () => {
+      if (!dragging || samples.length < 2) return;
+      const first = samples[0];
+      const last = samples[samples.length - 1];
+      if (performance.now() - last.t > 60) return; // the finger stopped before it lifted
+      let velocity = (first.y - last.y) / Math.max(1, last.t - first.t); // px per ms, in the scrolling direction
+      let then = performance.now();
+      const frame = (now: number) => {
+        const dt = Math.min(50, now - then);
+        then = now;
+        scrollPixels(velocity * dt);
+        velocity *= Math.pow(0.994, dt); // comes to rest in about a second and a half
+        glide = Math.abs(velocity) > 0.02 ? requestAnimationFrame(frame) : 0;
+      };
+      glide = requestAnimationFrame(frame);
     };
     host.addEventListener('touchstart', onTouchStart, { capture: true, passive: true });
     host.addEventListener('touchmove', onTouchMove, { capture: true, passive: false });
+    host.addEventListener('touchend', onTouchEnd, { capture: true, passive: true });
 
     return () => {
+      stopGlide();
       host.removeEventListener('touchstart', onTouchStart, { capture: true });
       host.removeEventListener('touchmove', onTouchMove, { capture: true });
+      host.removeEventListener('touchend', onTouchEnd, { capture: true });
       sub.dispose();
       term.dispose();
       termRef.current = null;
