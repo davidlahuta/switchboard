@@ -52,7 +52,7 @@ describe('what a web viewer is told about the mouse when it joins mid-session', 
 describe('what counts as a terminal host running old code', () => {
   it('is the runner and what it imports, not the daemon or the web UI', async () => {
     const { runnerSourceFiles } = await import('../src/daemon/source.ts');
-    const files = runnerSourceFiles().map((f) => f.replace(/\/g, '/'));
+    const files = runnerSourceFiles().map((f) => f.split('\\').join('/'));
     assert.ok(files.some((f) => f.endsWith('src/runner/runner.ts')));
     assert.ok(files.some((f) => f.endsWith('src/shared/protocol.ts')), 'the protocol it speaks to the daemon counts');
     assert.ok(!files.some((f) => /src\/daemon\//.test(f)), 'a daemon fix does not make every session "old host"');
