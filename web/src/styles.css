@@ -2679,15 +2679,22 @@ a.list-main:hover {
  * (no canvas renderer), so handing selection back to the browser gives the long-press, the handles
  * and the copy callout for free. Only where there is no mouse: a pointer keeps xterm's own.
  */
+/*
+ * Every drag on the terminal is the page's to handle (see Terminal.tsx). Left to the browser, the
+ * first few pixels of a drag — before the page claims it — were enough for the browser to start
+ * panning, most readily with the keyboard open, and it then cancelled the touch: the session moved
+ * a line or two and stopped. Long-press selection is not a pan and is unaffected.
+ */
+.term-host,
+.term-host * {
+  touch-action: none;
+}
 @media (pointer: coarse) {
   .term-host .xterm .xterm-rows,
   .term-host .xterm .xterm-rows * {
     user-select: text;
     -webkit-user-select: text;
     -webkit-touch-callout: default;
-  }
-  .term-host .xterm-screen {
-    touch-action: auto;
   }
 }
 .term-host.fit .xterm-viewport {

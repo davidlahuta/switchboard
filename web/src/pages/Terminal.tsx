@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Terminal as XTerm, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WHEEL_LINES, WHEEL_REPORT_GAP_MS } from '@shared/scroll.ts';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { RunStatus, StateSnapshot, TermClientFrame, TermServerFrame } from '@shared/types.ts';
@@ -288,16 +289,30 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
      * going and slows to a stop.
      */
     const screen = host.querySelector('.xterm-screen') ?? host;
-    // Claude Code scrolls one line per wheel report (its "wheelup: scroll:lineUp"), with its wheel
-    // acceleration turned off for sessions Switchboard starts, so one report is one line of travel.
-    const APP_LINES_PER_REPORT = 1;
+
     const synthetic = new WeakSet<Event>();
     const tracking = (): boolean => term.modes.mouseTrackingMode !== 'none';
     const rowHeight = (): number => Math.max(8, screen.getBoundingClientRect().height / term.rows || 17);
     let pending = 0; // pixels travelled and not yet scrolled
+    /*
+     * Wheel reports owed to the session, sent one at a time at least WHEEL_REPORT_GAP_MS apart:
+     * two closer than 5 ms are counted by Claude Code as one line, not WHEEL_LINES (shared/scroll.ts).
+     */
+    let owed = 0;
+    let pacer = 0;
+    const sendReport = (): void => {
+      pacer = 0;
+      if (!owed) return;
+      const dir = Math.sign(owed);
+      owed -= dir;
+      const ev = new WheelEvent('wheel', { deltaY: dir, deltaMode: WheelEvent.DOM_DELTA_LINE, bubbles: true, cancelable: true });
+      synthetic.add(ev);
+      screen.dispatchEvent(ev);
+      if (owed) pacer = window.setTimeout(sendReport, WHEEL_REPORT_GAP_MS);
+    };
     const scrollPixels = (px: number): void => {
       pending += px;
-      const perStep = rowHeight() * (tracking() ? APP_LINES_PER_REPORT : 1);
+      const perStep = rowHeight() * (tracking() ? WHEEL_LINES : 1);
       const steps = Math.trunc(pending / perStep);
       if (!steps) return;
       pending -= steps * perStep;
@@ -305,11 +320,10 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
         term.scrollLines(steps);
         return;
       }
-      for (let i = 0; i < Math.abs(steps); i++) {
-        const ev = new WheelEvent('wheel', { deltaY: Math.sign(steps), deltaMode: WheelEvent.DOM_DELTA_LINE, bubbles: true, cancelable: true });
-        synthetic.add(ev);
-        screen.dispatchEvent(ev);
-      }
+      // A change of direction drops what was owed the other way rather than playing it out first.
+      if (owed && Math.sign(owed) !== Math.sign(steps)) owed = 0;
+      owed += steps;
+      if (!pacer) sendReport();
     };
 
     // A trackpad or wheel on a session that scrolls itself: paced by distance, like a finger.
@@ -332,19 +346,36 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
      * bounced the page. Taps are left alone so the session still receives them; only a deliberate
      * vertical drag is taken, and a drag that moves selection handles belongs to the selection.
      */
+    let startY = 0;
     let lastY = 0;
     let travelled = 0;
     let dragging = false;
     let samples: Array<{ t: number; y: number }> = [];
     let glide = 0;
+    /*
+     * Finger movement is collected and applied once per frame. Touch events arrive unevenly — two
+     * in one frame, none in the next — and applying each as it came moved the view in uneven jumps.
+     */
+    let moved = 0;
+    let moveFrame = 0;
+    const flushMove = (): void => {
+      moveFrame = 0;
+      const px = moved;
+      moved = 0;
+      if (px) scrollPixels(px);
+    };
     const stopGlide = (): void => {
       if (glide) cancelAnimationFrame(glide);
       glide = 0;
+      if (moveFrame) cancelAnimationFrame(moveFrame);
+      moveFrame = 0;
+      moved = 0;
+      owed = 0; // a touch stops the view where it is, including reports not yet sent
     };
     const onTouchStart = (e: TouchEvent) => {
       stopGlide();
       if (e.touches.length !== 1) return;
-      lastY = e.touches[0].clientY;
+      startY = lastY = e.touches[0].clientY;
       travelled = 0;
       dragging = false;
       pending = 0;
@@ -361,12 +392,18 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
       while (samples.length > 2 && now - samples[0].t > 100) samples.shift();
       if (!dragging && travelled < 8) return;
       if (!window.getSelection()?.isCollapsed) return;
-      dragging = true;
       e.preventDefault();
       e.stopPropagation();
-      scrollPixels(step);
+      // The first frame of a drag carries the distance it took to recognise it as one.
+      moved += dragging ? step : startY - y;
+      dragging = true;
+      if (!moveFrame) moveFrame = requestAnimationFrame(flushMove);
     };
     const onTouchEnd = () => {
+      if (moveFrame) {
+        cancelAnimationFrame(moveFrame);
+        flushMove();
+      }
       if (!dragging || samples.length < 2) return;
       const first = samples[0];
       const last = samples[samples.length - 1];
@@ -388,6 +425,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
 
     return () => {
       stopGlide();
+      window.clearTimeout(pacer);
       host.removeEventListener('touchstart', onTouchStart, { capture: true });
       host.removeEventListener('touchmove', onTouchMove, { capture: true });
       host.removeEventListener('touchend', onTouchEnd, { capture: true });

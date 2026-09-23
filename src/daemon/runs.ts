@@ -27,6 +27,7 @@ import { CredentialSync } from './credsync.ts';
 import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
 import { newestRunnerSourceMtime } from './source.ts';
+import { WHEEL_LINES } from '../shared/scroll.ts';
 import { readCustomTitle, readSessionModel } from './transcript.ts';
 import { hooksInstalledIn } from './integration.ts';
 import type { Launcher } from './launcher.ts';
@@ -1599,7 +1600,14 @@ export class RunManager {
       cwd: resume ? this.homeDir(r) : r.cwd,
       file: cmd.file,
       args: cmd.args,
-      env: { ...this.subs.envFor(subscriptionId), CLAUDE_SECURESTORAGE_CONFIG_DIR: this.privateLogin(r, subscriptionId), SWITCHBOARD_RUN_ID: r.id, SWITCHBOARD_URL: DAEMON_URL },
+      env: {
+        ...this.subs.envFor(subscriptionId),
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: this.privateLogin(r, subscriptionId),
+        // One wheel report is the same number of lines in every session; see shared/scroll.ts.
+        CLAUDE_CODE_SCROLL_SPEED: String(WHEEL_LINES),
+        SWITCHBOARD_RUN_ID: r.id,
+        SWITCHBOARD_URL: DAEMON_URL,
+      },
       title: r.name,
       subscriptionLabel: sub.label,
     };
