@@ -69,6 +69,7 @@ interface RunRow {
   version: string | null;
   model: string | null;
   model_wanted: string | null;
+  model_since: string | null;
   auto_compact: number | null;
   auto_compact_tokens: number | null;
   skip_permissions: number | null;
@@ -1353,7 +1354,7 @@ export class RunManager {
     if (!transcriptPath) return;
     const r = this.bySession(sessionId);
     if (!r) return;
-    const model = readSessionModel(transcriptPath);
+    const model = readSessionModel(transcriptPath, r.model_since ? Date.parse(r.model_since) : 0);
     if (!model || model === r.model) return;
     this.db.run('UPDATE runs SET model = ? WHERE id = ?', model, r.id);
     this.bus.invalidate('state');
@@ -1588,7 +1589,7 @@ export class RunManager {
     // What it was asked to come back on, if anything, and otherwise what it is on now.
     const model = r.model_wanted ?? r.model;
     if (model) args.push('--model', model);
-    if (r.model_wanted !== null) this.db.run('UPDATE runs SET model = ?, model_wanted = NULL WHERE id = ?', r.model_wanted, r.id);
+    this.db.run('UPDATE runs SET model = ?, model_wanted = NULL, model_since = ? WHERE id = ?', model, new Date().toISOString(), r.id);
     if (this.dto(r).skipPermissions) args.push('--dangerously-skip-permissions');
     if (!resume && r.worktree) args.push('--worktree', r.worktree);
     if (!resume) args.push('--name', r.name);

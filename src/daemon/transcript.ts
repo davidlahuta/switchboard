@@ -6,6 +6,7 @@ const TAIL_BYTES = 128 * 1024;
 interface Entry {
   type?: string;
   isSidechain?: boolean;
+  timestamp?: string;
   message?: { model?: string };
   attachment?: { type?: string; identity?: { modelId?: string } };
 }
@@ -18,8 +19,13 @@ interface Entry {
  * and `/model` appends an attachment naming the new one the moment it is chosen — which is what
  * lets a change made in an idle session show up before its next turn. Whichever is newest wins.
  * Subagent turns run on their own model and are skipped.
+ *
+ * Only records written at or after `since` count. A session launched on a new model says nothing
+ * about it until its first turn, and until then the newest record is the last turn of the old one:
+ * read without this, an idle session relaunched on Opus 5.5 was put back on Opus 5 within seconds,
+ * and came back on it at its next restart.
  */
-export function readSessionModel(file: string): string | null {
+export function readSessionModel(file: string, since = 0): string | null {
   let text: string;
   try {
     const fd = fs.openSync(file, 'r');
@@ -47,6 +53,8 @@ export function readSessionModel(file: string): string | null {
       continue;
     }
     if (entry.isSidechain) continue;
+    const at = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
+    if (at < since) return null; // everything further back is older still
     const model =
       entry.type === 'assistant' ? entry.message?.model : entry.attachment?.type === 'model' ? entry.attachment.identity?.modelId : undefined;
     if (typeof model === 'string' && model && model !== '<synthetic>') return model;

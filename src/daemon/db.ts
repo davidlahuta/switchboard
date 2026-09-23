@@ -359,6 +359,11 @@ const MIGRATIONS: string[] = [
   -- it within seconds (see syncModel).
   ALTER TABLE runs ADD COLUMN model_wanted TEXT;
   `,
+  `
+  -- When the session was last launched with --model. Transcript records older than this name the
+  -- model it ran on before, not the one it is on now (see readSessionModel).
+  ALTER TABLE runs ADD COLUMN model_since TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;
