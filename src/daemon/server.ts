@@ -162,7 +162,13 @@ export function createServer(s: Services): http.Server {
     for (const sub of subscriptions) {
       if (!sub.enabled || sub.status !== 'ready') continue;
       totals.capacity += sub.weight;
-      totals.fiveHourRemaining += (sub.weight * (100 - (sub.usage?.fiveHour?.pct ?? 0))) / 100;
+      /*
+       * What can be used in the next five hours, which is what a subscription's own headroom already
+       * is: its 5-hour window capped by its week. Counting the 5-hour window alone added a whole
+       * plan for every subscription whose week was spent — a fresh 5-hour window on a finished week
+       * gives nothing — and put the desk at 94% while two of six had no week left at all.
+       */
+      totals.fiveHourRemaining += sub.headroom;
       totals.sevenDayRemaining += (sub.weight * (100 - (sub.usage?.sevenDay?.pct ?? 0))) / 100;
     }
     const integ = integrationStatus();
