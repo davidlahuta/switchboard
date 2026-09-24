@@ -1182,6 +1182,10 @@ select.input {
   color: var(--muted);
   font-size: 11px;
 }
+.sub-binding {
+  font-size: 12px;
+  margin: -2px 0 6px;
+}
 
 .usage-label {
   color: var(--text-2);

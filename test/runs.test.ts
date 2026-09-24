@@ -39,6 +39,7 @@ import { looksFinished, startedWork, taskIdOf } from '../src/daemon/hooks.ts';
 import { attentionMark, byAttention, GROUP_LABEL, QUIET_AFTER_MS, SESSION_GROUPS, sessionGroup, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, modelWindows, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
+import { roomOf } from '../src/shared/capacity.ts';
 import { PTY_TERM, withoutParentSession } from '../src/config.ts';
 import type { Run, SessionWork, Usage } from '../src/shared/types.ts';
 
@@ -917,10 +918,13 @@ describe('choosing where to put a session', () => {
 });
 
 describe('subscription headroom', () => {
-  it('is capped by whichever window is tighter', () => {
-    assert.equal(headroomOf(usage(10, 80), 20).headroom, 4);
+  it('is capped by whichever window is tighter, each in the same unit', () => {
+    // 20% of a week of 4.2 five-hour windows is 0.84 of a window: tighter than 90% of the 5-hour one.
+    assert.ok(Math.abs(headroomOf(usage(10, 80), 20).headroom - 20 * 4.2 * 0.2) < 1e-9);
     assert.equal(headroomOf(usage(10, 80), 20).bindingWindow, 'sevenDay');
     assert.equal(headroomOf(usage(90, 20), 20).bindingWindow, 'fiveHour');
+    // 85% of the week gone still leaves more than 10% of the 5-hour window: the 5-hour one binds.
+    assert.equal(headroomOf(usage(90, 85), 20).bindingWindow, 'fiveHour');
   });
 
   it('weights by plan so a big plan at high usage can still beat a small idle one', () => {
@@ -937,10 +941,10 @@ describe('subscription headroom', () => {
 
   it('holds a session on Fable to what is left of the Fable week', () => {
     const fable = { ...usage(5, 30), scoped: [{ label: 'Fable', pct: 90, resetsAt: null }] };
-    assert.equal(headroomOf(fable, 20, 'claude-fable-5-1').headroom, 2, 'a tenth of the Fable week left');
-    assert.equal(headroomOf(fable, 20, 'claude-opus-5').headroom, 14, 'another model has the account-wide week');
-    assert.equal(headroomOf(fable, 20).headroom, 14, 'no model known: only the account-wide windows');
-    assert.equal(headroomOf(fable, 20, 'claude-fable-5-1').bindingWindow, 'sevenDay', 'what the subscription list shows is unchanged');
+    assert.ok(Math.abs(headroomOf(fable, 20, 'claude-fable-5-1').headroom - 20 * 4.2 * 0.1) < 1e-9, 'a tenth of the Fable week left');
+    assert.equal(headroomOf(fable, 20, 'claude-opus-5').headroom, 19, 'another model has the 5-hour window, the week behind it');
+    assert.equal(headroomOf(fable, 20).headroom, 19, 'no model known: only the account-wide windows');
+    assert.equal(headroomOf(fable, 20, 'claude-fable-5-1').bindingWindow, 'fiveHour', 'what the subscription list shows is the account-wide binding');
   });
 
   it('ranks subscriptions for a Fable session by their Fable weeks', () => {
@@ -948,7 +952,12 @@ describe('subscription headroom', () => {
     const a = { ...usage(0, 10), scoped: [{ label: 'Fable', pct: 95, resetsAt: null }] };
     const b = { ...usage(0, 50), scoped: [{ label: 'Fable', pct: 20, resetsAt: null }] };
     assert.ok(headroomOf(b, 20, 'claude-fable-5-1').headroom > headroomOf(a, 20, 'claude-fable-5-1').headroom);
-    assert.ok(headroomOf(a, 20, 'claude-opus-5').headroom > headroomOf(b, 20, 'claude-opus-5').headroom, 'and the other way round for Opus');
+    // For Opus both have a whole 5-hour window now; what separates them is the week behind it.
+    const score = (u: typeof a) => {
+      const room = roomOf(u, 20, 4.2, 'claude-opus-5');
+      return subscriptionScore({ headroom: room.now, fullHeadroom: room.afterReset, week: room.week, size: 20, liveRuns: 0, priority: 0, resetsInMs: null, recentlyLeft: false });
+    };
+    assert.ok(score(a) > score(b), 'and the other way round for Opus');
     assert.deepEqual(modelWindows(a, 'claude-fable-5-1').map((w) => w.label), ['Fable']);
     assert.deepEqual(modelWindows(a, 'claude-opus-5'), []);
   });

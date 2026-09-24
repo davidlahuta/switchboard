@@ -9,8 +9,8 @@ import { logger } from '../log.ts';
 import type { BurnForecast, Subscription, SubscriptionKind, SubscriptionStatus, Usage, UsagePoint } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, mcpServerEntry, readJson, writeJson } from './claude.ts';
-import { forecast, pointsFor } from './burn.ts';
-import { scopedBinds } from '../shared/limits.ts';
+import { forecast, pointsOf } from './burn.ts';
+import { DEFAULT_WEEK_WINDOWS, isSpent, modelWindows, roomOf, type Room, weekWindowsFrom } from '../shared/capacity.ts';
 import { bool, type Db, now } from './db.ts';
 import type { Launcher } from './launcher.ts';
 import { getSettings } from './settings.ts';
@@ -115,8 +115,10 @@ interface Credentials {
 
 type OAuthWindow = { utilization?: number; resets_at?: string | null } | null | undefined;
 
-/** Utilisation assumed for a window that has not reported yet (no session has run on it). */
-const ASSUMED_PCT = 40;
+/** How far back the history is read to measure how many five-hour windows a week holds. */
+const WEEK_RATIO_LOOKBACK_MS = 14 * 24 * 3600_000;
+/** How long that measurement is kept before it is taken again: it moves over days, not minutes. */
+const WEEK_RATIO_CACHE_MS = 3600_000;
 /** A subscription at or past this has nothing left to give, whatever the proactive threshold says. */
 export const SPENT_PCT = 99;
 /** The longest a spend cap is believed without a turn succeeding there: one five-hour window. */
@@ -149,31 +151,28 @@ const RECENTLY_LEFT_MS = 30 * 60_000;
 export const SWAP_MARGIN = 1.25;
 
 /**
- * What is actually usable right now. Both windows gate every request, so the tighter one decides;
- * scaling by plan weight makes a 20x Max at 80% outrank a Pro at 10%, which is what "most usage
- * available" means in tokens rather than percent.
+ * What is actually usable right now, in capacity units: the room under the tightest of the five-hour
+ * window, the week and, given the model a session runs, that model's own week — each converted to
+ * the same unit first (see shared/capacity.ts). Scaling by plan weight makes a 20x Max at 80% outrank
+ * a Pro at 10%, which is what "most usage available" means in tokens rather than percent.
  *
- * Given the model a session runs, a weekly window scoped to that model gates it too, and is counted
- * with the other two: a session on Fable has what is left of the Fable week, however much of the
- * account-wide week is still free. The binding window it reports stays one of the two account-wide
- * ones, which is what the subscription list shows.
+ * The binding window reported stays one of the two account-wide ones, which is what the subscription
+ * list shows.
  */
 export function headroomOf(
   usage: Usage | null,
   weight: number,
   model: string | null = null,
+  weekWindows = DEFAULT_WEEK_WINDOWS,
 ): { headroom: number; bindingWindow: 'fiveHour' | 'sevenDay' | null } {
-  const five = usage?.fiveHour?.pct ?? null;
-  const seven = usage?.sevenDay?.pct ?? null;
-  const used = Math.max(five ?? ASSUMED_PCT, seven ?? ASSUMED_PCT, ...modelWindows(usage, model).map((w) => w.pct));
-  const bindingWindow = five === null && seven === null ? null : (five ?? ASSUMED_PCT) >= (seven ?? ASSUMED_PCT) ? 'fiveHour' : 'sevenDay';
-  return { headroom: Math.max(0, (100 - used) / 100) * weight, bindingWindow };
+  const account = roomOf(usage, weight, weekWindows).binding;
+  return {
+    headroom: roomOf(usage, weight, weekWindows, model).now,
+    bindingWindow: account ? (account.kind === 'fiveHour' ? 'fiveHour' : 'sevenDay') : null,
+  };
 }
 
-/** The weekly windows scoped to the model a session runs: the ones that gate it beside the account-wide two. */
-export function modelWindows(usage: Usage | null, model: string | null): Usage['scoped'] {
-  return (usage?.scoped ?? []).filter((w) => scopedBinds(w.label, model));
-}
+export { modelWindows };
 
 /**
  * How good a subscription is to put a session on, as a number only worth comparing with itself.
@@ -192,6 +191,13 @@ export function subscriptionScore(input: {
   headroom: number;
   /** what its headroom becomes once the binding window resets */
   fullHeadroom: number;
+  /**
+   * What is left of its week, and its plan's weight, both in capacity units. Given, a subscription is
+   * also worth the next five-hour window its week can still fill: two with a whole window free now
+   * are not equal when one has a week behind it and the other has a sliver.
+   */
+  week?: number;
+  size?: number;
   liveRuns: number;
   priority: number;
   resetsInMs: number | null;
@@ -199,7 +205,11 @@ export function subscriptionScore(input: {
   /** its numbers could not be refreshed, so they describe some earlier moment */
   stale?: boolean;
 }): number {
-  const share = (h: number): number => h / (1 + 0.5 * input.liveRuns);
+  const lasting = (h: number): number =>
+    input.week === undefined || input.size === undefined
+      ? h
+      : h + 0.5 * Math.min(input.size, Math.max(0, input.week - h)) + 0.01 * input.week;
+  const share = (h: number): number => lasting(h) / (1 + 0.5 * input.liveRuns);
   let score = share(input.headroom);
   if (input.resetsInMs !== null && input.resetsInMs <= RESET_SOON_MS) {
     // Worth what it will be worth, less the wait: everything at the moment of the reset, nothing a
@@ -250,6 +260,8 @@ export class SubscriptionManager {
   private readonly renewAfter = new Map<string, number>();
   /** Subscriptions that stopped a session on a spend cap, and until when that is believed. See markSpendCapped. */
   private readonly spendCappedUntil = new Map<string, number>();
+  /** Five-hour windows per week, measured per plan tier from the history. See weekWindowsFor. */
+  private weekRatios: { at: number; byTier: Map<string, number>; all: number | null } | null = null;
   private timer: NodeJS.Timeout | null = null;
 
   constructor(db: Db, bus: Bus, launcher: Launcher) {
@@ -297,7 +309,11 @@ export class SubscriptionManager {
      */
     const mismatch = accountMismatch(r.email, r.account_email);
     const usable = bool(r.enabled) && r.status === 'ready' && !mismatch;
-    const { headroom, bindingWindow } = headroomOf(usage, weight);
+    const ratio = this.weekWindowsFor(r.rate_tier);
+    const room = roomOf(usage, weight, ratio.windows);
+    const capped = this.spendCapped(r.id);
+    const account = room.binding;
+    const bindingWindow = account ? (account.kind === 'fiveHour' ? 'fiveHour' : 'sevenDay') : null;
     return {
       id: r.id,
       label: r.label,
@@ -310,8 +326,14 @@ export class SubscriptionManager {
       plan: r.plan,
       rateTier: r.rate_tier,
       weight,
-      headroom: usable ? headroom : 0,
-      bindingWindow: usable ? bindingWindow : null,
+      headroom: usable && capped === null ? room.now : 0,
+      bindingWindow: usable && capped === null ? bindingWindow : null,
+      usedPct: capped !== null ? 100 : room.usedPct,
+      weekWindows: ratio.windows,
+      weekWindowsMeasured: ratio.measured,
+      weekSize: weight * ratio.windows,
+      weekLeft: room.week,
+      spendCappedUntil: capped === null ? null : new Date(capped).toISOString(),
       enabled: bool(r.enabled),
       priority: r.priority,
       status: r.status,
@@ -347,32 +369,18 @@ export class SubscriptionManager {
       // history is the other account's history, and pooling it adds a plan's worth of capacity that
       // does not exist — twice over, when that account is also here under its own name.
       if (!dto.enabled || dto.status !== 'ready' || dto.accountMismatch) continue;
-      const history = this.history(r.id, BURN_LOOKBACK_H);
       subs.push({
         id: r.id,
         weight: dto.weight,
+        weekWindows: dto.weekWindows,
+        measured: dto.weekWindowsMeasured,
         fiveHour: dto.usage?.fiveHour ?? null,
         sevenDay: dto.usage?.sevenDay ?? null,
-        history,
+        blockedUntil: this.spendCapped(r.id),
+        history: pointsOf(this.history(r.id, BURN_LOOKBACK_H)),
       });
     }
-    const value = forecast(
-      subs.map((x) => ({
-        id: x.id,
-        weight: x.weight,
-        pct: x.fiveHour?.pct ?? null,
-        resetsAt: x.fiveHour?.resetsAt ?? null,
-        history: pointsFor(x.history, 'fiveHour'),
-      })),
-      subs.map((x) => ({
-        id: x.id,
-        weight: x.weight,
-        pct: x.sevenDay?.pct ?? null,
-        resetsAt: x.sevenDay?.resetsAt ?? null,
-        history: pointsFor(x.history, 'sevenDay'),
-      })),
-      Date.now(),
-    );
+    const value = forecast({ subs, now: Date.now() });
     this.burnCache = { at: Date.now(), value };
     return value;
   }
@@ -425,16 +433,19 @@ export class SubscriptionManager {
        */
       const used = this.usedPct(r.id, model);
       if (used >= Math.min(SPENT_PCT, threshold)) continue;
+      const room = this.roomFor(sub, model);
       const score = subscriptionScore({
         // Numbers nobody could refresh are a guess about the present, and the usage endpoint goes
         // quiet for minutes at a time when it rate-limits everyone at once. Still usable — a guess
         // beats a subscription known to be spent — but not preferred over one that is answering.
         stale: !!sub.usage?.stale,
         headroom: this.headroomFor(sub, model),
-        fullHeadroom: weightFor(r.plan, r.rate_tier),
+        fullHeadroom: room.afterReset,
+        week: room.week,
+        size: sub.weight,
         liveRuns: Math.max(0, this.liveRunsFor(r.id) + (pending?.get(r.id) ?? 0)),
         priority: r.priority,
-        resetsInMs: this.resetsInMs(sub, model),
+        resetsInMs: this.resetsInMs(room),
         recentlyLeft: left.has(r.id),
       });
       if (!best || score > best.score) best = { row: r, score };
@@ -457,16 +468,59 @@ export class SubscriptionManager {
   usedPct(id: string, model: string | null = null): number {
     // A spend cap stops every request whatever the windows read; see markSpendCapped.
     if (this.spendCapped(id) !== null) return 100;
-    const r = this.row(id);
-    const usage = r ? this.dto(r).usage : null;
-    if (!usage) return ASSUMED_PCT;
-    const mine = modelWindows(usage, model).map((w) => w.pct);
-    return Math.max(usage.fiveHour?.pct ?? ASSUMED_PCT, usage.sevenDay?.pct ?? ASSUMED_PCT, ...mine);
+    const sub = this.get(id);
+    return sub ? this.roomFor(sub, model).usedPct : 100;
+  }
+
+  /**
+   * The room a subscription has for a session running `model`: every ceiling over it, in capacity
+   * units. What every decision here is taken on, and what the subscription list shows.
+   */
+  roomFor(sub: Subscription, model: string | null = null): Room {
+    return roomOf(sub.usage, sub.weight, sub.weekWindows, model);
   }
 
   /** A subscription's headroom for a session running `model`; nothing when it cannot be used at all. */
   private headroomFor(sub: Subscription, model: string | null): number {
-    return sub.headroom > 0 && this.spendCapped(sub.id) === null ? headroomOf(sub.usage, sub.weight, model).headroom : 0;
+    return sub.headroom > 0 && this.spendCapped(sub.id) === null ? this.roomFor(sub, model).now : 0;
+  }
+
+  /**
+   * How many five-hour windows a week holds for a plan, measured from the history of every
+   * subscription on that plan tier, then of every subscription, then assumed. See weekWindowsFrom.
+   */
+  weekWindowsFor(tier: string | null): { windows: number; measured: boolean } {
+    if (!this.weekRatios || Date.now() - this.weekRatios.at > WEEK_RATIO_CACHE_MS) this.weekRatios = this.measureWeekRatios();
+    const v = (tier ? this.weekRatios.byTier.get(tier) : undefined) ?? this.weekRatios.all;
+    return v ? { windows: v, measured: true } : { windows: DEFAULT_WEEK_WINDOWS, measured: false };
+  }
+
+  private measureWeekRatios(): { at: number; byTier: Map<string, number>; all: number | null } {
+    const since = new Date(Date.now() - WEEK_RATIO_LOOKBACK_MS).toISOString();
+    const rows = this.db.all<{ sub: string; tier: string | null; ts: string; five: number | null; week: number | null }>(
+      `SELECT h.subscription_id AS sub, s.rate_tier AS tier, h.ts, h.five_hour_pct AS five, h.seven_day_pct AS week
+         FROM usage_history h JOIN subscriptions s ON s.id = h.subscription_id
+        WHERE h.ts >= ? ORDER BY h.subscription_id, h.ts`,
+      since,
+    );
+    // One series per subscription, so no pair spans two of them; the ratio is then taken per tier.
+    const series = new Map<string, { tier: string | null; points: Array<{ ts: number; five: number | null; week: number | null }> }>();
+    for (const r of rows) {
+      const e = series.get(r.sub) ?? { tier: r.tier, points: [] };
+      e.points.push({ ts: Date.parse(r.ts), five: r.five, week: r.week });
+      series.set(r.sub, e);
+    }
+    const joined = (list: Array<{ points: Array<{ ts: number; five: number | null; week: number | null }> }>) =>
+      // Series are joined with a gap wider than any pair is allowed, so nothing is compared across them.
+      list.flatMap((e, i) => e.points.map((p) => ({ ...p, ts: p.ts + i * 365 * 24 * 3600_000 })));
+    const byTier = new Map<string, number>();
+    for (const tier of new Set([...series.values()].map((e) => e.tier).filter((t): t is string => !!t))) {
+      const v = weekWindowsFrom(joined([...series.values()].filter((e) => e.tier === tier)));
+      if (v !== null) byTier.set(tier, v);
+    }
+    const all = weekWindowsFrom(joined([...series.values()]));
+    log.info('measured how many five-hour windows a week holds', { byTier: Object.fromEntries(byTier), all });
+    return { at: Date.now(), byTier, all };
   }
 
   /**
@@ -513,9 +567,7 @@ export class SubscriptionManager {
       if (r.id === exclude) continue;
       const sub = this.dto(r);
       if (!sub.enabled || sub.status !== 'ready') continue;
-      const spent = [sub.usage?.fiveHour ?? null, sub.usage?.sevenDay ?? null, ...modelWindows(sub.usage, model)].filter(
-        (w): w is NonNullable<typeof w> => !!w && w.pct >= SPENT_PCT,
-      );
+      const spent = this.roomFor(sub, model).ceilings.filter((c) => isSpent(c, sub.weight));
       let at = this.spendCapped(r.id, now) ?? 0;
       let known = true;
       for (const w of spent) {
@@ -534,27 +586,28 @@ export class SubscriptionManager {
     const r = this.row(id);
     if (!r) return 0;
     const sub = this.dto(r);
+    const room = this.roomFor(sub, model);
     return subscriptionScore({
       headroom: this.headroomFor(sub, model),
-      fullHeadroom: weightFor(r.plan, r.rate_tier),
+      fullHeadroom: room.afterReset,
+      week: room.week,
+      size: sub.weight,
       // Not counting the session asking, and counting whatever a rebalance in progress has already
       // sent here or taken away: staying put gets better as the neighbours leave.
       liveRuns: Math.max(0, this.liveRunsFor(id) - 1 + (pending?.get(id) ?? 0)),
       priority: r.priority,
-      resetsInMs: this.resetsInMs(sub, model),
+      resetsInMs: this.resetsInMs(room),
       recentlyLeft: false,
     });
   }
 
   /**
-   * Milliseconds until the window that is currently binding a session running `model` turns over,
-   * when that is known. A Fable week at 100% is not freed by the five-hour window turning over.
+   * Milliseconds until the ceiling that is currently binding turns over, when that is known. A Fable
+   * week at 100% is not freed by the five-hour window turning over.
    */
-  private resetsInMs(sub: Subscription, model: string | null = null): number | null {
-    const windows = [sub.usage?.fiveHour ?? null, sub.usage?.sevenDay ?? null, ...modelWindows(sub.usage, model)];
-    const binding = windows.reduce<(typeof windows)[number]>((a, w) => (w && (!a || w.pct > a.pct) ? w : a), null);
-    if (!binding?.resetsAt) return null;
-    return Date.parse(binding.resetsAt) - Date.now();
+  private resetsInMs(room: Room): number | null {
+    const at = room.binding?.resetsAt;
+    return at ? Date.parse(at) - Date.now() : null;
   }
 
   /** Subscriptions this session has been moved off recently. */

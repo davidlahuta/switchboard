@@ -48,13 +48,27 @@ export interface Subscription {
   /** Relative capacity (pro = 1, max 5x = 5, max 20x = 20) used for aggregate totals */
   weight: number;
   /**
-   * How much you can actually use right now, in capacity units: `weight` scaled by whichever of
-   * the 5-hour and weekly windows is tighter. Sorting by this puts the subscription with the most
-   * immediately available usage first. 0 for anything disabled or not logged in.
+   * What can be used before a limit stops a session, in capacity units (see shared/capacity.ts): the
+   * room under the tightest of the 5-hour window and the week, each converted to the same unit. 0 for
+   * anything disabled, not logged in, on the wrong account or stopped by its spend cap.
    */
   headroom: number;
   /** Which window is currently the binding constraint, or null while usage is unknown */
   bindingWindow: 'fiveHour' | 'sevenDay' | null;
+  /**
+   * How much of a 5-hour window's worth is gone by whichever limit binds, 0–100: the number the
+   * proactive swap threshold, "spent" and the rescue compare against (100 when spend-capped).
+   */
+  usedPct: number;
+  /** How many 5-hour windows its week holds, as used for all of this */
+  weekWindows: number;
+  /** measured from this desk's history for its plan, rather than the default */
+  weekWindowsMeasured: boolean;
+  /** Its week, and what is left of it, in capacity units */
+  weekSize: number;
+  weekLeft: number;
+  /** Until when it is treated as spent because a session there hit the spend cap (ISO), or null */
+  spendCappedUntil: string | null;
   enabled: boolean;
   priority: number;
   status: SubscriptionStatus;
@@ -482,37 +496,59 @@ export interface DaemonInfo {
  * numbers cannot answer. Everything is in units of plan weight rather than percent, because percent
  * does not add up across plans.
  */
-export interface BurnWindow {
-  /** sum of the weights of enabled, ready subscriptions */
+/** A pool of room, in capacity units (see shared/capacity.ts). */
+export interface BurnPool {
+  /** what it holds when every window in it is empty */
   capacity: number;
-  /** how much of that is left in this window */
+  /** what is left in it now */
   remaining: number;
-  /** units per hour, measured from stored samples; zero when nothing is being spent */
-  rate: number;
-  /** ISO time the pool is projected to hit zero, or null for "never at this rate" */
-  exhaustedAt: string | null;
-  /** ISO time the first spent window turns over, or null when none will */
+  /** ISO time the first window holding it back turns over, or null when none will */
   nextResetAt: string | null;
-  /** how long the samples the rate was measured over span, in hours */
-  spanHours: number;
-  samples: number;
 }
 
 export interface BurnForecast {
-  fiveHour: BurnWindow;
-  sevenDay: BurnWindow;
+  /** units per hour, measured from stored samples; zero when nothing is being spent */
+  rate: number;
+  /** how long the samples the rate was measured over span, in hours */
+  spanHours: number;
+  samples: number;
+  /**
+   * What can be used before a limit stops a session: every subscription's 5-hour window capped by
+   * its week. Capacity is one 5-hour window from each.
+   */
+  now: BurnPool;
+  /** What is left of every week; capacity is every week, whole */
+  week: BurnPool & {
+    /** ISO time the weeks are all used up at this rate, whatever the 5-hour windows do, or null for never */
+    exhaustedAt: string | null;
+  };
+  /** ISO time nothing on the desk has room left, at this rate, or null for never */
+  stopsAt: string | null;
+  /** which limit that is: every week spent, or every 5-hour window with room spent */
+  stopsOn: 'fiveHour' | 'sevenDay' | null;
+  /** ISO time something has room again after that */
+  resumesAt: string | null;
+  /** 5-hour windows per week used for all of this, averaged over the pool by week size */
+  weekWindows: number;
+  /** every subscription's figure was measured rather than assumed */
+  weekWindowsMeasured: boolean;
 }
 
 export interface Totals {
-  /** Sum of weights of enabled, ready subscriptions */
+  /** Sum of weights of enabled, ready subscriptions: one 5-hour window from each, in capacity units */
   capacity: number;
   /**
-   * What can be used in the next five hours, in the same units as capacity: each subscription's
-   * headroom, i.e. its 5h window capped by its week (a spent week leaves nothing, however fresh
-   * the 5h window)
+   * What can be used before a limit stops a session, in the same units: each subscription's headroom,
+   * its 5-hour window capped by what is left of its week (a spent week leaves nothing, however fresh
+   * the 5-hour window)
    */
   fiveHourRemaining: number;
+  /** Every week, whole, in the same units: each subscription's weight × its weekWindows */
+  weekCapacity: number;
+  /** What is left of every week, in the same units */
   sevenDayRemaining: number;
+  /** Of the usable subscriptions, how many are held back by their week rather than their 5-hour window */
+  weekBound: number;
   liveRuns: number;
   agentsOnline: number;
 }
