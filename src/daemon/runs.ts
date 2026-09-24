@@ -1076,6 +1076,7 @@ export class RunManager {
             reason: waiting.reason,
             since: new Date(waiting.queuedAt).toISOString(),
             deadline: waiting.deadline === null ? null : new Date(waiting.deadline).toISOString(),
+            holding: this.holding(r),
           }
         : null,
       pid: r.pid,

@@ -623,6 +623,8 @@ export interface WaitingRespawn {
   since: string;
   /** ISO timestamp it happens regardless, or null to wait for the turn however long it takes */
   deadline: string | null;
+  /** what it is waiting on, in words: "agent working", "agent idle, 1 background shell" */
+  holding: string;
 }
 
 export interface UpdateRunRequest {
