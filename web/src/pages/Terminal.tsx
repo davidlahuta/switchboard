@@ -6,12 +6,11 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { RunStatus, StateSnapshot, TermClientFrame, TermServerFrame } from '@shared/types.ts';
 import { sessionMark, tabTitle } from '@shared/marks.ts';
-import { RestartMenu } from '../components/RestartMenu.tsx';
+import { ManageMenu } from '../components/ManageMenu.tsx';
 import { ResumeButton } from '../components/ResumeButton.tsx';
 import { HandoffButton } from '../components/HandoffButton.tsx';
 import { SessionName } from '../components/SessionName.tsx';
 import { RunTags } from '../components/RunTags.tsx';
-import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Icon, StatusPill } from '../components/ui.tsx';
 import { api, wsUrl } from '../lib/api.ts';
 import { href, navigate } from '../lib/router.ts';
@@ -861,9 +860,23 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
           >
             <span className="aa">A+</span>
           </button>
-          {run && <HandoffButton run={{ ...run, status: status ?? run.status }} compact onHandoff={() => setFit(false)} />}
-          {run && <SwapMenu run={{ ...run, status: status ?? run.status }} subs={state.subscriptions} compact />}
-          {run && <RestartMenu run={{ ...run, status: status ?? run.status }} compact />}
+          {run && (
+            <HandoffButton
+              run={{ ...run, status: status ?? run.status }}
+              compact
+              onHandoff={() => setFit(false)}
+              following={!fit && !exited}
+              onFit={takeOver}
+            />
+          )}
+          {run && (
+            <ManageMenu
+              run={{ ...run, status: status ?? run.status }}
+              subs={state.subscriptions}
+              compact
+              onDeleted={() => navigate(href.sessions())}
+            />
+          )}
         </div>
       </header>
 
