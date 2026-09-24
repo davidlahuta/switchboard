@@ -3334,6 +3334,20 @@ a.list-main:hover {
   .manage-details .term-size {
     display: inline;
   }
+  /* Everything in the menu wraps, down to the tags, so nothing runs past the edge of a narrow phone. */
+  .term-meta.manage-details > * {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .manage-details .run-tags {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .manage-details .term-sub {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
   .term-name {
     font-size: 14px;
     line-height: 1.3;
