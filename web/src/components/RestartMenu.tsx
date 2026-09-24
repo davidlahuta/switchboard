@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { RelaunchRequest, RestartRequest, Run, UpdateRunRequest } from '@shared/types.ts';
 import { api } from '../lib/api.ts';
-import { respawnToast, willWaitForTurn } from '../lib/respawn.ts';
+import { respawnInFlight, respawnToast, willWaitForTurn } from '../lib/respawn.ts';
 import { emitToast } from '../lib/toast.ts';
 import { Icon, Popover } from './ui.tsx';
 
@@ -24,7 +24,7 @@ export function RestartMenu({
 }) {
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
-  const disabled = run.status === 'exited' || run.status === 'swapping' || busy;
+  const disabled = run.status === 'exited' || respawnInFlight(run) || busy;
 
   return (
     <Popover
@@ -70,7 +70,7 @@ export function RestartSection({
   /** Leave out the explanations, for a menu that holds more than restarting. */
   brief?: boolean;
 }) {
-  const disabled = run.status === 'exited' || run.status === 'swapping';
+  const disabled = run.status === 'exited' || respawnInFlight(run);
   // Says "now" or "when this turn ends" on the buttons themselves, because the difference is the
   // whole question an operator is weighing when they open this menu mid-turn.
   const queues = willWaitForTurn(run, force);

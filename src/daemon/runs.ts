@@ -2917,6 +2917,18 @@ export class RunManager {
     // swap does: nothing else takes it while it is coming up, and the screen it comes up with is
     // not read as news about usage.
     log.info('relaunching', { run: r.id, session: r.session_id, reason, trigger, force, status: r.status, attached: this.conns.has(r.id) });
+    /*
+     * A new terminal is everything a queued restart or relaunch was waiting to do, so this one is
+     * it. Left queued, it gave the session a second new terminal the next time it was free — which,
+     * for one forced out of a day-long wait, was the moment it finished the turn it came back to.
+     * A queued swap is kept: a new terminal does not move the session anywhere.
+     */
+    const queued = this.pendingRespawn.get(r.id);
+    if (queued && queued.kind !== 'swap') {
+      this.pendingRespawn.delete(r.id);
+      this.savePending(r.id, null);
+      log.info('a new terminal takes the place of the queued respawn', { run: r.id, queued: queued.kind, since: queued.queuedAt });
+    }
     this.lastRespawn.set(r.id, Date.now());
     this.spendCapped.delete(r.id);
     if (r.status === 'exited') {

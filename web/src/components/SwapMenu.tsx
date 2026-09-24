@@ -3,7 +3,7 @@ import { scopedBinds } from '@shared/limits.ts';
 import type { Run, Subscription, SwapRequest } from '@shared/types.ts';
 import { api } from '../lib/api.ts';
 import { pctText, usableSubs, usageLevel } from '../lib/format.ts';
-import { respawnToast, willWaitForTurn } from '../lib/respawn.ts';
+import { respawnInFlight, respawnToast, willWaitForTurn } from '../lib/respawn.ts';
 import { emitToast } from '../lib/toast.ts';
 import { Icon, Popover } from './ui.tsx';
 
@@ -20,7 +20,7 @@ export function SwapMenu({
 }) {
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
-  const disabled = run.status === 'exited' || run.status === 'swapping' || busy;
+  const disabled = run.status === 'exited' || respawnInFlight(run) || busy;
 
   return (
     <Popover
@@ -35,7 +35,7 @@ export function SwapMenu({
           {...p}
         >
           <Icon name="swap" size={16} />
-          <span>{run.status === 'swapping' ? 'Swapping…' : 'Swap'}</span>
+          <span>{respawnInFlight(run) ? 'Swapping…' : 'Swap'}</span>
         </button>
       )}
     >
@@ -77,7 +77,7 @@ export function SwapSection({
   onBusy?: (busy: boolean) => void;
 }) {
   const options = usableSubs(subs);
-  const disabled = run.status === 'exited' || run.status === 'swapping';
+  const disabled = run.status === 'exited' || respawnInFlight(run);
   // Mid-turn a swap is queued rather than refused, so say which one picking a subscription asks for.
   const queues = !run.swapsInPlace && willWaitForTurn(run, force);
 
