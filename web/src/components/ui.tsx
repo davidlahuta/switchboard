@@ -1,4 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import type { AgentStatus, RunStatus, Usage, UsageWindow } from '@shared/types.ts';
 import { pctText, usageIssue, usageLevel } from '../lib/format.ts';
 import { absTime, resetsIn, retryIn } from '../lib/time.ts';
@@ -301,7 +302,13 @@ export function Dialog({
   }, [open]);
 
   if (!open) return null;
-  return (
+  /*
+   * Rendered at the end of the document, not where it was opened. A dialog opened from the terminal
+   * header sat inside its dark chrome, whose button and text rules reached into the dialog: light
+   * text on a light panel, and a danger button with no colour. Nothing around the opener can style
+   * a dialog that is not inside it.
+   */
+  return createPortal(
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div
         ref={panelRef}
@@ -317,7 +324,8 @@ export function Dialog({
         <div className="dialog-body">{children}</div>
         {footer && <footer className="dialog-foot">{footer}</footer>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
