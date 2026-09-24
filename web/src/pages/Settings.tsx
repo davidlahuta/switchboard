@@ -357,8 +357,12 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
               Swap threshold <span className="mono">{draft.swapThresholdPct}%</span>
             </span>
             <span className="setting-desc">
-              Utilisation at which an idle session moves on. Lower it if your turns run long: whatever is left above it has
-              to carry a whole turn, or the swap ends up happening mid-turn instead.
+              How much of a 5-hour window&rsquo;s worth has to be gone before a session moves on, by whichever limit is
+              tighter: at {draft.swapThresholdPct}%, a session moves once less than {100 - draft.swapThresholdPct}% of a
+              5-hour window is left, whether its 5-hour window or its week is running out. A week holds several 5-hour
+              windows, so a week at 90% still has well over a third of a window in it and is not yet a reason to move. Lower
+              this if your turns run long: whatever is left has to carry a whole turn, or the swap ends up happening
+              mid-turn instead.
             </span>
           </span>
           <input

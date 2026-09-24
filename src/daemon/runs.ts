@@ -7,6 +7,7 @@ import { logger } from '../log.ts';
 import { tabTitle } from '../shared/marks.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
 import { type LimitCause, scopedBinds } from '../shared/limits.ts';
+import { bindingText } from '../shared/capacity.ts';
 import { readyForRespawn, workSummary } from '../shared/respawn.ts';
 import type {
   AgentStatus,
@@ -3370,6 +3371,8 @@ export class RunManager {
          */
         const u = sub?.usage;
         // The same rule the placement uses: this session's own ceilings, not every ceiling there is.
+        // Read as Anthropic reports them, deliberately: the question is whether one of them is close
+        // enough to 100% for the banner to be believed, not how much room is left in capacity units.
         const model = this.modelOf(r.id);
         const mine = (u?.scoped ?? []).filter((w) => scopedBinds(w.label, model)).map((w) => w.pct);
         const used = Math.max(u?.fiveHour?.pct ?? 0, u?.sevenDay?.pct ?? 0, ...mine);
@@ -3518,6 +3521,7 @@ export class RunManager {
        * its subscription's Fable week to the wall with the proactive swap never once looking at it.
        */
       const model = this.modelOf(r.id);
+      // How much of a five-hour window's worth is gone by whichever ceiling binds; see shared/capacity.ts.
       const used = this.subs.usedPct(sub.id, model);
       if (used < settings.swapThresholdPct) continue;
       if (!bool(r.auto_swap) || this.pendingRespawn.has(r.id)) continue;
@@ -3541,9 +3545,9 @@ export class RunManager {
       const staying = this.subs.scoreOf(r.subscription_id, undefined, model);
       if (best.score < staying * SWAP_MARGIN) continue;
       try {
-        // Say which ceiling it was, or "at 97%" reads as a mistake next to a week that is half free.
-        const scoped = modelWindows(sub.usage, model).find((w) => w.pct === used && used > Math.max(sub.usage?.fiveHour?.pct ?? 0, sub.usage?.sevenDay?.pct ?? 0));
-        this.swap(r.id, best.row.id, `${sub.label} at ${Math.round(used)}%${scoped ? ` of its ${scoped.label} week` : ''}`, { trigger: 'proactive' });
+        // Say which ceiling it was and what is left under it, in the terms the threshold uses: "at
+        // 97%" read as a mistake next to a week that was half free.
+        this.swap(r.id, best.row.id, `${sub.label}: ${bindingText(this.subs.roomFor(sub, model), sub.weight)}`, { trigger: 'proactive' });
       } catch {
         // nothing better available; stay put
       }

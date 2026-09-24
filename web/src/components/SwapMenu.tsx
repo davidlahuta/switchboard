@@ -113,9 +113,13 @@ export function SwapSection({
           >
             <span className="menu-item-main">
               <strong>{s.label}</strong>
-              <span className="menu-sub">
+              <span
+                className="menu-sub"
+                title="What sessions can spend there before a limit stops them, in units (1 = a Pro 5-hour window): its 5-hour window capped by its week. What Auto ranks by."
+              >
                 {current ? 'current · ' : ''}
-                {s.liveRuns} live
+                {s.liveRuns} live · {s.headroom >= 10 ? s.headroom.toFixed(0) : s.headroom.toFixed(1)} of {s.weight} free
+                {s.spendCappedUntil ? ' · spend cap' : ''}
               </span>
             </span>
             <span className="menu-usage">

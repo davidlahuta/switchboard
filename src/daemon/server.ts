@@ -158,18 +158,31 @@ export function createServer(s: Services): http.Server {
 
   const state = (req: IncomingMessage): StateSnapshot => {
     const subscriptions = s.subs.list();
-    const totals: Totals = { capacity: 0, fiveHourRemaining: 0, sevenDayRemaining: 0, liveRuns: s.runs.liveCount(), agentsOnline: s.coord.agentsOnline() };
+    const totals: Totals = {
+      capacity: 0,
+      fiveHourRemaining: 0,
+      weekCapacity: 0,
+      sevenDayRemaining: 0,
+      weekBound: 0,
+      liveRuns: s.runs.liveCount(),
+      agentsOnline: s.coord.agentsOnline(),
+    };
     for (const sub of subscriptions) {
-      if (!sub.enabled || sub.status !== 'ready') continue;
-      totals.capacity += sub.weight;
+      // The same set the placement chooses from: a subscription on the wrong account is someone else's usage.
+      if (!sub.enabled || sub.status !== 'ready' || sub.accountMismatch) continue;
       /*
-       * What can be used in the next five hours, which is what a subscription's own headroom already
-       * is: its 5-hour window capped by its week. Counting the 5-hour window alone added a whole
-       * plan for every subscription whose week was spent — a fresh 5-hour window on a finished week
-       * gives nothing — and put the desk at 94% while two of six had no week left at all.
+       * All in capacity units (see shared/capacity.ts). What can be used now is each subscription's
+       * own headroom — its 5-hour window capped by what is left of its week, converted to the same
+       * unit. Counting the 5-hour window alone added a whole plan for every subscription whose week
+       * was spent (94% of a desk with two weeks gone); capping it by the week's percentage instead
+       * treated a point of the week as a point of a 5-hour window, which it is about four times over
+       * (31% of a desk with over half its room).
        */
+      totals.capacity += sub.weight;
       totals.fiveHourRemaining += sub.headroom;
-      totals.sevenDayRemaining += (sub.weight * (100 - (sub.usage?.sevenDay?.pct ?? 0))) / 100;
+      totals.weekCapacity += sub.weekSize;
+      totals.sevenDayRemaining += sub.weekLeft;
+      if (sub.bindingWindow === 'sevenDay') totals.weekBound++;
     }
     const integ = integrationStatus();
     const sourceChanged = newestSourceMtime();

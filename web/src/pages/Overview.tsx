@@ -12,7 +12,8 @@ import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Badge, Empty, Icon, Section, StaleBadge, StatusPill, UsageBar } from '../components/ui.tsx';
 import { planLabel, shortPath, subStatusLabel, usageLevel } from '../lib/format.ts';
 import { href, terminalLink } from '../lib/router.ts';
-import { timeAgo, useNow } from '../lib/time.ts';
+import { resetsIn, timeAgo, useNow } from '../lib/time.ts';
+import { bindingText, roomOf } from '@shared/capacity.ts';
 
 export function Overview({ state }: { state: StateSnapshot }) {
   const now = useNow(1000);
@@ -57,8 +58,20 @@ export function Overview({ state }: { state: StateSnapshot }) {
       />
 
       <div className="totals">
-        <HeadroomTile label="5h headroom" remaining={totals.fiveHourRemaining} capacity={totals.capacity} />
-        <HeadroomTile label="7d headroom" remaining={totals.sevenDayRemaining} capacity={totals.capacity} />
+        <HeadroomTile
+          label="Usable now"
+          remaining={totals.fiveHourRemaining}
+          capacity={totals.capacity}
+          note={totals.weekBound > 0 ? `${totals.weekBound} held back by their week` : null}
+          hint="What sessions can spend before a limit stops them: each subscription's 5-hour window, capped by what is left of its week. The capacity is one 5-hour window from each subscription. The same figure the swaps are decided on."
+        />
+        <HeadroomTile
+          label="Week left"
+          remaining={totals.sevenDayRemaining}
+          capacity={totals.weekCapacity}
+          note={null}
+          hint="What is left of every subscription's week. A week holds several 5-hour windows (see the burn rate below), so its capacity is several times the one above."
+        />
         <a className="tile tile-link" href={href.sessions()}>
           <span className="tile-label">Live sessions</span>
           <span className="tile-value">{totals.liveRuns}</span>
@@ -168,19 +181,31 @@ export function Overview({ state }: { state: StateSnapshot }) {
   );
 }
 
-function HeadroomTile({ label, remaining, capacity }: { label: string; remaining: number; capacity: number }) {
+function HeadroomTile({
+  label,
+  remaining,
+  capacity,
+  note,
+  hint,
+}: {
+  label: string;
+  remaining: number;
+  capacity: number;
+  note: string | null;
+  hint: string;
+}) {
   const pct = capacity > 0 ? Math.max(0, Math.min(100, (remaining / capacity) * 100)) : 0;
   // Headroom is the inverse of utilisation: low headroom = critical.
   const level = usageLevel(100 - pct);
   return (
-    <div className="tile">
+    <div className="tile" title={hint}>
       <span className="tile-label">{label}</span>
       <span className={`tile-value lvl-${capacity > 0 ? level : 'ok'}`}>{capacity > 0 ? `${Math.round(pct)}%` : '—'}</span>
       <div className="usage-track" role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
         <div className={`usage-fill fill-${level}`} style={{ width: `${pct}%` }} />
       </div>
-      <span className="tile-sub" title="Weighted by plan size (Pro = 1, Max 5× = 5, Max 20× = 20)">
-        {capacity > 0 ? `${fmtUnits(remaining)} of ${fmtUnits(capacity)} capacity units` : 'no ready subscriptions'}
+      <span className="tile-sub" title="1 unit is a Pro plan's 5-hour window; a Max 20× window is 20">
+        {capacity > 0 ? `${fmtUnits(remaining)} of ${fmtUnits(capacity)} units${note ? ` · ${note}` : ''}` : 'no ready subscriptions'}
       </span>
     </div>
   );
@@ -208,10 +233,14 @@ function SubUsageCard({ sub, now, rank }: { sub: Subscription; now: number; rank
         </span>
         <Badge tone="neutral">{planLabel(sub)}</Badge>
       </div>
-      <div className="sub-headroom" title="Usable right now, weighted by plan size and capped by the tighter of the two windows">
+      <div
+        className="sub-headroom"
+        title={`What sessions can spend here before a limit stops them, in units (1 = a Pro 5-hour window). Its week holds ${sub.weekWindows.toFixed(1)} of its 5-hour windows${sub.weekWindowsMeasured ? ', measured from this desk' : ', assumed'}. The swap threshold compares ${Math.round(sub.usedPct)}% used against this.`}
+      >
         <span className="sub-headroom-value">{usable ? fmtUnits(sub.headroom) : '—'}</span>
         <span className="sub-headroom-label">of {fmtUnits(sub.weight)} units free</span>
       </div>
+      {usable && <div className="sub-binding muted">{limitNote(sub, now)}</div>}
       <div className="card-meta">
         {sub.accountMismatch ? (
           <Badge tone="crit" title={`This subscription is for ${sub.email}, but its token is for ${sub.accountEmail}. These numbers are ${sub.accountEmail}'s.`}>
@@ -230,6 +259,15 @@ function SubUsageCard({ sub, now, rank }: { sub: Subscription; now: number; rank
       <UsageBar label="7d" window={u?.sevenDay} now={now} binding={usable && sub.bindingWindow === 'sevenDay'} />
     </a>
   );
+}
+
+/** Which limit holds this subscription back and what is left under it, as the daemon sees it. */
+function limitNote(sub: Subscription, now: number): string {
+  if (sub.spendCappedUntil) return `stopped by its spend cap until ${new Date(sub.spendCappedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  const room = roomOf(sub.usage, sub.weight, sub.weekWindows);
+  if (!room.binding) return 'no usage reported yet';
+  const reset = room.binding.resetsAt ? ` · back ${resetsIn(room.binding.resetsAt, now).replace(/^resets /, '')}` : '';
+  return `${bindingText(room, sub.weight)}${room.binding.kind === 'fiveHour' ? '' : reset}`;
 }
 
 function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
