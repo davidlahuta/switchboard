@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { Run, Subscription } from '@shared/types.ts';
 import { ApiError, api, request } from '../lib/api.ts';
 import { emitToast } from '../lib/toast.ts';
@@ -19,6 +19,7 @@ export function ManageMenu({
   compact,
   align = 'right',
   onDeleted,
+  details,
 }: {
   run: Run;
   subs: Subscription[];
@@ -26,6 +27,8 @@ export function ManageMenu({
   align?: 'left' | 'right';
   /** Called once the session is gone, so the page showing it can leave. */
   onDeleted?: () => void;
+  /** Shown at the top of the menu; the terminal page puts the session's details here on a phone. */
+  details?: ReactNode;
 }) {
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -95,6 +98,7 @@ export function ManageMenu({
       >
         {(close) => (
           <div className="swap-menu">
+            {details}
             {!exited && (
               <>
                 <SwapSection run={run} subs={subs} force={force} close={close} onBusy={(b) => setBusy(b ? 'Working…' : null)} />

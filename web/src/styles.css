@@ -2580,6 +2580,10 @@ a.list-main:hover {
 .term-meta::-webkit-scrollbar {
   display: none;
 }
+/* The same details at the top of the Manage menu: only on a phone, where the header drops them. */
+.term-meta.manage-details {
+  display: none;
+}
 .term-meta > * {
   flex: none;
 }
@@ -3300,15 +3304,35 @@ a.list-main:hover {
     display: none;
   }
 
-  /* Every row of chrome is a row the session does not get. The details stay on the name's row and
-     scroll sideways; the size alone is left out. */
+  /* Every row of chrome is a row the session does not get, and on a phone the name needs all of
+     this one. The details and the auto-continue mark move to the top of the Manage menu. */
   .term-head {
     padding-top: max(3px, env(safe-area-inset-top, 0px));
     padding-bottom: 3px;
     gap: 2px;
   }
-  .term-meta {
-    font-size: 11px;
+  .term-head .term-meta,
+  .term-name .auto-continue {
+    display: none;
+  }
+  .term-name {
+    flex: 1 1 auto;
+    max-width: none;
+  }
+  .term-meta.manage-details {
+    display: flex;
+    flex: none; /* in the menu's column, the header's flex-basis of 0 would collapse it */
+    flex-wrap: wrap;
+    white-space: normal;
+    overflow: visible;
+    touch-action: auto;
+    gap: 6px;
+    padding: 6px 8px 10px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid #2b3440;
+  }
+  .manage-details .term-size {
+    display: inline;
   }
   .term-name {
     font-size: 14px;

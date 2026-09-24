@@ -10,7 +10,7 @@ import { ManageMenu } from '../components/ManageMenu.tsx';
 import { ResumeButton } from '../components/ResumeButton.tsx';
 import { HandoffButton } from '../components/HandoffButton.tsx';
 import { SessionName } from '../components/SessionName.tsx';
-import { RunTags } from '../components/RunTags.tsx';
+import { AutoContinueMark, RunTags } from '../components/RunTags.tsx';
 import { Icon, StatusPill } from '../components/ui.tsx';
 import { api, wsUrl } from '../lib/api.ts';
 import { href, navigate } from '../lib/router.ts';
@@ -819,6 +819,26 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
 
   const keepFocus = (e: React.MouseEvent) => e.preventDefault();
 
+  /*
+   * What is known about the session. Beside the name on a wide screen; on a phone the name needs
+   * the whole row, so these are at the top of the Manage menu instead (the stylesheet picks one).
+   */
+  const details = (
+    <>
+      {status && <StatusPill status={status} title="Run status" />}
+      {run?.agentStatus && status !== 'exited' && <StatusPill status={run.agentStatus} title="Agent status" />}
+      <span className="term-sub" title="Subscription">
+        {subLabel}
+      </span>
+      {run && <RunTags run={run} models={state.models} update={state.update} />}
+      {size && (
+        <span className="term-size mono" title="Terminal size (columns × rows)">
+          {size.cols}×{size.rows}
+        </span>
+      )}
+    </>
+  );
+
   return (
     <div className="term-page" ref={pageRef} data-typing={typing ?? undefined}>
       <header className="term-head">
@@ -827,19 +847,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
         </a>
         <div className="term-title">
           <div className="term-name">{run ? <SessionName run={run} as="div" /> : 'Session'}</div>
-          <div className="term-meta">
-            {status && <StatusPill status={status} title="Run status" />}
-            {run?.agentStatus && status !== 'exited' && <StatusPill status={run.agentStatus} title="Agent status" />}
-            <span className="term-sub" title="Subscription">
-              {subLabel}
-            </span>
-            {run && <RunTags run={run} models={state.models} update={state.update} />}
-            {size && (
-              <span className="term-size mono" title="Terminal size (columns × rows)">
-                {size.cols}×{size.rows}
-              </span>
-            )}
-          </div>
+          <div className="term-meta">{details}</div>
         </div>
         <div className="term-tools">
           <button
@@ -875,6 +883,13 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
               subs={state.subscriptions}
               compact
               onDeleted={() => navigate(href.sessions())}
+              details={
+                <div className="term-meta manage-details">
+                  {/* Beside the name on a wide screen, where a phone has no room for it. */}
+                  <AutoContinueMark run={run} />
+                  {details}
+                </div>
+              }
             />
           )}
         </div>
