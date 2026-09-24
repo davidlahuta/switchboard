@@ -1061,7 +1061,13 @@ export class RunManager {
       continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
       swapsInPlace: this.swapsInPlace(r),
       work,
-      stalled: r.stalled_since
+      /*
+       * Only a turn that ends properly clears a stall, so the count survives a nudge that fails again.
+       * But a session told to carry on is working again well before that turn ends, and a badge
+       * saying it "needs you" over a session visibly getting on with it is simply wrong. So the mark
+       * is kept and not shown while it works; a turn that fails again brings it back, count intact.
+       */
+      stalled: r.stalled_since && agent?.status !== 'working'
         ? {
             reason: r.stall_reason ?? 'an error',
             since: r.stalled_since,
