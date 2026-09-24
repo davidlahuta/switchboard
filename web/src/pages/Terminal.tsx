@@ -16,6 +16,8 @@ import { api, wsUrl } from '../lib/api.ts';
 import { href, navigate } from '../lib/router.ts';
 import { emitToast } from '../lib/toast.ts';
 import { osc52Text } from '../lib/clipboard.ts';
+import { timeAgo } from '../lib/time.ts';
+import { kindLabel } from '@shared/respawn.ts';
 import { faviconFor, resetTab, setFavicon } from '../lib/tabmark.ts';
 
 const FONT = '"Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace';
@@ -901,10 +903,21 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             {conn === 'connecting' ? 'Connecting…' : 'Connection lost — reconnecting…'}
           </div>
         )}
-        {status === 'swapping' && (
+        {/* A queued respawn reads as "swapping" in the status, whatever it is; say which, and what it waits on. */}
+        {run?.waiting ? (
           <div className="term-banner term-banner-info" role="status">
-            Swapping subscription — the session resumes in a moment…
+            <span>
+              {kindLabel(run.waiting.kind).replace(/^./, (c) => c.toUpperCase())} queued {timeAgo(run.waiting.since, Date.now())} —
+              waits until the session is free (now: {run.waiting.holding}). To take it now, use Manage with Force now; that
+              interrupts the turn.
+            </span>
           </div>
+        ) : (
+          status === 'swapping' && (
+            <div className="term-banner term-banner-info" role="status">
+              Swapping subscription — the session resumes in a moment…
+            </div>
+          )
         )}
         {!fit && !exited && (
           <div className="term-banner term-banner-info" role="status">

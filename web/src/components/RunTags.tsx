@@ -55,7 +55,8 @@ export function RunTags({
           title={
             `Still running: ${run.work.map((w) => `${w.kind}${w.label ? ` (${w.label})` : ''}`).join(', ')}. ` +
             'A session reports itself idle when its own turn ends, so this is what it is still waiting on. ' +
-            'A restart or swap waits for subagents; background shells and monitors it does not wait for.'
+            'A queued restart, swap or new terminal waits for subagents, and for background shells and monitors too ' +
+            'unless the session is stuck on a limit or has lost its terminal.'
           }
         >
           {work}
@@ -66,7 +67,7 @@ export function RunTags({
           tone="warn"
           title={
             `${kindLabel(run.waiting.kind)} queued — ${triggerLabel(run.waiting.trigger)}: ${run.waiting.reason}. ` +
-            `Waiting since ${new Date(run.waiting.since).toLocaleTimeString()} for this turn to end. ` +
+            `Waiting since ${new Date(run.waiting.since).toLocaleTimeString()} for the session to be free — now: ${run.waiting.holding}. ` +
             (run.waiting.deadline
               ? `It happens regardless at ${new Date(run.waiting.deadline).toLocaleTimeString()}.`
               : 'It waits however long the turn takes.')
