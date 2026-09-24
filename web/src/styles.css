@@ -1883,6 +1883,9 @@ a.list-main:hover {
 .menu-item .icon {
   color: var(--warn);
 }
+.menu-item-danger .icon {
+  color: var(--crit);
+}
 .menu-item-main {
   flex: 1;
   display: flex;
