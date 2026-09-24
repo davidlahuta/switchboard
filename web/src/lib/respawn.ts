@@ -2,6 +2,18 @@ import { readyForRespawn } from '@shared/respawn.ts';
 import type { Run } from '@shared/types.ts';
 
 /**
+ * Whether a swap, restart or relaunch is actually under way for this session: it is going down or
+ * coming back right now.
+ *
+ * A session with one merely queued reports the status "swapping" as well, and is still running its
+ * turn. That one can be asked again — with Force now, to stop waiting — so it must not lock the
+ * menus the way a respawn in flight does.
+ */
+export function respawnInFlight(run: Run): boolean {
+  return run.status === 'swapping' && !run.waiting;
+}
+
+/**
  * Whether a swap, restart or relaunch asked for right now would be queued behind the session's work
  * rather than taken immediately.
  *
@@ -11,7 +23,8 @@ import type { Run } from '@shared/types.ts';
  * minutes".
  */
 export function willWaitForTurn(run: Run, force: boolean): boolean {
-  if (force || run.status !== 'running') return false;
+  // A session with something queued reads "swapping" but is running its turn like any other.
+  if (force || (run.status !== 'running' && !run.waiting)) return false;
   return !readyForRespawn({ status: run.agentStatus, work: run.work });
 }
 

@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import type { Run, Subscription } from '@shared/types.ts';
 import { ApiError, api, request } from '../lib/api.ts';
+import { respawnInFlight } from '../lib/respawn.ts';
 import { emitToast } from '../lib/toast.ts';
 import { CarryOnSection, ContinueOnResume, ForceCheck, RestartSection } from './RestartMenu.tsx';
 import { SwapSection } from './SwapMenu.tsx';
@@ -92,7 +93,7 @@ export function ManageMenu({
             {...p}
           >
             <Icon name="gear" size={16} />
-            <span>{busy ?? (run.status === 'swapping' ? 'Swapping…' : 'Manage')}</span>
+            <span>{busy ?? (respawnInFlight(run) ? 'Swapping…' : 'Manage')}</span>
           </button>
         )}
       >
