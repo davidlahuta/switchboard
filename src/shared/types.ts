@@ -506,7 +506,11 @@ export interface BurnForecast {
 export interface Totals {
   /** Sum of weights of enabled, ready subscriptions */
   capacity: number;
-  /** Weighted remaining headroom in the 5h window, in the same units as capacity */
+  /**
+   * What can be used in the next five hours, in the same units as capacity: each subscription's
+   * headroom, i.e. its 5h window capped by its week (a spent week leaves nothing, however fresh
+   * the 5h window)
+   */
   fiveHourRemaining: number;
   sevenDayRemaining: number;
   liveRuns: number;
