@@ -2542,23 +2542,20 @@ a.list-main:hover {
   min-height: 0;
 }
 /*
- * The name and what is known about the session share one row while they fit, and the details move
- * to a row of their own when they do not. The details are sized to their content, so a wrapping
- * line is decided on the whole of them; at most they are then clipped, never split across rows.
+ * One row, always: the header stays as short as its buttons. The name keeps up to half the row and
+ * the details take the rest, scrolling sideways when there is more of them than room.
  */
 .term-title {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  column-gap: 10px;
-  row-gap: 1px;
+  gap: 10px;
 }
 .term-name {
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
+  max-width: 50%;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2566,15 +2563,15 @@ a.list-main:hover {
   color: #f0f6fc;
 }
 .term-meta {
-  flex: 0 0 auto;
-  max-width: 100%;
+  flex: 1 1 0;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
   color: var(--t-text-2);
   white-space: nowrap;
-  /* Wider than a phone: the rest is a swipe away rather than cut off. */
+  /* More than fits: the rest is a swipe (or a sideways scroll) away rather than cut off. */
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -3303,8 +3300,8 @@ a.list-main:hover {
     display: none;
   }
 
-  /* Every row of chrome is a row the session does not get. The details still follow the name when
-     there is room, and take a second row when there is not — the size alone is left out. */
+  /* Every row of chrome is a row the session does not get. The details stay on the name's row and
+     scroll sideways; the size alone is left out. */
   .term-head {
     padding-top: max(3px, env(safe-area-inset-top, 0px));
     padding-bottom: 3px;
