@@ -746,6 +746,31 @@ export function reviveDecision(input: { connected: boolean; claudeAlive: boolean
 }
 
 /** Whether a process with this pid exists. EPERM means it exists and belongs to someone else. */
+/**
+ * What to do with a host that says hello for a session another host is already connected for.
+ *
+ * Taking the connection from the one already there is right for the same host reconnecting (a blip,
+ * a daemon restart) and for a replacement the daemon asked for (a relaunch, a stop). It is wrong for a
+ * second terminal opened for the same session while the first is alive: the old code closed the
+ * first, the first reconnected half a second later and closed the second, and so on for as long as
+ * both lived — every takeover a status broadcast that sent every web terminal on the session back to
+ * fitting itself, twice a second. Two claudes on one conversation besides. So the first one keeps it
+ * and the second is told to stop, which, before it has started anything, starts nothing.
+ */
+export function hostDecision(input: {
+  /** another host is connected for this session */
+  previousOpen: boolean;
+  /** it is the same host process, reconnecting */
+  sameHost: boolean;
+  /** the daemon is replacing the session's host itself: a relaunch or a stop in progress */
+  replacing: boolean;
+  /** the claude the connected host runs is alive */
+  previousClaudeAlive: boolean;
+}): 'take' | 'refuse' {
+  if (!input.previousOpen || input.sameHost || input.replacing) return 'take';
+  return input.previousClaudeAlive ? 'refuse' : 'take';
+}
+
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -1719,7 +1744,8 @@ export class RunManager {
     });
   }
 
-  private async onHello(ws: WebSocket, msg: Extract<RunnerToDaemon, { type: 'hello' }>): Promise<string> {
+  /** The run this host now speaks for, or null when it was turned away as a second host; see hostDecision. */
+  private async onHello(ws: WebSocket, msg: Extract<RunnerToDaemon, { type: 'hello' }>): Promise<string | null> {
     let r: RunRow | undefined;
     if (msg.runId) {
       r = this.row(msg.runId);
@@ -1730,6 +1756,18 @@ export class RunManager {
       throw new Error('hello without run');
     }
     const previous = this.conns.get(r.id);
+    const decision = hostDecision({
+      previousOpen: !!previous && previous !== ws && previous.readyState === previous.OPEN,
+      sameHost: !!msg.startedAt && this.runnerStartedAt.get(r.id) === Date.parse(msg.startedAt),
+      replacing: this.relaunching.has(r.id) || this.stopping.has(r.id),
+      previousClaudeAlive: r.pid !== null && processAlive(r.pid),
+    });
+    if (decision === 'refuse') {
+      log.warn('a second terminal came up for a session that already has one; closing it', { run: r.id, claude: msg.pid, keeping: r.pid });
+      this.bus.toast('warn', `${r.name}: a second terminal opened for it and was closed; the session carries on in the first.`);
+      ws.send(JSON.stringify({ type: 'stop' } satisfies DaemonToRunner));
+      return null;
+    }
     if (previous && previous !== ws) previous.close();
     this.conns.set(r.id, ws);
     // Whatever terminal it was opened in started a process, so the watchdog has its answer.
@@ -2919,6 +2957,18 @@ export class RunManager {
         { target: r.subscription_id, reason, continueAfter: false, kind: 'relaunch', trigger, queuedAt: Date.now(), deadline: null },
         false,
       );
+    }
+    if (!this.conns.has(r.id) && this.openingTerminal.has(r.id)) {
+      /*
+       * A terminal is already on its way for this session and has not produced a host yet. Opening
+       * another gives the session two, each running its own claude on the one conversation: after a
+       * reboot a relaunch clicked from the desk and the revive due the same second opened a pair for
+       * three sessions, and the two hosts took the connection from each other twice a second for an
+       * hour, the web terminal resizing on every turn. The one on its way covers this ask; if it
+       * never arrives, watchTerminal opens the next one.
+       */
+      log.info('a terminal is already on its way for this session; not opening another', { run: r.id, reason, trigger });
+      return this.dto(r);
     }
     // Past the queue, this is a session going down and coming back, so it starts the same clock a
     // swap does: nothing else takes it while it is coming up, and the screen it comes up with is

@@ -33,6 +33,7 @@ import {
   sessionDir,
   titleDecision,
   type PendingRespawn,
+  hostDecision,
 } from '../src/daemon/runs.ts';
 import { readyForRespawn, safeToRespawn, waitsForShells, workSummary } from '../src/shared/respawn.ts';
 import { looksFinished, startedWork, taskIdOf } from '../src/daemon/hooks.ts';
@@ -855,6 +856,32 @@ describe('a hosted session belongs to no other session', () => {
     // And what the runner then says about the terminal it actually created.
     assert.equal(PTY_TERM.TERM, 'xterm-256color');
     assert.equal(PTY_TERM.COLORTERM, 'truecolor');
+  });
+});
+
+describe('a second terminal for the same session', () => {
+  const base = { previousOpen: true, sameHost: false, replacing: false, previousClaudeAlive: true };
+
+  it('is turned away while the first is alive', () => {
+    // 25 September: a desk relaunch and a revive one second apart gave three sessions two hosts
+    // each, which took the connection from each other twice a second for an hour.
+    assert.equal(hostDecision(base), 'refuse');
+  });
+
+  it('is the same host coming back, and takes over', () => {
+    assert.equal(hostDecision({ ...base, sameHost: true }), 'take');
+  });
+
+  it('takes over from a host the daemon is replacing', () => {
+    assert.equal(hostDecision({ ...base, replacing: true }), 'take');
+  });
+
+  it('takes over from a host whose claude is gone', () => {
+    assert.equal(hostDecision({ ...base, previousClaudeAlive: false }), 'take');
+  });
+
+  it('is simply the host when there is none', () => {
+    assert.equal(hostDecision({ ...base, previousOpen: false }), 'take');
   });
 });
 
