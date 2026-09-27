@@ -1222,6 +1222,19 @@ describe('the order a desk full of sessions is read in', () => {
     assert.deepEqual(later, before, 'a hook firing anywhere reshuffles nothing');
   });
 
+  it('puts a session that has come to rest above those still going, inside its group', () => {
+    // Idle or without a status, and nothing of its own left running or booked: done, or stuck —
+    // what the operator scans the list for.
+    const w = (kind: SessionWork['kind']) => [{ id: kind, kind, label: null, since: '', lastSeen: '' }];
+    const zeta = run({ name: 'zeta' });
+    const nostatus = run({ name: 'yak', agentStatus: null });
+    const working = run({ name: 'alpha', agentStatus: 'working' });
+    const shell = run({ name: 'beta', work: w('shell') });
+    const loop = run({ name: 'gamma', work: w('wakeup') });
+    for (const r of [zeta, nostatus, working, shell, loop]) assert.equal(sessionGroup(r, NOW), 'active');
+    assert.deepEqual(order(working, shell, loop, zeta, nostatus), ['yak', 'zeta', 'alpha', 'beta', 'gamma']);
+  });
+
   it('sends what has exited to the bottom, newest first', () => {
     const old = run({ name: 'old', status: 'exited', endedAt: ago(3 * 3600_000) });
     const recent = run({ name: 'recent', status: 'exited', endedAt: ago(60_000) });
