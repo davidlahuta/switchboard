@@ -1073,7 +1073,8 @@ export class RunManager {
       subscriptionLabel: this.subs.row(r.subscription_id)?.label ?? r.subscription_id,
       status,
       agentStatus: agent?.status ?? null,
-      agentStatusSince: agent ? (agent.status_at ?? agent.last_seen) : null,
+      // Unknown until the status next changes: last_seen is the last sign of life, not the change.
+      agentStatusSince: agent?.status_at ?? null,
       lastTool: agent?.status === 'working' || agent?.status === 'waiting' ? agent.last_tool : null,
       autoSwap: bool(r.auto_swap),
       swapCount: r.swap_count,
