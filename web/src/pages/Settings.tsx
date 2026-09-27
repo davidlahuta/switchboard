@@ -22,6 +22,7 @@ import { joinArgs, splitArgs } from '../lib/argv.ts';
 import { fetchDiscoveredRepos, groupRepos } from '../lib/repos.ts';
 import { countdown, timeAgo, useNow } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
+import { DEFAULT_WIND_DOWN_MESSAGE } from '@shared/respawn.ts';
 
 /** Matches the daemon's clamp in src/daemon/settings.ts. */
 const LIMITS = {
@@ -391,6 +392,50 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
             anything.
           </span>
         </label>
+
+        <label className="field">
+          <span className="field-label">Wrap-up message</span>
+          <textarea
+            className="input"
+            rows={5}
+            value={draft.windDownMessage}
+            onChange={(e) => set('windDownMessage', e.target.value)}
+          />
+          <span className="field-hint">
+            Typed into a session that a queued restart, swap or new terminal has been waiting on for{' '}
+            {draft.windDownAfterMin > 0 ? `${draft.windDownAfterMin} minutes` : 'however long you set below'}, and sent at
+            once with Claude Code&rsquo;s send now (ctrl+x ctrl+s): it reaches the agent mid-turn, and whatever is running is
+            moved to the background rather than cancelled. Also sent by <em>Ask to wrap up</em> in a session&rsquo;s
+            waiting banner. <span className="mono">{'{what}'}</span> becomes what is waiting (restarted, moved to another
+            subscription, moved to a new terminal), <span className="mono">{'{reason}'}</span> why, and{' '}
+            <span className="mono">{'{next}'}</span> whether it will be told to carry on. Sent as one line. Never typed at a
+            session showing a dialog or with something typed into its prompt.{' '}
+            {draft.windDownMessage.trim() !== DEFAULT_WIND_DOWN_MESSAGE && (
+              <button type="button" className="btn btn-sm" onClick={() => set('windDownMessage', DEFAULT_WIND_DOWN_MESSAGE)}>
+                Reset to the default
+              </button>
+            )}
+          </span>
+        </label>
+
+        <div className="field-row">
+          <label className="field field-narrow">
+            <span className="field-label">Ask to wrap up after (minutes)</span>
+            <input
+              type="number"
+              className="input"
+              min={0}
+              max={1440}
+              step={1}
+              value={draft.windDownAfterMin}
+              onChange={(e) => set('windDownAfterMin', Math.max(0, Number(e.target.value) || 0))}
+            />
+            <span className="field-hint">
+              Once per queued respawn. After asking, background shells and monitors get as long again to finish, then stop
+              holding it; subagents are always waited for. 0 never asks on its own; the button still does.
+            </span>
+          </label>
+        </div>
 
         <div className="setting">
           <div className="setting-text">

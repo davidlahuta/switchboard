@@ -35,7 +35,7 @@ import {
   type PendingRespawn,
   hostDecision,
 } from '../src/daemon/runs.ts';
-import { readyForRespawn, safeToRespawn, waitsForShells, workSummary } from '../src/shared/respawn.ts';
+import { DEFAULT_WIND_DOWN_MESSAGE, readyForRespawn, safeToRespawn, waitsForShells, windDownText, workSummary } from '../src/shared/respawn.ts';
 import { workSurvivesStart } from '../src/daemon/hooks.ts';
 import { toolResultFacts } from '../src/daemon/tasknotes.ts';
 import { attentionMark, byAttention, GROUP_LABEL, QUIET_AFTER_MS, SESSION_GROUPS, sessionGroup, sessionMark, tabTitle } from '../src/shared/marks.ts';
@@ -1430,5 +1430,15 @@ describe('opening Claude Code’s usage reset prompt for the operator', () => {
       ]),
       null,
     );
+  });
+});
+
+describe('the wrap-up message', () => {
+  it('fills in what is waiting, why, and what happens next, on one line', () => {
+    const text = windDownText(DEFAULT_WIND_DOWN_MESSAGE, { kind: 'swap', reason: 'usage headroom:\n85% used', continueAfter: true });
+    assert.match(text, /waiting to be moved to another subscription \(usage headroom: 85% used\)/);
+    assert.match(text, /told to carry on as soon as you are back/);
+    assert.ok(!text.includes('\n') && !text.includes('{'), 'typed as one line with nothing left unfilled');
+    assert.match(windDownText('{what}: {next}', { kind: 'restart', reason: 'x', continueAfter: false }), /^restarted: The operator will pick it up/);
   });
 });

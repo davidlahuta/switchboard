@@ -157,6 +157,40 @@ export class TermMirror {
     return lines.join('\n');
   }
 
+  /**
+   * What is typed into the session's prompt box, or null when no prompt box is on screen.
+   *
+   * The box is the `❯` line directly under a rule. After a turn Claude Code fills it with a
+   * suggested next prompt drawn dim, which is not anybody's words, so only text drawn at normal
+   * weight counts. Anything left is the operator's draft, and typing a message at the session
+   * would send it along with ours.
+   */
+  promptDraft(): string | null {
+    const buffer = this.term.buffer.active;
+    const text = (i: number): string => buffer.getLine(buffer.viewportY + i)?.translateToString(true) ?? '';
+    const rule = (i: number): boolean => /^─{8,}/.test(text(i).trim());
+    let top = -1;
+    for (let i = this.rows - 1; i > 0; i--) {
+      if (/^\s*❯/.test(text(i)) && rule(i - 1)) {
+        top = i;
+        break;
+      }
+    }
+    if (top < 0) return null;
+    const cell = buffer.getNullCell();
+    let draft = '';
+    for (let i = top; i < this.rows && !(i > top && rule(i)); i++) {
+      const line = buffer.getLine(buffer.viewportY + i);
+      if (!line) break;
+      for (let x = 0; x < line.length; x++) {
+        line.getCell(x, cell);
+        if (!cell.isDim() && !cell.isItalic()) draft += cell.getChars() || ' ';
+      }
+      draft += '\n';
+    }
+    return draft.replace(/^\s*❯/, '').trim();
+  }
+
   broadcast(frame: TermServerFrame): void {
     for (const c of this.clients) {
       if (c.queue) c.queue.push(frame);

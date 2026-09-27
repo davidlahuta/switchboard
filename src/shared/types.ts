@@ -457,6 +457,13 @@ export interface Settings {
    */
   continueMessage: string;
   /**
+   * Typed into a busy session, with Claude Code's send-now chord, when a queued restart, swap or new
+   * terminal has waited windDownAfterMin for it. {what}, {reason} and {next} are filled in.
+   */
+  windDownMessage: string;
+  /** How long a queued respawn waits on a busy session before asking it to wrap up; 0 never asks. */
+  windDownAfterMin: number;
+  /**
    * Send it on every resume, not only on a swap made because a limit was hit. A session that
    * starts a new conversation never gets it: there is nothing yet to continue.
    */
@@ -684,6 +691,8 @@ export interface WaitingRespawn {
   deadline: string | null;
   /** what it is waiting on, in words: "agent working", "agent idle, 1 background shell" */
   holding: string;
+  /** ISO timestamp the session was asked to wrap up for it, or null while it has not been */
+  askedToWrapUp: string | null;
 }
 
 export interface UpdateRunRequest {

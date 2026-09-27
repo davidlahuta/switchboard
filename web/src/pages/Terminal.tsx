@@ -909,8 +909,24 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
           <div className="term-banner term-banner-info" role="status">
             <span>
               {kindLabel(run.waiting.kind).replace(/^./, (c) => c.toUpperCase())} queued {timeAgo(run.waiting.since, Date.now())} —
-              waits until the session is free (now: {run.waiting.holding}). To take it now, use Manage with Force now; that
-              interrupts the turn.
+              waits until the session is free (now: {run.waiting.holding}).{' '}
+              {run.waiting.askedToWrapUp
+                ? `Asked it to wrap up ${timeAgo(run.waiting.askedToWrapUp, Date.now())}. `
+                : 'It is asked to wrap up if it keeps going. '}
+              To take it now regardless, use Manage with Force now; that interrupts the turn.
+            </span>
+            <span className="term-banner-actions">
+              <button
+                type="button"
+                className="btn btn-sm"
+                title="Type the wrap-up message from Settings into the session and send it at once, mid-turn (Claude Code's send now). Nothing running is cancelled."
+                onClick={async () => {
+                  const res = await api.post<{ ok: boolean }>(`/api/runs/${encodeURIComponent(run.id)}/wind-down`);
+                  if (res) emitToast('info', `Asked ${run.name} to wrap up`);
+                }}
+              >
+                Ask to wrap up
+              </button>
             </span>
           </div>
         ) : (
