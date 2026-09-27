@@ -799,6 +799,22 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     }
   };
 
+  /** Into the session at its cursor, as a paste — the same as Ctrl+V on a desktop. Not submitted. */
+  const pasteIntoTerminal = (text: string) => {
+    // term.paste applies bracketed paste mode and newline conversion, then emits onData.
+    termRef.current?.paste(text);
+  };
+
+  /*
+   * Paste on a phone. Reading the clipboard is only allowed on a secure page, which the desk is not
+   * when it is opened over plain http on the tailnet, and the grid is a canvas the phone offers no
+   * long-press Paste on. So when the clipboard cannot be read, a box opens that the phone's own
+   * long-press Paste works in, and whatever lands there goes straight into the session: the same
+   * result as the desktop's Ctrl+V, rather than the composer, which submits a prompt of its own.
+   */
+  const [pasteCatcher, setPasteCatcher] = useState(false);
+  const pasteRef = useRef<HTMLTextAreaElement>(null);
+
   const paste = async () => {
     try {
       if (!navigator.clipboard?.readText) throw new Error('unsupported');
@@ -807,13 +823,16 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
         emitToast('info', 'Clipboard is empty');
         return;
       }
-      // term.paste applies bracketed paste mode and newline conversion, then emits onData.
-      termRef.current?.paste(text);
+      pasteIntoTerminal(text);
     } catch {
-      setComposerOpen(true);
-      window.setTimeout(() => composerRef.current?.focus(), 0);
-      emitToast('info', 'Clipboard access is blocked here — paste into the composer and press Send');
+      setPasteCatcher(true);
+      window.setTimeout(() => pasteRef.current?.focus(), 0);
     }
+  };
+
+  const caught = (text: string) => {
+    if (text) pasteIntoTerminal(text);
+    setPasteCatcher(false);
   };
 
   const forget = async () => {
@@ -983,6 +1002,29 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
         </div>
       </div>
 
+      {pasteCatcher && !exited && (
+        <div className="term-composer term-paste">
+          <textarea
+            ref={pasteRef}
+            className="input composer-input mono"
+            rows={1}
+            defaultValue=""
+            placeholder="Long-press here and choose Paste — it goes straight into the session"
+            aria-label="Paste into the session"
+            onPaste={(e) => {
+              e.preventDefault();
+              caught(e.clipboardData.getData('text'));
+            }}
+            // A keyboard that pastes by inserting text rather than firing a paste event.
+            onChange={(e) => caught(e.target.value)}
+            onBlur={() => window.setTimeout(() => setPasteCatcher(false), 150)}
+          />
+          <button type="button" className="btn btn-sm" onMouseDown={keepFocus} onClick={() => setPasteCatcher(false)} aria-label="Cancel paste">
+            Cancel
+          </button>
+        </div>
+      )}
+
       {composerOpen && (
         <div className="term-composer">
           <textarea
@@ -1027,6 +1069,10 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
         >
           ⌨
         </button>
+        {/* Up front: at the end of the bar it was fourteen keys along, off the edge of a phone. */}
+        <button type="button" className="key key-wide" onMouseDown={keepFocus} onClick={() => void paste()} aria-label="Paste into the session" disabled={exited}>
+          <Icon name="paste" size={14} /> Paste
+        </button>
         {KEYS.map((k) => (
           <button
             key={k.aria}
@@ -1057,9 +1103,6 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             <Icon name="copy" size={14} /> Copy
           </button>
         )}
-        <button type="button" className="key key-wide" onMouseDown={keepFocus} onClick={() => void paste()} aria-label="Paste from clipboard" disabled={exited}>
-          <Icon name="paste" size={14} /> Paste
-        </button>
       </nav>
     </div>
   );
