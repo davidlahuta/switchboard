@@ -46,7 +46,12 @@ function fullWidthDimensions(term: XTerm, fitAddon: FitAddon): { cols: number; r
   const width = Math.max(0, px(outer, 'width') - px(inner, 'padding-left') - px(inner, 'padding-right'));
   return { cols: Math.max(2, Math.floor(width / cell)), rows: dims.rows };
 }
-const COMPOSER_KEY = 'sb.term.composer';
+/*
+ * Whether the composer is open, once the viewer has chosen. Closed until they do: the grid takes
+ * typing directly, and the box cost the terminal rows on every screen. A new key, because the old
+ * one was written on every visit and so held "open" on every browser that had ever been here.
+ */
+const COMPOSER_KEY = 'sb.term.composer.v2';
 const MIN_FONT = 6;
 const MAX_FONT = 28;
 
@@ -112,13 +117,13 @@ interface KeyDef {
  */
 const KEYS: KeyDef[] = [
   { label: 'Esc', aria: 'Escape', seq: '\x1b' },
-  { label: 'Tab', aria: 'Tab', seq: '\t' },
-  { label: '⇧Tab', aria: 'Shift Tab', seq: '\x1b[Z' },
   { label: 'Enter', aria: 'Enter', seq: '\r', wide: true },
   { label: '↑', aria: 'Arrow up', seq: (app) => (app ? '\x1bOA' : '\x1b[A') },
   { label: '↓', aria: 'Arrow down', seq: (app) => (app ? '\x1bOB' : '\x1b[B') },
   { label: '←', aria: 'Arrow left', seq: (app) => (app ? '\x1bOD' : '\x1b[D') },
   { label: '→', aria: 'Arrow right', seq: (app) => (app ? '\x1bOC' : '\x1b[C') },
+  { label: 'Tab', aria: 'Tab', seq: '\t' },
+  { label: '⇧Tab', aria: 'Shift Tab', seq: '\x1b[Z' },
   { label: 'Ctrl‑C', aria: 'Control C (interrupt)', seq: '\x03', wide: true },
   { label: '/', aria: 'Slash', seq: '/' },
 ];
@@ -150,7 +155,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   // Open by default. On a phone the composer is the reliable way to write a prompt: typing into
   // the grid goes through the browser's hidden input, where autocorrect and IME rewrite as they
   // please, and there is nowhere to see what you typed before you send it.
-  const [composerOpen, setComposerOpen] = useState(() => readStorage(COMPOSER_KEY) !== '0');
+  const [composerOpen, setComposerOpen] = useState(() => readStorage(COMPOSER_KEY) === '1');
   /** Text the session copied that the browser would not let the page put on the clipboard unasked. */
   const [copyReady, setCopyReady] = useState<string | null>(null);
   const setCopyReadyRef = useRef(setCopyReady);
