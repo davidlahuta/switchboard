@@ -141,6 +141,12 @@ function isAlive(run: Run, now: number): boolean {
  * That is worth more than knowing which session fired a hook most recently, which is a question
  * nobody was asking and the marks answer anyway.
  *
+ * Inside a group, sessions that have come to rest go first: idle or with no status, and nothing of
+ * their own still going — no subagent, workflow, shell, monitor, loop or schedule. Those are the
+ * ones that are done or stuck, which is what the operator scans the list for; one still working
+ * will say so itself when it stops. It is a yes-or-no that changes when the session does, not a
+ * score, so it moves a row only when there is news in the move.
+ *
  * History is the exception: exited sessions are ordered newest-first, because the only thing
  * anybody wants from that group is the one that just stopped. They are frozen, so they cannot churn.
  */
@@ -150,8 +156,16 @@ export function byAttention(now: number): (a: Run, b: Run) => number {
     const gb = SESSION_GROUPS.indexOf(sessionGroup(b, now));
     if (ga !== gb) return ga - gb;
     if (SESSION_GROUPS[ga] === 'done') return (b.endedAt ?? '').localeCompare(a.endedAt ?? '') || a.name.localeCompare(b.name);
-    return a.name.localeCompare(b.name);
+    const ra = atRest(a) ? 0 : 1;
+    const rb = atRest(b) ? 0 : 1;
+    return ra - rb || a.name.localeCompare(b.name);
   };
+}
+
+/** Idle or with no status, and nothing it started still going or booked to start it again. */
+export function atRest(run: Run): boolean {
+  const idle = run.agentStatus === null || run.agentStatus === undefined || run.agentStatus === 'idle';
+  return idle && (run.work ?? []).length === 0;
 }
 
 /**
