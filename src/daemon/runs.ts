@@ -22,6 +22,7 @@ import type {
   Swap,
   TermClientFrame,
 } from '../shared/types.ts';
+import { SCHEDULED_WORK, SPENDING_WORK } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, readJson, writeRuntimeJson } from './claude.ts';
 import { CredentialSync } from './credsync.ts';
@@ -446,7 +447,7 @@ export function attentionFor(input: {
   const busy =
     input.agentStatus === 'working' ||
     input.agentStatus === 'starting' ||
-    input.work.some((w) => w.kind === 'subagent');
+    input.work.some((w) => SPENDING_WORK.includes(w.kind));
   return {
     waiting: input.agentStatus === 'waiting',
     unread: input.unread,
@@ -1072,6 +1073,8 @@ export class RunManager {
       subscriptionLabel: this.subs.row(r.subscription_id)?.label ?? r.subscription_id,
       status,
       agentStatus: agent?.status ?? null,
+      agentStatusSince: agent ? (agent.status_at ?? agent.last_seen) : null,
+      lastTool: agent?.status === 'working' || agent?.status === 'waiting' ? agent.last_tool : null,
       autoSwap: bool(r.auto_swap),
       swapCount: r.swap_count,
       lastSwap,
@@ -2210,7 +2213,8 @@ export class RunManager {
   /** What a session is doing that a respawn waits on, in words: "agent working, 2 background shells". */
   private holding(r: RunRow): string {
     const status = this.coord.agent(r.session_id)?.status ?? 'unknown';
-    const work = workSummary(this.coord.liveWork(r.session_id));
+    // Booked work is not held for, so it is not named as what the respawn waits on.
+    const work = workSummary(this.coord.liveWork(r.session_id).filter((w) => !SCHEDULED_WORK.includes(w.kind)));
     return work ? `agent ${status}, ${work}` : `agent ${status}`;
   }
 

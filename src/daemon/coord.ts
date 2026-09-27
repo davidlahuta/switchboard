@@ -57,6 +57,8 @@ export interface AgentRow {
   ended_at: string | null;
   last_piggyback_at: string | null;
   read_through_id: number;
+  transcript: string | null;
+  status_at: string | null;
 }
 
 interface MessageRow {
@@ -204,18 +206,30 @@ const RECENTLY_SEEN_MS = 2 * 60_000;
  * enough that no real subagent is dropped while it is still thinking, and short enough that a lost
  * SubagentStop cannot hold a queued restart for the rest of the day.
  *
- * A background shell or a monitor announces nothing at all — not when it starts, which is why it is
- * read out of a tool result, and not when it ends. Most of them are a build or a test run that was
- * over in minutes and never mentioned again, so believing them for hours meant a session that had
- * finished everything still claimed to be running seven things. Three quarters of an hour is longer
- * than the runs that produce these and short enough that the count means something; the price is a
- * genuinely long-lived one, a dev server say, quietly dropping off the list.
+ * A background shell or a monitor has no hook of its own. It starts in a tool result and ends in a
+ * task notification the transcript records, which TranscriptWatch reads back, so the silence limit
+ * is only a backstop for a notification that was never written. It used to be the main way these
+ * ended, at three quarters of an hour, and that dropped real recipe runs (p90 45 minutes on the
+ * northwind desk) while they were still going. Three hours is past any of them.
  */
 const WORK_SILENT_MS: Record<SessionWorkKind, number> = {
   subagent: 30 * 60_000,
-  shell: 45 * 60_000,
-  monitor: 45 * 60_000,
+  // A workflow's own agents speak for themselves; the run itself is ended by its notification.
+  workflow: 3 * 3600_000,
+  shell: 3 * 3600_000,
+  monitor: 3 * 3600_000,
+  // Scheduled work is judged by when it was due, not by silence; see WORK_OVERDUE_MS.
+  wakeup: Number.POSITIVE_INFINITY,
+  cron: Number.POSITIVE_INFINITY,
 };
+
+/**
+ * How long past its `until` work is still believed in. A monitor's timeout ends it with no record
+ * in the transcript at all, and a wake-up that fired while this daemon was down left nothing to
+ * read either; both are over once their time has passed by more than the margin a busy session
+ * needs to get round to them.
+ */
+const WORK_OVERDUE_MS = 10 * 60_000;
 
 interface WorkRow {
   id: string;
@@ -226,7 +240,10 @@ interface WorkRow {
   last_seen: string;
   ended_at: string | null;
   end_reason: string | null;
+  until: string | null;
 }
+
+const workOf = (r: WorkRow): SessionWork => ({ id: r.id, kind: r.kind, label: r.label, since: r.started_at, lastSeen: r.last_seen, until: r.until });
 
 export function editedPath(toolName: unknown, toolInput: unknown): string | null {
   if (typeof toolName !== 'string' || !EDIT_TOOLS.has(toolName)) return null;
@@ -587,8 +604,43 @@ export class Coordinator {
     if (!a) return;
     const tool = lastTool === undefined ? a.last_tool : lastTool;
     const changed = a.status !== status || a.last_tool !== tool;
-    this.db.run('UPDATE agents SET status = ?, last_tool = ?, last_seen = ?, ended_at = NULL WHERE id = ?', status, tool, now(), id);
+    const ts = now();
+    // status_at moves only when the status does: it is what a transcript record is compared with
+    // to tell a change the status has not caught up with from one it already reflects.
+    this.db.run(
+      'UPDATE agents SET status = ?, last_tool = ?, last_seen = ?, status_at = CASE WHEN status = ? AND status_at IS NOT NULL THEN status_at ELSE ? END, ended_at = NULL WHERE id = ?',
+      status,
+      tool,
+      ts,
+      status,
+      ts,
+      id,
+    );
     if (changed) this.bus.invalidate('state', `repo:${a.repo_id}`);
+  }
+
+  /** A sign of life that is not a status change: the session's transcript grew. */
+  touch(id: string, at: string): void {
+    this.db.run("UPDATE agents SET last_seen = ? WHERE id = ? AND last_seen < ? AND status <> 'offline'", at, id, at);
+  }
+
+  /** Where the session writes its transcript, as its hooks report it. */
+  setTranscript(id: string, file: string): void {
+    this.db.run('UPDATE agents SET transcript = ? WHERE id = ? AND transcript IS NOT ?', file, id, file);
+  }
+
+  /** Sessions still on the board that have not said where their transcript is. */
+  withoutTranscript(): string[] {
+    return this.db.all<{ id: string }>("SELECT id FROM agents WHERE status <> 'offline' AND transcript IS NULL").map((r) => r.id);
+  }
+
+  /** Sessions still on the board whose transcripts are known, for the reader that backs up the hooks. */
+  transcripts(): Array<{ id: string; transcript: string; status: AgentStatus; statusAt: string }> {
+    return this.db
+      .all<{ id: string; transcript: string; status: AgentStatus; status_at: string | null; last_seen: string }>(
+        "SELECT id, transcript, status, status_at, last_seen FROM agents WHERE status <> 'offline' AND transcript IS NOT NULL",
+      )
+      .map((r) => ({ id: r.id, transcript: r.transcript, status: r.status, statusAt: r.status_at ?? r.last_seen }));
   }
 
   async setCwd(id: string, cwd: string): Promise<void> {
@@ -737,22 +789,47 @@ export class Coordinator {
    * outlives that turn by minutes — during which the session looks finished, is not, and would lose
    * everything the subagent has spent if it were taken down.
    */
-  workStarted(sessionId: string, work: { id: string; kind: SessionWorkKind; label?: string | null }): void {
+  workStarted(
+    sessionId: string,
+    work: { id: string; kind: SessionWorkKind; label?: string | null; until?: string | null; at?: string },
+    opts: { reopen?: boolean } = {},
+  ): boolean {
     const ts = now();
+    const existing = this.db.get<WorkRow>('SELECT * FROM session_work WHERE id = ?', work.id);
+    /*
+     * Work that has ended stays ended unless the caller knows it has started again. The same start
+     * is reported twice — by the hook, and by the transcript read to back the hooks up — and the
+     * second report can come after the end: a shell that finished before its transcript was read.
+     * Only a subagent sent a new message, or a wake-up booked again, comes back.
+     */
+    if (existing?.ended_at && !opts.reopen) return false;
+    if (existing && !existing.ended_at) {
+      this.db.run(
+        'UPDATE session_work SET label = COALESCE(?, label), until = COALESCE(?, until), last_seen = ? WHERE id = ?',
+        work.label ?? null,
+        work.until ?? null,
+        ts,
+        work.id,
+      );
+      if ((work.label && work.label !== existing.label) || (work.until && work.until !== existing.until)) this.bus.invalidate('state');
+      return false;
+    }
     this.db.run(
-      `INSERT INTO session_work (id, session_id, kind, label, started_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO session_work (id, session_id, kind, label, started_at, last_seen, until) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, kind = excluded.kind,
-         label = COALESCE(excluded.label, session_work.label), last_seen = excluded.last_seen,
-         ended_at = NULL, end_reason = NULL`,
+         label = COALESCE(excluded.label, session_work.label), started_at = excluded.started_at,
+         last_seen = excluded.last_seen, until = excluded.until, ended_at = NULL, end_reason = NULL`,
       work.id,
       sessionId,
       work.kind,
       work.label ?? null,
+      work.at ?? ts,
       ts,
-      ts,
+      work.until ?? null,
     );
     log.info('session work started', { session: sessionId, kind: work.kind, id: work.id, label: work.label ?? undefined });
     this.bus.invalidate('state');
+    return true;
   }
 
   /** Any hook stamped with this work's id is proof it is still going. */
@@ -771,12 +848,14 @@ export class Coordinator {
    * running inside, so when that process restarts, ends, or stops on a usage limit, none of it
    * survived — including the subagents that would otherwise have announced themselves.
    */
-  endSessionWork(sessionId: string, reason: string): number {
+  endSessionWork(sessionId: string, reason: string, kinds?: readonly SessionWorkKind[]): number {
+    const only = kinds ? ` AND kind IN (${kinds.map(() => '?').join(', ')})` : '';
     const n = this.db.run(
-      'UPDATE session_work SET ended_at = ?, end_reason = ? WHERE session_id = ? AND ended_at IS NULL',
+      `UPDATE session_work SET ended_at = ?, end_reason = ? WHERE session_id = ? AND ended_at IS NULL${only}`,
       now(),
       reason,
       sessionId,
+      ...(kinds ?? []),
     ).changes;
     if (n) {
       log.info('session work cleared', { session: sessionId, count: n, reason });
@@ -788,7 +867,7 @@ export class Coordinator {
   liveWork(sessionId: string): SessionWork[] {
     return this.db
       .all<WorkRow>('SELECT * FROM session_work WHERE session_id = ? AND ended_at IS NULL ORDER BY started_at', sessionId)
-      .map((r) => ({ id: r.id, kind: r.kind, label: r.label, since: r.started_at, lastSeen: r.last_seen }));
+      .map(workOf);
   }
 
   /** All live work, by session, for the one caller that renders every session at once. */
@@ -796,7 +875,7 @@ export class Coordinator {
     const out = new Map<string, SessionWork[]>();
     for (const r of this.db.all<WorkRow>('SELECT * FROM session_work WHERE ended_at IS NULL ORDER BY started_at')) {
       const list = out.get(r.session_id) ?? [];
-      list.push({ id: r.id, kind: r.kind, label: r.label, since: r.started_at, lastSeen: r.last_seen });
+      list.push(workOf(r));
       out.set(r.session_id, list);
     }
     return out;
@@ -804,7 +883,7 @@ export class Coordinator {
 
   liveSubagents(sessionId: string): number {
     return this.db.get<{ n: number }>(
-      "SELECT COUNT(*) AS n FROM session_work WHERE session_id = ? AND kind = 'subagent' AND ended_at IS NULL",
+      "SELECT COUNT(*) AS n FROM session_work WHERE session_id = ? AND kind IN ('subagent', 'workflow') AND ended_at IS NULL",
       sessionId,
     )!.n;
   }
@@ -812,8 +891,16 @@ export class Coordinator {
   /** Work whose end was never announced, given up on so it cannot hold a session for ever. */
   private sweepWork(): void {
     const touched = new Set<string>();
+    const at = Date.now();
     for (const r of this.db.all<WorkRow>('SELECT * FROM session_work WHERE ended_at IS NULL')) {
-      if (Date.now() - Date.parse(r.last_seen) < WORK_SILENT_MS[r.kind]) continue;
+      const due = r.until ? Date.parse(r.until) : Number.NaN;
+      if (Number.isFinite(due) && at - due > WORK_OVERDUE_MS) {
+        this.workEnded(r.id, r.kind === 'monitor' ? 'timed out' : 'its time passed');
+        touched.add(r.session_id);
+        log.info('ended session work that is past its time', { session: r.session_id, kind: r.kind, id: r.id, until: r.until });
+        continue;
+      }
+      if (at - Date.parse(r.last_seen) < (WORK_SILENT_MS[r.kind] ?? WORK_SILENT_MS.shell)) continue;
       this.workEnded(r.id, 'no sign of life');
       touched.add(r.session_id);
       log.info('gave up on session work that went silent', { session: r.session_id, kind: r.kind, id: r.id });

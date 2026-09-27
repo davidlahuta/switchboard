@@ -13,6 +13,7 @@ import { ResumeButton } from '../components/ResumeButton.tsx';
 import { RunArgs, RunTags } from '../components/RunTags.tsx';
 import { SwapMenu } from '../components/SwapMenu.tsx';
 import { Badge, ConfirmDialog, Empty, Icon, StatusPill } from '../components/ui.tsx';
+import { statusDetail } from '../lib/activity.ts';
 import { api } from '../lib/api.ts';
 import { shortPath } from '../lib/format.ts';
 import { href, navigate, REPO_ALL, repoFilterOf, terminalLink } from '../lib/router.ts';
@@ -279,7 +280,7 @@ function SessionRow({
         <SessionName run={r} linked dot />
 
         <span className="srow-live">
-          {r.agentStatus && !exited && <StatusPill status={r.agentStatus} title="Agent status" />}
+          {r.agentStatus && !exited && <StatusPill status={r.agentStatus} title={statusDetail(r, now)} />}
           {(exited || r.status !== 'running') && <StatusPill status={r.status} title="Run status" />}
           {exited && r.exitCode !== null && <Badge tone={r.exitCode === 0 ? 'muted' : 'crit'}>exit {r.exitCode}</Badge>}
           <RunTags run={r} models={state.models} update={state.update} compact />

@@ -2,7 +2,7 @@
  * How a respawn is described wherever it is shown — a toast, a badge, a repo timeline, a terminal
  * banner. One place, so the web and the daemon never call the same event two different things.
  */
-import type { AgentStatus, RespawnKind, RespawnTrigger, SessionWork, SessionWorkKind } from './types.ts';
+import { type AgentStatus, type RespawnKind, type RespawnTrigger, SCHEDULED_WORK, type SessionWork, type SessionWorkKind, SPENDING_WORK } from './types.ts';
 
 /** Short enough for a badge, and the words an operator would use for it. */
 export function triggerLabel(trigger: RespawnTrigger): string {
@@ -82,16 +82,24 @@ export function waitsForShells(trigger: RespawnTrigger): boolean {
 export function readyForRespawn(input: { status: AgentStatus | undefined | null; work: SessionWork[]; trigger?: RespawnTrigger }): boolean {
   if (!safeToRespawn(input.status)) return false;
   const shellsHold = input.trigger !== undefined && waitsForShells(input.trigger);
-  return !input.work.some((w) => w.kind === 'subagent' || shellsHold);
+  /*
+   * A wake-up or a scheduled prompt never holds a respawn: it is not running, only booked, and a
+   * session looping every half hour would otherwise never be free. A workflow is agents at work,
+   * and holds like one.
+   */
+  return !input.work.some((w) => SPENDING_WORK.includes(w.kind) || (shellsHold && !SCHEDULED_WORK.includes(w.kind)));
 }
 
 /** "2 subagents, 1 shell" — what a session still has running, in the order that matters. */
 export function workSummary(work: SessionWork[]): string {
-  const order: SessionWorkKind[] = ['subagent', 'shell', 'monitor'];
+  const order: SessionWorkKind[] = ['workflow', 'subagent', 'shell', 'monitor', 'wakeup', 'cron'];
   const words: Record<SessionWorkKind, [string, string]> = {
+    workflow: ['workflow', 'workflows'],
     subagent: ['subagent', 'subagents'],
     shell: ['background shell', 'background shells'],
     monitor: ['monitor', 'monitors'],
+    wakeup: ['loop wake-up', 'loop wake-ups'],
+    cron: ['scheduled prompt', 'scheduled prompts'],
   };
   return order
     .map((kind) => [kind, work.filter((w) => w.kind === kind).length] as const)

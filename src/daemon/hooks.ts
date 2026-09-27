@@ -1,7 +1,9 @@
 import { logger } from '../log.ts';
 import { type Coordinator, editedPath } from './coord.ts';
 import type { RunManager } from './runs.ts';
-import { TaskNotes } from './tasknotes.ts';
+import { SCHEDULED_WORK, SPENDING_WORK } from '../shared/types.ts';
+import { toolResultFacts } from './tasknotes.ts';
+import type { TranscriptWatch } from './transcriptWatch.ts';
 
 const log = logger('hooks');
 
@@ -14,48 +16,26 @@ function context(event: string, parts: Array<string | null | undefined>, extra?:
   return Object.keys(out).length > 1 ? { hookSpecificOutput: out } : {};
 }
 
-/** Tools that hand back a handle to something still running after they return. */
-const OUTPUT_TOOLS = new Set(['BashOutput', 'TaskOutput']);
-const STOP_TOOLS = new Set(['KillShell', 'TaskStop']);
-
-/** The id a tool call is about, under any of the names Claude Code has used for it. */
-export function taskIdOf(input: unknown): string | null {
-  const i = (input ?? {}) as Record<string, unknown>;
-  for (const key of ['task_id', 'agentId', 'bash_id', 'shell_id']) {
-    const v = i[key];
-    if (typeof v === 'string' && v) return v;
-  }
-  return null;
-}
-
 /**
- * Work a tool call has left running behind it.
- *
- * A background shell and a monitor announce themselves only here, in the result of the call that
- * started them: `backgroundTaskId` is the handle, and nothing fires when they end. So they are
- * recorded from the response rather than from a hook of their own, and given up on later if nothing
- * mentions them again. Subagents are better served, by SubagentStart and SubagentStop, and are
- * recorded from those instead.
+ * Tools that stop and wait for the operator. PreToolUse fires for them like any other tool, and
+ * reading that as "working" showed a session asking a question as busy for as long as nobody
+ * answered it.
  */
-export function startedWork(tool: string | null, response: unknown): { id: string; kind: 'shell' | 'monitor' } | null {
-  const r = (response ?? {}) as Record<string, unknown>;
-  const id = typeof r.backgroundTaskId === 'string' ? r.backgroundTaskId : null;
-  if (!id) return null;
-  return { id, kind: tool === 'Monitor' ? 'monitor' : 'shell' };
-}
+const ASKING_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 
-/** Whether a peek at a background task says it is over. */
-export function looksFinished(response: unknown): boolean {
-  const r = (response ?? {}) as Record<string, unknown>;
-  if (typeof r.status === 'string') return ['completed', 'failed', 'killed', 'exited'].includes(r.status);
-  return typeof r.exitCode === 'number' || typeof r.exit_code === 'number';
-}
-
-/** Enough of what was started to recognise it in a list: the command, or what it was watching. */
-function describeWork(input: unknown): string | null {
-  const i = (input ?? {}) as Record<string, unknown>;
-  const text = i.description ?? i.command;
-  return typeof text === 'string' ? text.slice(0, 120) : null;
+/** Why a session started, from SessionStart's `source`: whether what it had running survived. */
+export function workSurvivesStart(source: string | null): 'all' | 'running' | 'none' {
+  // /compact is the same process carrying on: everything it had running is still running.
+  if (source === 'compact') return 'all';
+  /*
+   * A resumed conversation is a new process. Claude Code hands background shells, workflows and
+   * subagents over to it when it can and says so; the ones it could not are reported as stopped
+   * ("didn't finish before the previous session ended"), which the transcript watch reads. So those
+   * are left to that report. A wake-up or a scheduled prompt lived in the old process's memory and
+   * went with it.
+   */
+  if (source === 'resume') return 'running';
+  return 'none';
 }
 
 /**
@@ -69,8 +49,7 @@ function titleSync(runs: RunManager, sid: string, p: Payload): Record<string, un
 }
 
 /** Claude Code HTTP hook endpoint: presence, conflict checks, lazy message delivery, swap signals. */
-export function createHookHandler(coord: Coordinator, runs: RunManager) {
-  const notes = new TaskNotes();
+export function createHookHandler(coord: Coordinator, runs: RunManager, watch: TranscriptWatch) {
   return async (event: string, p: Payload, runHeader: string | undefined): Promise<object> => {
     const sid = typeof p.session_id === 'string' ? p.session_id : null;
     /*
@@ -116,27 +95,30 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
     }
 
     /*
-     * A background shell or monitor that ends on its own tells only the model, in the transcript;
-     * see finishedTasks. Looked for on every main-thread hook while such work is open, reading only
-     * what the transcript gained since the last look.
+     * The transcript says what no hook does — a background task ending, a turn a notification
+     * started, an Esc — and TranscriptWatch reads it every few seconds regardless. Reading it here
+     * as well, before this hook's own word is applied, keeps the board current to the hook and
+     * leaves the hook the last say on the status. Only the main thread's hooks carry the path of
+     * the session's own transcript.
      */
-    if (!agentId && transcript && event !== 'SessionStart' && coord.liveWork(sid).some((w) => w.kind !== 'subagent')) {
-      let ended = 0;
-      for (const id of notes.finished(transcript)) {
-        if (coord.workEnded(id, 'finished')) {
-          ended++;
-          log.info('session work finished, from its notification in the transcript', { session: sid, id });
-        }
-      }
-      if (ended) runs.onWorkSettled(sid);
+    if (!agentId && transcript && event !== 'SessionStart') {
+      coord.setTranscript(sid, transcript);
+      watch.read(sid, transcript);
     }
 
     try {
       switch (event) {
         case 'SessionStart': {
-          coord.forgetPid(sid);
-          // Whatever the last process had running died with it; this one starts with nothing.
-          coord.endSessionWork(sid, 'the session started again');
+          const source = typeof p.source === 'string' ? p.source : null;
+          const survives = workSurvivesStart(source);
+          if (survives !== 'all') coord.forgetPid(sid);
+          if (survives === 'none') coord.endSessionWork(sid, 'the session started again');
+          else if (survives === 'running') coord.endSessionWork(sid, 'the session started again', SCHEDULED_WORK);
+          if (transcript) {
+            coord.setTranscript(sid, transcript);
+            // A resume appends to the same file; read on from here, not from before the restart.
+            watch.read(sid, transcript);
+          }
           if (cwd) await coord.setCwd(sid, cwd);
           coord.setStatus(sid, 'idle');
           runs.onSessionStart(sid, cwd);
@@ -149,8 +131,10 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
         case 'PreToolUse': {
           // A subagent's tool call says the subagent is alive, not that the main thread is working.
           // The edit checks below still apply: it is the same tree, under the session's name.
+          const tool = typeof p.tool_name === 'string' ? p.tool_name : null;
           if (agentId) coord.workSeen(agentId);
-          else coord.setStatus(sid, 'working', typeof p.tool_name === 'string' ? p.tool_name : null);
+          // Asking the operator is waiting for them, whatever else PreToolUse means.
+          else coord.setStatus(sid, tool && ASKING_TOOLS.has(tool) ? 'waiting' : 'working', tool);
           const file = editedPath(p.tool_name, p.tool_input);
           if (!file) return {};
           const verdict = await coord.preEdit(sid, file);
@@ -163,24 +147,16 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
           const tool = typeof p.tool_name === 'string' ? p.tool_name : null;
           if (agentId) coord.workSeen(agentId);
           else coord.setStatus(sid, 'working', tool);
-          const started = startedWork(tool, p.tool_response);
-          if (started) {
-            coord.workStarted(sid, { ...started, label: describeWork(p.tool_input) });
-            runs.onWorkChanged(sid);
-          }
-          const about = taskIdOf(p.tool_input);
-          if (about && tool && STOP_TOOLS.has(tool)) coord.workEnded(about, 'stopped by the session');
-          else if (about && tool && OUTPUT_TOOLS.has(tool)) {
-            if (looksFinished(p.tool_response)) coord.workEnded(about, 'finished');
-            else coord.workSeen(about);
-          }
+          // Work the call left running, or says is over: a shell, a monitor, a subagent, a wake-up.
+          watch.apply(sid, toolResultFacts(tool, p.tool_input, p.tool_response, sid));
           const file = editedPath(p.tool_name, p.tool_input);
           return context('PostToolUse', [file && tool ? await coord.recordEdit(sid, file, tool) : null, coord.piggyback(sid)]);
         }
         case 'SubagentStart': {
           const type = typeof p.agent_type === 'string' ? p.agent_type : null;
           if (agentId) {
-            coord.workStarted(sid, { id: agentId, kind: 'subagent', label: type });
+            // A subagent sent another message starts again under the same id.
+            coord.workStarted(sid, { id: agentId, kind: 'subagent', label: type }, { reopen: true });
             runs.onWorkChanged(sid);
           }
           return {};
@@ -216,9 +192,9 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
           if (!limited) runs.onTurnFailed(sid, String(p.error_type ?? 'an error'));
           if (limited) {
             // The limit that stopped the main thread stops its subagents too: they draw on the same
-            // subscription. Nothing will announce their end, so it is announced for them, or the
-            // swap that fixes the limit would sit waiting on work that is already dead.
-            coord.endSessionWork(sid, 'the session ran out of usage');
+            // subscription, and the swap that fixes the limit must not sit waiting on work that is
+            // already dead. A shell, a monitor or a wake-up spends nothing and carries on regardless.
+            coord.endSessionWork(sid, 'the session ran out of usage', SPENDING_WORK);
             runs.onLimit(sid, String(p.error_message ?? 'rate limit'), 'hook');
           }
           return {};
@@ -226,7 +202,8 @@ export function createHookHandler(coord: Coordinator, runs: RunManager) {
         case 'Notification': {
           const t = String(p.notification_type ?? '');
           if (['permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog', 'agent_needs_input'].includes(t)) coord.setStatus(sid, 'waiting');
-          else if (t === 'idle_prompt') coord.setStatus(sid, 'idle');
+          // Sitting at the prompt is idle, except when what is on screen is a question for the operator.
+          else if (t === 'idle_prompt' && coord.agent(sid)?.status !== 'waiting') coord.setStatus(sid, 'idle');
           return {};
         }
         case 'SessionEnd':

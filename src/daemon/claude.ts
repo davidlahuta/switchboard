@@ -48,8 +48,6 @@ export const HOOK_EVENTS = [
 ] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
-const EDIT_MATCHER = 'Edit|Write|MultiEdit|NotebookEdit';
-
 export function hookUrl(event: string): string {
   return `${DAEMON_URL}/hooks/${event}`;
 }
@@ -71,9 +69,13 @@ export function hooksConfig(): Record<string, unknown[]> {
       headers: { 'X-Switchboard-Run': '$SWITCHBOARD_RUN_ID' },
       allowedEnvVars: ['SWITCHBOARD_RUN_ID'],
     };
-    const entry: Record<string, unknown> = { hooks: [hook] };
-    if (event === 'PreToolUse') entry.matcher = EDIT_MATCHER;
-    out[event] = [entry];
+    /*
+     * PreToolUse is taken for every tool, not only edits. It used to be edits only, and a session
+     * told apart nothing between a tool call starting and it finishing: a twenty-minute recipe in the
+     * foreground read as whatever the session was doing before it, and a permission prompt that had
+     * been answered read as "waiting for you" until the approved command ended.
+     */
+    out[event] = [{ hooks: [hook] }];
   }
   return out;
 }

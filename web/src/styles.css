@@ -764,6 +764,10 @@ select.input {
 .attention-background {
   color: var(--border-strong);
 }
+/* Idle until its loop or schedule wakes it: as quiet as background work, and for the same reason. */
+.attention-scheduled {
+  color: var(--muted);
+}
 @media (prefers-reduced-motion: no-preference) {
   .attention-blocked {
     animation: attention-pulse 2s ease-in-out infinite;
@@ -797,6 +801,7 @@ select.input {
 .row-lit[data-tone='busy'],
 .row-lit[data-tone='delegating'],
 .row-lit[data-tone='background'],
+.row-lit[data-tone='scheduled'],
 .row-lit[data-tone='quiet'] {
   --lit: var(--surface-2);
 }

@@ -44,7 +44,12 @@ export function hooksInstalledIn(settingsFile: string): boolean {
 export function missingHookEvents(settingsFile: string): HookEvent[] {
   const s = readJson<SettingsFile>(settingsFile);
   if (!s?.hooks) return [];
-  return HOOK_EVENTS.filter((event) => !(s.hooks?.[event] ?? []).some(isOurs));
+  const wanted = hooksConfig() as Record<string, HookEntry[]>;
+  return HOOK_EVENTS.filter((event) => {
+    const ours = (s.hooks?.[event] ?? []).filter(isOurs);
+    // Installed with a different matcher is installed wrong: PreToolUse used to cover edits only.
+    return !ours.length || ours.some((e) => (e.matcher ?? '') !== (wanted[event]?.[0]?.matcher ?? ''));
+  });
 }
 
 /**

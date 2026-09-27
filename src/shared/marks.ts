@@ -1,4 +1,4 @@
-import type { Run, SessionWork } from './types.ts';
+import { type Run, SCHEDULED_WORK, type SessionWork, SPENDING_WORK } from './types.ts';
 
 /**
  * The mark a session carries, in one vocabulary, wherever it is shown.
@@ -9,7 +9,7 @@ import type { Run, SessionWork } from './types.ts';
  * the operator had to learn both. One definition, and both surfaces draw all of it, so they cannot
  * drift again; only the colour is particular to the one that can show colour.
  */
-export type MarkTone = 'blocked' | 'message' | 'unseen' | 'busy' | 'delegating' | 'background' | 'limited';
+export type MarkTone = 'blocked' | 'message' | 'unseen' | 'busy' | 'delegating' | 'background' | 'scheduled' | 'limited';
 
 export interface SessionMark {
   /** Rendered as-is in a terminal tab title and in the web lists. */
@@ -177,27 +177,41 @@ export function sessionMark(run: Run): SessionMark | null {
   // Defensive: a page can outlive the daemon build that served it, and a mark that throws would
   // take the whole list with it.
   const work = run.work ?? [];
-  const subagents = countWork(work, 'subagent');
-  if (subagents > 0) {
-    return {
-      glyph: '◐',
-      tone: 'delegating',
-      why: `Working through ${subagents} subagent${subagents === 1 ? '' : 's'}; its own turn has ended`,
-    };
+  const subagents = work.filter((w) => w.kind === 'subagent').length;
+  const workflows = work.filter((w) => w.kind === 'workflow').length;
+  if (subagents + workflows > 0) {
+    const parts = [workflows ? plural(workflows, 'workflow') : '', subagents ? plural(subagents, 'subagent') : ''].filter(Boolean);
+    return { glyph: '◐', tone: 'delegating', why: `Working through ${parts.join(' and ')}; its own turn has ended` };
   }
-  const background = work.length;
+  const background = work.filter((w) => !SPENDING_WORK.includes(w.kind) && !SCHEDULED_WORK.includes(w.kind)).length;
   if (background > 0) {
     return {
       glyph: '◌',
       tone: 'background',
-      why: `Idle, with ${background} background task${background === 1 ? '' : 's'} of its own still running`,
+      why: `Idle, with ${plural(background, 'background task')} of its own still running`,
     };
+  }
+  /*
+   * Idle, and booked to start again on its own: a /loop between wake-ups, a scheduled prompt. It
+   * showed nothing, which read as "finished" for a session that was half way through a loop.
+   */
+  const next = nextScheduled(work);
+  if (next) {
+    const at = next.until ? ` at ${new Date(next.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
+    return { glyph: '⏰', tone: 'scheduled', why: `Idle until ${next.kind === 'wakeup' ? `its /loop wakes up${at}` : 'a scheduled prompt fires'}${next.label ? `: ${next.label}` : ''}` };
   }
   return null;
 }
 
-function countWork(work: SessionWork[], kind: SessionWork['kind']): number {
-  return work.filter((w) => w.kind === kind).length;
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/** The scheduled work due soonest; a wake-up, which has a time, before a scheduled prompt. */
+export function nextScheduled(work: SessionWork[]): SessionWork | null {
+  const due = work.filter((w) => SCHEDULED_WORK.includes(w.kind));
+  due.sort((a, b) => (a.until ?? '9999').localeCompare(b.until ?? '9999'));
+  return due[0] ?? null;
 }
 
 /** A session's terminal tab title: its name, and what it wants. */

@@ -14,6 +14,7 @@ import type { Coordinator } from './coord.ts';
 import type { Db } from './db.ts';
 import type { RepoScanner } from './discovery.ts';
 import { createHookHandler } from './hooks.ts';
+import type { TranscriptWatch } from './transcriptWatch.ts';
 import { installIntegration, integrationStatus, uninstallIntegration } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import type { ModelCatalog } from './models.ts';
@@ -78,6 +79,7 @@ export interface Services {
   updater: Updater;
   models: ModelCatalog;
   scanner: RepoScanner;
+  watch: TranscriptWatch;
 }
 
 type Body = Record<string, any>;
@@ -154,7 +156,7 @@ async function readBody(req: IncomingMessage): Promise<Body> {
 }
 
 export function createServer(s: Services): http.Server {
-  const hook = createHookHandler(s.coord, s.runs);
+  const hook = createHookHandler(s.coord, s.runs, s.watch);
 
   const state = (req: IncomingMessage): StateSnapshot => {
     const subscriptions = s.subs.list();

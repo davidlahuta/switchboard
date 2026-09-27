@@ -12,6 +12,7 @@ import { HandoffButton } from '../components/HandoffButton.tsx';
 import { SessionName } from '../components/SessionName.tsx';
 import { AutoContinueMark, RunTags } from '../components/RunTags.tsx';
 import { Icon, StatusPill } from '../components/ui.tsx';
+import { statusDetail } from '../lib/activity.ts';
 import { api, wsUrl } from '../lib/api.ts';
 import { href, navigate } from '../lib/router.ts';
 import { emitToast } from '../lib/toast.ts';
@@ -828,7 +829,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
   const details = (
     <>
       {status && <StatusPill status={status} title="Run status" />}
-      {run?.agentStatus && status !== 'exited' && <StatusPill status={run.agentStatus} title="Agent status" />}
+      {run?.agentStatus && status !== 'exited' && <StatusPill status={run.agentStatus} title={statusDetail(run, Date.now())} />}
       <span className="term-sub" title="Subscription">
         {subLabel}
       </span>
