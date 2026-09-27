@@ -36,7 +36,8 @@ import {
   hostDecision,
 } from '../src/daemon/runs.ts';
 import { readyForRespawn, safeToRespawn, waitsForShells, workSummary } from '../src/shared/respawn.ts';
-import { looksFinished, startedWork, taskIdOf } from '../src/daemon/hooks.ts';
+import { workSurvivesStart } from '../src/daemon/hooks.ts';
+import { toolResultFacts } from '../src/daemon/tasknotes.ts';
 import { attentionMark, byAttention, GROUP_LABEL, QUIET_AFTER_MS, SESSION_GROUPS, sessionGroup, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
 import { headroomOf, modelWindows, SWAP_MARGIN, subscriptionScore, weightFor } from '../src/daemon/subscriptions.ts';
@@ -227,29 +228,61 @@ describe('moving a session off a spent subscription', () => {
 describe('what a session still has running', () => {
   const work = (kind: SessionWork['kind'], id = 'x'): SessionWork => ({ id, kind, label: null, since: '', lastSeen: '' });
 
+  const started = (tool: string, input: object, response: unknown) =>
+    toolResultFacts(tool, input, response, 'S').flatMap((f) => (f.type === 'started' ? [{ id: f.id, kind: f.kind, label: f.label, until: f.until }] : []));
+  const ended = (tool: string, input: object, response: unknown) => toolResultFacts(tool, input, response, 'S').flatMap((f) => (f.type === 'ended' ? f.ids : []));
+
   it('recognises a background shell by the handle the tool result hands back', () => {
     // Measured: a background Bash returns { ..., backgroundTaskId } and fires no hook of its own,
-    // either when it starts or when it ends.
-    assert.deepEqual(startedWork('Bash', { stdout: '', backgroundTaskId: 'bpylfmjzd' }), { id: 'bpylfmjzd', kind: 'shell' });
-    assert.equal(startedWork('Bash', { stdout: 'done' }), null, 'an ordinary Bash leaves nothing running');
+    // either when it starts or when it ends. PowerShell does the same.
+    assert.deepEqual(started('Bash', { command: 'verify.sh', description: 'Run the recipe' }, { stdout: '', backgroundTaskId: 'bpylfmjzd' }), [
+      { id: 'bpylfmjzd', kind: 'shell', label: 'Run the recipe', until: null },
+    ]);
+    assert.equal(started('PowerShell', { command: 'x' }, { backgroundTaskId: 'p1' })[0]?.kind, 'shell');
+    assert.deepEqual(started('Bash', { command: 'ls' }, { stdout: 'done' }), [], 'an ordinary Bash leaves nothing running');
   });
 
-  it('tells a monitor apart from a shell, since only one of them is watching something', () => {
-    assert.equal(startedWork('Monitor', { backgroundTaskId: 'm1' })?.kind, 'monitor');
+  it('recognises a monitor by the handle it really returns, and knows when it times out', () => {
+    // Measured: Monitor returns { taskId, timeoutMs, persistent }, not backgroundTaskId, so none had
+    // ever been listed.
+    const [m] = toolResultFacts('Monitor', { description: 'watch the log' }, { taskId: 'bt7a0u472', timeoutMs: 1800000, persistent: false }, 'S');
+    assert.equal(m?.type, 'started');
+    if (m?.type !== 'started') return;
+    assert.equal(m.kind, 'monitor');
+    assert.equal(Date.parse(m.until!) - Date.parse(m.at), 1800000);
+    assert.equal(started('Monitor', {}, { taskId: 'p', timeoutMs: 1, persistent: true })[0]?.until, null, 'a persistent monitor has no timeout');
   });
 
-  it('finds the task a later call is about, under every name Claude Code has used', () => {
-    assert.equal(taskIdOf({ task_id: 't1' }), 't1');
-    assert.equal(taskIdOf({ bash_id: 'b1' }), 'b1');
-    assert.equal(taskIdOf({ shell_id: 's1' }), 's1');
-    assert.equal(taskIdOf({ command: 'ls' }), null);
+  it('records a background subagent from its launch, and a foreground one as over when it returns', () => {
+    assert.deepEqual(started('Agent', { description: 'Review lens', subagent_type: 'general-purpose' }, { isAsync: true, status: 'async_launched', agentId: 'aa57' }), [
+      { id: 'aa57', kind: 'subagent', label: 'Review lens', until: null },
+    ]);
+    assert.deepEqual(ended('Agent', {}, { status: 'completed', agentId: 'ab12', content: [] }), ['ab12']);
   });
 
-  it('reads a peek at a task as an ending only when it says so', () => {
-    assert.equal(looksFinished({ status: 'completed' }), true);
-    assert.equal(looksFinished({ exitCode: 1 }), true);
-    assert.equal(looksFinished({ status: 'running' }), false);
-    assert.equal(looksFinished({ stdout: 'still going' }), false);
+  it('books a /loop wake-up and a scheduled prompt, and takes them off again', () => {
+    const [w] = started('ScheduleWakeup', { delaySeconds: 1800, reason: 'check CI' }, { scheduledFor: 1790495160000, clampedDelaySeconds: 1800, wasClamped: false });
+    assert.deepEqual(w, { id: 'wake:S', kind: 'wakeup', label: 'check CI', until: new Date(1790495160000).toISOString() });
+    assert.deepEqual(ended('ScheduleWakeup', { stop: true }, { scheduledFor: 0, stopped: true, cancelledWakeups: 1 }), ['wake:S']);
+    assert.equal(started('CronCreate', { cron: '*/15 * * * *', prompt: 'recheck' }, { id: 'fcbd', humanSchedule: 'Every 15 minutes', recurring: true })[0]?.id, 'cron:S:fcbd');
+    assert.deepEqual(ended('CronDelete', { id: 'fcbd' }, { id: 'fcbd' }), ['cron:S:fcbd']);
+  });
+
+  it('ends a task the session stopped, and one a peek says is over, under every name for its id', () => {
+    assert.deepEqual(ended('TaskStop', { task_id: 't1' }, { message: 'Successfully stopped task: t1', task_id: 't1' }), ['t1']);
+    // Stopping one that had already finished fails, and it is over all the same.
+    assert.deepEqual(ended('TaskStop', { task_id: 't2' }, 'Error: Task t2 is not running (status: completed)'), ['t2']);
+    assert.deepEqual(ended('KillShell', { shell_id: 's1' }, {}), ['s1']);
+    assert.deepEqual(ended('TaskOutput', { task_id: 'a4' }, { retrieval_status: 'success', task: { task_id: 'a4', status: 'completed' } }), ['a4']);
+    assert.deepEqual(ended('BashOutput', { bash_id: 'b1' }, { exitCode: 1 }), ['b1']);
+    assert.deepEqual(ended('TaskOutput', { task_id: 'a5' }, { task: { status: 'running' } }), [], 'still running is not over');
+  });
+
+  it('keeps what was running across /compact, hands a resume the running work, and starts a new session clean', () => {
+    assert.equal(workSurvivesStart('compact'), 'all');
+    assert.equal(workSurvivesStart('resume'), 'running');
+    assert.equal(workSurvivesStart('startup'), 'none');
+    assert.equal(workSurvivesStart(null), 'none');
   });
 
   it('says what is open in the words the operator would use', () => {
@@ -502,6 +535,15 @@ describe('when a session is taken for a restart, swap or relaunch', () => {
     for (const trigger of ['limit', 'rescue', 'revive'] as const) {
       assert.equal(readyForRespawn({ status: 'limited', work: [work('shell')], trigger }), true, trigger);
       assert.ok(!waitsForShells(trigger), trigger);
+    }
+  });
+
+  it('waits for a workflow like a subagent, and never for a loop wake-up or a scheduled prompt', () => {
+    const w = (kind: SessionWork['kind']): SessionWork => ({ id: kind, kind, label: null, since: '', lastSeen: '', until: null });
+    assert.equal(readyForRespawn({ status: 'idle', work: [w('workflow')], trigger: 'limit' }), false, 'a workflow is agents spending');
+    // A session looping every half hour is idle between wake-ups, and would otherwise never be free.
+    for (const trigger of ['rebalance', 'manual', 'limit'] as const) {
+      assert.equal(readyForRespawn({ status: 'idle', work: [w('wakeup'), w('cron')], trigger }), true, trigger);
     }
   });
 
@@ -1090,6 +1132,14 @@ describe('what a terminal tab says it wants', () => {
 
   it('shows that it has spoken to the operator before that it is busy', () => {
     assert.equal(mark({ agentStatus: 'working', attention: { waiting: false, unread: 1, unseen: false } }), '✉');
+  });
+
+  it('tells delegating, background and scheduled apart on an idle session', () => {
+    const w = (kind: SessionWork['kind'], until: string | null = null): SessionWork => ({ id: kind, kind, label: 'x', since: '', lastSeen: '', until });
+    assert.equal(mark({ work: [w('workflow')] }), '◐');
+    assert.equal(mark({ work: [w('monitor'), w('wakeup')] }), '◌', 'running work outranks booked work');
+    assert.equal(mark({ work: [w('wakeup', '2026-09-27T11:00:00Z')] }), '⏰');
+    assert.equal(mark({ work: [w('cron')] }), '⏰');
   });
 
   it('shows work in progress, and a finished turn nobody has looked at', () => {

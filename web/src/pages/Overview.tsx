@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import type { Run, StateSnapshot, Subscription } from '@shared/types.ts';
 import { AttentionDot } from '../components/AttentionDot.tsx';
+import { statusDetail } from '../lib/activity.ts';
 import { BurnPanel } from '../components/BurnPanel.tsx';
 import { byAttention, liveState, liveTone, sessionGroup, sessionMark } from '@shared/marks.ts';
 import { orderOf, useReorder } from '../lib/reorder.ts';
@@ -297,7 +298,7 @@ function LiveRunRow({ run, state }: { run: Run; state: StateSnapshot }) {
       </a>
       <span className="list-badges">
         <RunTags run={run} models={state.models} update={state.update} compact />
-        <StatusPill status={run.agentStatus ?? run.status} title={`run: ${run.status}`} />
+        <StatusPill status={run.agentStatus ?? run.status} title={`${statusDetail(run, Date.now())} Run: ${run.status}.`} />
       </span>
       {/* The same icon-only actions the sessions table uses: labels stay in the markup for screen
           readers and come back inside the menus, where there is room to read them. */}

@@ -1,5 +1,5 @@
 import type { Server } from 'node:http';
-import { BIND_HOSTS, DATA_DIR, PORT, VERSION, ensureDirs } from '../config.ts';
+import { BIND_HOSTS, DATA_DIR, HOME_CLAUDE_DIR, PORT, VERSION, ensureDirs } from '../config.ts';
 import { logger } from '../log.ts';
 import { AgentHub } from './agents.ts';
 import { Auth } from './auth.ts';
@@ -17,9 +17,17 @@ import { runNewSessionTool } from './newSessionTool.ts';
 import { RunManager } from './runs.ts';
 import { createServer } from './server.ts';
 import { SubscriptionManager } from './subscriptions.ts';
+import { TranscriptWatch } from './transcriptWatch.ts';
 import { Updater } from './updater.ts';
 
 const log = logger('daemon');
+
+/**
+ * How often every live session's transcript is looked at. A look is a stat per session unless the
+ * file grew, so this costs next to nothing, and it bounds how long a lost hook can leave a status
+ * wrong: an Esc shows as idle, and a finished shell drops off, within this.
+ */
+const TRANSCRIPT_POLL_MS = 3000;
 
 export async function startDaemon(): Promise<void> {
   /*
@@ -59,6 +67,8 @@ export async function startDaemon(): Promise<void> {
     return { runId: run.id, text };
   });
   coord.setWorkSwept((sessionId) => runs.onWorkSettled(sessionId));
+  // The transcripts, read back to catch what the hooks miss; see TranscriptWatch.
+  const watch = new TranscriptWatch(coord, runs, () => [...new Set([HOME_CLAUDE_DIR, ...subs.list().map((s) => s.configDir)])]);
   const auth = new Auth(db);
   const updater = new Updater(db, bus, runs);
   runs.versionProvider = () => updater.currentVersion;
@@ -80,6 +90,8 @@ export async function startDaemon(): Promise<void> {
   updater.start();
   void models.refresh();
   const sweep = setInterval(() => coord.sweep(), 60_000);
+  const transcripts = setInterval(() => watch.poll(), TRANSCRIPT_POLL_MS);
+  watch.poll();
   // Retention runs far less often than the liveness sweep: it is a bulk delete, and an hour of
   // extra history costs nothing next to doing it on every pass.
   const prune = setInterval(() => coord.prune(), 3600_000);
@@ -101,7 +113,7 @@ export async function startDaemon(): Promise<void> {
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
   const servers: Server[] = [];
   for (const host of BIND_HOSTS) {
-    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner });
+    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch });
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') log.error(`${host}:${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
       else if (err.code === 'EADDRNOTAVAIL') log.error(`Cannot bind ${host}: no interface has that address. Check SWITCHBOARD_BIND.`);
@@ -121,6 +133,7 @@ export async function startDaemon(): Promise<void> {
   const shutdown = (): void => {
     log.info('shutting down');
     clearInterval(sweep);
+    clearInterval(transcripts);
     clearInterval(prune);
     clearInterval(titles);
     clearInterval(logins);

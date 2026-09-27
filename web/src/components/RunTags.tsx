@@ -1,6 +1,8 @@
 import type { Model, Run, UpdateStatus } from '@shared/types.ts';
 import { kindLabel, triggerLabel, workSummary } from '@shared/respawn.ts';
+import { QUIET_NOTE_MS, QUIET_WARN_MS, quietMs, runningWork, scheduledWork, workLines } from '../lib/activity.ts';
 import { modelShort } from '../lib/format.ts';
+import { clockTime, formatDuration } from '../lib/time.ts';
 import { Badge, Icon } from './ui.tsx';
 
 /**
@@ -31,8 +33,17 @@ export function RunTags({
   const latest = update.currentVersion;
   const outdated = !!run.version && !!latest && run.version !== latest;
   const settings = !compact && (run.skipPermissions || run.continueOnResume || !!run.version);
-  const work = workSummary(run.work);
-  if (!model && !settings && !run.staleRunner && !run.waiting && !work && !run.stalled) return null;
+  const now = Date.now();
+  const running = runningWork(run);
+  const booked = scheduledWork(run);
+  const work = workSummary(running);
+  const next = booked.slice().sort((a, b) => (a.until ?? '9999').localeCompare(b.until ?? '9999'))[0];
+  /*
+   * A working session that has written nothing for a while: in a long foreground command, thinking,
+   * or stuck. Which of those it is takes a look, and this is what says a look is worth taking.
+   */
+  const quiet = run.status !== 'exited' && run.agentStatus === 'working' ? quietMs(run, now) : 0;
+  if (!model && !settings && !run.staleRunner && !run.waiting && !work && !next && !run.stalled && quiet < QUIET_NOTE_MS) return null;
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
       {run.stalled && (
@@ -49,17 +60,48 @@ export function RunTags({
           {run.stalled.nextTry ? `stalled · ${run.stalled.reason}` : `needs you · ${run.stalled.reason}`}
         </Badge>
       )}
+      {quiet >= QUIET_NOTE_MS && (
+        <Badge
+          tone={quiet >= QUIET_WARN_MS ? 'warn' : 'muted'}
+          title={
+            `Working, and nothing written to its transcript for ${formatDuration(quiet)}` +
+            (run.lastTool ? ` — last in ${run.lastTool}.` : '.') +
+            ' A long foreground command or a long think looks like this; so does a session that is stuck. Open its terminal to tell which.'
+          }
+        >
+          {run.lastTool ? `${run.lastTool} · ` : ''}quiet {formatDuration(quiet)}
+        </Badge>
+      )}
       {work && (
         <Badge
           tone="accent"
           title={
-            `Still running: ${run.work.map((w) => `${w.kind}${w.label ? ` (${w.label})` : ''}`).join(', ')}. ` +
+            `Still running:
+${workLines(running, now)}
+
+` +
             'A session reports itself idle when its own turn ends, so this is what it is still waiting on. ' +
-            'A queued restart, swap or new terminal waits for subagents, and for background shells and monitors too ' +
+            'A queued restart, swap or new terminal waits for subagents and workflows, and for background shells and monitors too ' +
             'unless the session is stuck on a limit or has lost its terminal.'
           }
         >
           {work}
+        </Badge>
+      )}
+      {next && (
+        <Badge
+          tone="muted"
+          title={
+            `Booked to start again on its own:
+${workLines(booked, now)}
+
+` +
+            'It is idle meanwhile and spends nothing. A queued restart, swap or new terminal does not wait for these.'
+          }
+        >
+          ⏰ {next.kind === 'wakeup' ? 'loop' : 'scheduled'}
+          {next.until ? ` ${clockTime(next.until)}` : ''}
+          {booked.length > 1 ? ` +${booked.length - 1}` : ''}
         </Badge>
       )}
       {run.waiting && (

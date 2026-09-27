@@ -364,6 +364,14 @@ const MIGRATIONS: string[] = [
   -- model it ran on before, not the one it is on now (see readSessionModel).
   ALTER TABLE runs ADD COLUMN model_since TEXT;
   `,
+  `
+  -- The transcript a session writes, so it can be read back when a hook is lost; when its status
+  -- last changed, so a record in that transcript can be told apart from one the status already
+  -- reflects; and when a piece of work is due to end or fire (a monitor's timeout, a wake-up).
+  ALTER TABLE agents ADD COLUMN transcript TEXT;
+  ALTER TABLE agents ADD COLUMN status_at TEXT;
+  ALTER TABLE session_work ADD COLUMN until TEXT;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

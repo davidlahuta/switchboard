@@ -25,6 +25,7 @@ const TONE_COLOR: Record<MarkTone, string> = {
   busy: '#6c7684',
   delegating: '#6c7684',
   background: '#343e4c',
+  scheduled: '#343e4c',
   limited: '#f2a93b',
 };
 

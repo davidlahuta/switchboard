@@ -252,7 +252,17 @@ export type RunStatus = 'starting' | 'running' | 'swapping' | 'exited' | 'discon
  * those costs tokens that are lost if the session is taken down, which is why they are told apart
  * rather than counted together.
  */
-export type SessionWorkKind = 'subagent' | 'shell' | 'monitor';
+export type SessionWorkKind = 'subagent' | 'workflow' | 'shell' | 'monitor' | 'wakeup' | 'cron';
+
+/**
+ * Work that is not running but is booked to start the session again: a /loop wake-up
+ * (ScheduleWakeup) or a scheduled prompt (CronCreate). The session is idle meanwhile and costs
+ * nothing, but it is not finished either: it comes back on its own at the time it asked for.
+ */
+export const SCHEDULED_WORK: readonly SessionWorkKind[] = ['wakeup', 'cron'];
+
+/** Work that spends tokens while it runs, and loses them if the session is taken down. */
+export const SPENDING_WORK: readonly SessionWorkKind[] = ['subagent', 'workflow'];
 
 export interface SessionWork {
   /** Claude Code's own id for it: an agent_id for a subagent, a background task id otherwise */
@@ -262,8 +272,13 @@ export interface SessionWork {
   label: string | null;
   /** ISO timestamp it started */
   since: string;
-  /** ISO timestamp of the last hook that mentioned it */
+  /** ISO timestamp of the last sign of life: a hook that mentioned it, or its transcript growing */
   lastSeen: string;
+  /**
+   * When it is due to end or fire, when that is known: a monitor's timeout, a wake-up's time.
+   * Null for work that runs until it is done.
+   */
+  until?: string | null;
 }
 
 /**
@@ -310,6 +325,10 @@ export interface Run {
   subscriptionLabel: string;
   status: RunStatus;
   agentStatus: AgentStatus | null;
+  /** when the agent status last changed, so "working" can say for how long */
+  agentStatusSince: string | null;
+  /** the tool the main thread is in, or last used, while it is working */
+  lastTool: string | null;
   autoSwap: boolean;
   swapCount: number;
   lastSwap: Swap | null;
