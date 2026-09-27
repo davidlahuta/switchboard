@@ -4,6 +4,31 @@
  */
 import { type AgentStatus, type RespawnKind, type RespawnTrigger, SCHEDULED_WORK, type SessionWork, type SessionWorkKind, SPENDING_WORK } from './types.ts';
 
+/**
+ * What a busy session is told when a queued respawn has waited on it long enough. Editable in
+ * Settings; {what}, {reason} and {next} are filled in by windDownText.
+ */
+export const DEFAULT_WIND_DOWN_MESSAGE =
+  '[Switchboard] This session is waiting to be {what} ({reason}), and that can only happen once you are done. ' +
+  'Wrap up at the next safe point: do not start new subagents, workflows, background shells, monitors, loops or review rounds; ' +
+  'let what is already running finish (or stop it with TaskStop if it is only watching or waiting), save or commit anything that would be lost, ' +
+  'then end your turn with a short note of where you stopped and what is next. {next}';
+
+/**
+ * The wrap-up message for one respawn, on one line: it is typed into the terminal, where a newline
+ * would be a keystroke of its own.
+ */
+export function windDownText(template: string, plan: { kind: RespawnKind; reason: string; continueAfter: boolean }): string {
+  const what = plan.kind === 'swap' ? 'moved to another subscription' : plan.kind === 'relaunch' ? 'moved to a new terminal' : 'restarted';
+  const next = plan.continueAfter ? 'You will be told to carry on as soon as you are back.' : 'The operator will pick it up from your note.';
+  return template
+    .replaceAll('{what}', what)
+    .replaceAll('{reason}', plan.reason.replace(/\s+/g, ' ').slice(0, 160))
+    .replaceAll('{next}', next)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /** Short enough for a badge, and the words an operator would use for it. */
 export function triggerLabel(trigger: RespawnTrigger): string {
   switch (trigger) {

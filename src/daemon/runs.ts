@@ -8,7 +8,7 @@ import { tabTitle } from '../shared/marks.ts';
 import type { DaemonToRunner, ManualRunSpec, RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
 import { type LimitCause, scopedBinds } from '../shared/limits.ts';
 import { bindingText } from '../shared/capacity.ts';
-import { readyForRespawn, workSummary } from '../shared/respawn.ts';
+import { kindLabel, readyForRespawn, windDownText, workSummary } from '../shared/respawn.ts';
 import type {
   AgentStatus,
   Attention,
@@ -139,6 +139,8 @@ export interface PendingRespawn {
    * of date, so absorbing the relaunch is a matter of remembering that it was asked for.
    */
   fresh?: boolean;
+  /** when the session was asked to wrap up for this respawn; see windDown */
+  windDownAt?: number;
 }
 
 const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
@@ -373,6 +375,15 @@ const LIMIT_QUIET_AFTER_RESPAWN_MS = 15_000;
 const SUBAGENT_GRACE_MS = 20 * 60_000;
 /** How long after the last subagent finishes before a queued respawn is taken, if nothing else happens. */
 const WORK_SETTLED_MS = 5000;
+/** How long the typed message is given to land before the send-now chord follows it. */
+const WIND_DOWN_KEY_GAP_MS = 400;
+/**
+ * Claude Code's send-now chord (chat:sendNow). It hands the message to the model at once, mid-turn,
+ * moving any running tool to the background rather than cancelling it (2.1.283 changelog), so
+ * nothing the session is doing is lost by asking. ctrl+enter is bound to the same action but is a
+ * plain newline on Windows Terminal before 1.25; the chord is not.
+ */
+const SEND_NOW = ['\x18', '\x13'] as const;
 /**
  * What a session is told when the swap could not wait for the end of its turn. "continue" on its
  * own invites it to carry on from a plan whose later half never ran: the tools it called last may
@@ -1113,6 +1124,7 @@ export class RunManager {
             since: new Date(waiting.queuedAt).toISOString(),
             deadline: waiting.deadline === null ? null : new Date(waiting.deadline).toISOString(),
             holding: this.holding(r),
+            askedToWrapUp: waiting.windDownAt ? new Date(waiting.windDownAt).toISOString() : null,
           }
         : null,
       pid: r.pid,
@@ -1248,8 +1260,27 @@ export class RunManager {
        * the result the wait was for. Hence the same settle window onWorkSettled uses, measured from
        * when this loop first saw the session free rather than from any one event.
        */
-      const free = !this.busy(r, plan.trigger) && this.respawnedRecently(runId) === null;
+      /*
+       * Once a session has been asked to wrap up, what it left running gets as long again to
+       * finish, and then stops holding the respawn. Asked, a session stops starting things and ends
+       * its turn, but a watcher or a server it chose to keep would hold the respawn for good; a
+       * resumed session is told which of its tasks did not survive. Subagents and workflows are
+       * still waited for: they announce their own end, and what they spent is lost with them.
+       */
+      const grace = getSettings(this.db).windDownAfterMin * 60_000;
+      const shellsLetGo = plan.windDownAt !== undefined && Date.now() - plan.windDownAt >= grace;
+      const free = !this.busy(r, shellsLetGo ? undefined : plan.trigger) && this.respawnedRecently(runId) === null;
       if (!free) this.readySince.delete(runId);
+      /*
+       * A respawn waits for the turn to end and for what the session started to finish. A session
+       * that keeps going — a review loop that starts round 44 as round 43 reports — never gets
+       * there, and a restart asked for by hand sat queued for seventeen hours behind one. So after
+       * a while it is asked to wrap up. A plan with a deadline takes the session regardless.
+       */
+      const askAfter = getSettings(this.db).windDownAfterMin * 60_000;
+      if (!free && askAfter > 0 && plan.windDownAt === undefined && plan.deadline === null && Date.now() - plan.queuedAt >= askAfter) {
+        this.windDown(runId, 'the respawn has waited long enough');
+      }
       else if (!this.readySince.has(runId)) this.readySince.set(runId, Date.now());
       const readyAt = this.readySince.get(runId);
       const settled = readyAt !== undefined && Date.now() - readyAt >= WORK_SETTLED_MS;
@@ -2554,20 +2585,21 @@ export class RunManager {
      */
     const since = force ? null : this.respawnedRecently(r.id);
     if (since !== null) {
-      log.info('not taking a session that has only just come back', {
+      log.info('a session that has only just come back: the respawn waits for it to settle', {
         run: r.id,
         kind: plan.kind,
         reason: plan.reason,
         msSinceRespawn: since,
       });
-      return this.dto(r);
     }
     // Folded into whatever is already waiting rather than replacing it, so neither ask is lost and
     // asking again — the same limit, read off the screen a second time — does not give the session
     // longer. See mergePending.
     const had = this.pendingRespawn.get(r.id);
     const queued = mergePending(had, plan);
-    if (!force && this.busy(r, queued.trigger)) {
+    // Queued, not dropped: it used to return here, and a restart pressed in those thirty seconds
+    // did nothing and said nothing. drainPending waits out the rest of the cooldown.
+    if (!force && (since !== null || this.busy(r, queued.trigger))) {
       this.pendingRespawn.set(r.id, queued);
       this.savePending(r.id, queued);
       // The toast fades; this is what says, an hour later, why a session has not come back yet.
@@ -2779,6 +2811,46 @@ export class RunManager {
    * its work half done and no way back except a person typing into it. This is that, as a button:
    * the same message, the same care about dialogs, from the same place that would have sent it.
    */
+  /**
+   * Ask a session a respawn is waiting on to wrap up, now, whatever it is doing.
+   *
+   * The message is typed and sent with Claude Code's send-now chord, so it reaches the model
+   * mid-turn instead of queueing behind a turn that may not end today. Nothing is interrupted:
+   * send-now moves a running tool to the background. Asked once per queued respawn by the clock,
+   * and never at a session showing a dialog or with something of the operator's in its prompt.
+   * Returns why it was not sent, or null when it was.
+   */
+  windDown(runId: string, why: string): string | null {
+    const r = this.row(runId);
+    const plan = this.pendingRespawn.get(runId);
+    const refuse = (reason: string): string => {
+      log.info('did not ask a session to wrap up', { run: runId, reason });
+      return reason;
+    };
+    if (!r || !plan) return refuse('nothing is queued for it');
+    if (!this.conns.has(runId)) return refuse('it has no terminal attached');
+    const status = this.coord.agent(r.session_id)?.status;
+    if (status === 'waiting') return refuse('it is waiting for an answer in its terminal');
+    const mirror = this.mirrors.get(runId);
+    const screen = mirror?.screenText() ?? '';
+    if (CONFIRM_FOOTER.test(screen) || LIMIT_RESET_PROMPT.test(screen)) return refuse('it is showing a dialog');
+    const draft = mirror?.promptDraft();
+    if (draft === null || draft === undefined) return refuse('its prompt is not on screen');
+    if (draft) return refuse('something is typed into its prompt');
+    // Marked before it is sent: a refusal is retried on the next tick, a message is not repeated.
+    plan.windDownAt = Date.now();
+    this.savePending(runId, plan);
+    log.info('asking a session to wrap up for a queued respawn', { run: runId, kind: plan.kind, why, waitedMs: Date.now() - plan.queuedAt, status });
+    this.send(runId, { type: 'input', data: windDownText(getSettings(this.db).windDownMessage, plan) });
+    setTimeout(() => {
+      this.send(runId, { type: 'input', data: SEND_NOW[0] });
+      setTimeout(() => this.send(runId, { type: 'input', data: SEND_NOW[1] }), 60);
+    }, WIND_DOWN_KEY_GAP_MS);
+    this.bus.toast('info', `${r.name}: asked it to wrap up so its ${kindLabel(plan.kind)} can happen.`);
+    this.bus.invalidate('state');
+    return null;
+  }
+
   nudge(runId: string): void {
     const r = this.liveRun(runId);
     if (this.busy(r)) throw httpError(409, 'It is working. Nothing to nudge.');

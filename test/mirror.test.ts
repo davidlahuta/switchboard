@@ -133,3 +133,30 @@ describe('what counts as a terminal host running old code', () => {
     assert.ok(!files.some((f) => /\/web\//.test(f)));
   });
 });
+
+describe('what is typed into a session prompt', () => {
+  const RULE = '─'.repeat(40);
+  const screen = async (box: string): Promise<string | null> => {
+    const mirror = new TermMirror(60, 8);
+    mirror.write(`some output\r\n${RULE}\r\n❯ ${box}\r\n${RULE}\r\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`);
+    await new Promise<void>((resolve) => mirror.attach(() => resolve()));
+    return mirror.promptDraft();
+  };
+
+  it('reads an empty prompt as empty, and a dim suggestion as no draft', async () => {
+    assert.equal(await screen(''), '');
+    // After a turn Claude Code suggests the next prompt, drawn dim: nobody typed it.
+    assert.equal(await screen('\x1b[2mcontinue\x1b[22m'), '');
+  });
+
+  it('reads what the operator typed', async () => {
+    assert.equal(await screen('fix the tests'), 'fix the tests');
+  });
+
+  it('says so when no prompt box is on screen', async () => {
+    const mirror = new TermMirror(60, 4);
+    mirror.write('a dialog\r\nEnter to confirm');
+    await new Promise<void>((resolve) => mirror.attach(() => resolve()));
+    assert.equal(mirror.promptDraft(), null);
+  });
+});

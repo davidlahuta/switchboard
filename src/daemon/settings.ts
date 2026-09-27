@@ -1,3 +1,4 @@
+import { DEFAULT_WIND_DOWN_MESSAGE } from '../shared/respawn.ts';
 import type { Settings } from '../shared/types.ts';
 import type { Db } from './db.ts';
 
@@ -19,6 +20,9 @@ export const DEFAULT_SETTINGS: Settings = {
   proactiveSwap: true,
   swapThresholdPct: 85,
   continueMessage: 'continue',
+  windDownMessage: DEFAULT_WIND_DOWN_MESSAGE,
+  // Long enough that a session finishing on its own is not interrupted for nothing.
+  windDownAfterMin: 10,
   continueOnResume: true,
   // The usage endpoint is shared across all subscriptions and rate-limits aggressively; five
   // accounts polling every two minutes was enough to draw 429s.
@@ -66,6 +70,9 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
   if (typeof patch.proactiveSwap === 'boolean') next.proactiveSwap = patch.proactiveSwap;
   if (patch.swapThresholdPct !== undefined) next.swapThresholdPct = n(patch.swapThresholdPct, 50, 100, current.swapThresholdPct);
   if (typeof patch.continueMessage === 'string') next.continueMessage = patch.continueMessage.slice(0, 2000);
+  // Emptied is put back to the default: an empty message would type only the send-now chord.
+  if (typeof patch.windDownMessage === 'string') next.windDownMessage = patch.windDownMessage.trim().slice(0, 4000) || DEFAULT_WIND_DOWN_MESSAGE;
+  if (patch.windDownAfterMin !== undefined) next.windDownAfterMin = n(patch.windDownAfterMin, 0, 24 * 60, current.windDownAfterMin);
   if (typeof patch.continueOnResume === 'boolean') next.continueOnResume = patch.continueOnResume;
   if (patch.conflictWindowMin !== undefined) next.conflictWindowMin = n(patch.conflictWindowMin, 5, 24 * 60, current.conflictWindowMin);
   if (Array.isArray(patch.claudeArgs)) next.claudeArgs = patch.claudeArgs.filter((a) => typeof a === 'string' && a.length > 0);
