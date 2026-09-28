@@ -3735,3 +3735,64 @@ a.list-main:hover {
     margin-top: 6px;
   }
 }
+
+/* Quick prompts: one tap sends. The text is shown clamped so a long prompt can still be recognised. */
+.quick-note {
+  margin-bottom: 10px;
+}
+.quick-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.quick-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.quick-item:hover:not(:disabled),
+.quick-item:focus-visible {
+  border-color: var(--accent);
+}
+.quick-item:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.quick-label {
+  font-weight: 600;
+}
+.quick-text {
+  color: var(--muted);
+  font-size: 13px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* The settings editor: one card per prompt. */
+.quick-edit {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.quick-edit-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}

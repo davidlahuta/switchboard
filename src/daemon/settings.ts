@@ -1,5 +1,6 @@
 import { DEFAULT_WIND_DOWN_MESSAGE } from '../shared/respawn.ts';
-import type { Settings } from '../shared/types.ts';
+import { DEFAULT_QUICK_PROMPTS } from '../shared/prompts.ts';
+import type { QuickPrompt, Settings } from '../shared/types.ts';
 import type { Db } from './db.ts';
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -23,6 +24,7 @@ export const DEFAULT_SETTINGS: Settings = {
   windDownMessage: DEFAULT_WIND_DOWN_MESSAGE,
   // Long enough that a session finishing on its own is not interrupted for nothing.
   windDownAfterMin: 10,
+  quickPrompts: DEFAULT_QUICK_PROMPTS,
   continueOnResume: true,
   // The usage endpoint is shared across all subscriptions and rate-limits aggressively; five
   // accounts polling every two minutes was enough to draw 429s.
@@ -43,6 +45,26 @@ export function getSettings(db: Db): Settings {
         // ignore corrupt values, keep the default
       }
     }
+  }
+  return out;
+}
+
+/**
+ * Quick prompts as the settings page sent them, kept only where they can be typed: a prompt with
+ * no text would send an empty Enter, and one with no label could not be told apart in the list.
+ */
+export function cleanQuickPrompts(input: unknown[]): QuickPrompt[] {
+  const out: QuickPrompt[] = [];
+  const ids = new Set<string>();
+  for (const p of input.slice(0, 50)) {
+    if (!p || typeof p !== 'object') continue;
+    const { id, label, text } = p as Record<string, unknown>;
+    if (typeof text !== 'string' || !text.trim()) continue;
+    const name = typeof label === 'string' && label.trim() ? label.trim().slice(0, 80) : text.trim().slice(0, 40);
+    let key = typeof id === 'string' && id.trim() ? id.trim().slice(0, 40) : `p${out.length + 1}`;
+    while (ids.has(key)) key = `${key}-${out.length + 1}`;
+    ids.add(key);
+    out.push({ id: key, label: name, text: text.trim().slice(0, 8000) });
   }
   return out;
 }
@@ -73,6 +95,7 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
   // Emptied is put back to the default: an empty message would type only the send-now chord.
   if (typeof patch.windDownMessage === 'string') next.windDownMessage = patch.windDownMessage.trim().slice(0, 4000) || DEFAULT_WIND_DOWN_MESSAGE;
   if (patch.windDownAfterMin !== undefined) next.windDownAfterMin = n(patch.windDownAfterMin, 0, 24 * 60, current.windDownAfterMin);
+  if (Array.isArray(patch.quickPrompts)) next.quickPrompts = cleanQuickPrompts(patch.quickPrompts);
   if (typeof patch.continueOnResume === 'boolean') next.continueOnResume = patch.continueOnResume;
   if (patch.conflictWindowMin !== undefined) next.conflictWindowMin = n(patch.conflictWindowMin, 5, 24 * 60, current.conflictWindowMin);
   if (Array.isArray(patch.claudeArgs)) next.claudeArgs = patch.claudeArgs.filter((a) => typeof a === 'string' && a.length > 0);

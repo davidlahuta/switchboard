@@ -37,6 +37,8 @@ import {
 } from '../src/daemon/runs.ts';
 import { DEFAULT_WIND_DOWN_MESSAGE, readyForRespawn, safeToRespawn, waitsForShells, windDownText, workSummary } from '../src/shared/respawn.ts';
 import { workSurvivesStart } from '../src/daemon/hooks.ts';
+import { cleanQuickPrompts } from '../src/daemon/settings.ts';
+import { DEFAULT_QUICK_PROMPTS } from '../src/shared/prompts.ts';
 import { toolResultFacts } from '../src/daemon/tasknotes.ts';
 import { attentionMark, byAttention, GROUP_LABEL, QUIET_AFTER_MS, SESSION_GROUPS, sessionGroup, sessionMark, tabTitle } from '../src/shared/marks.ts';
 import { readSessionModel } from '../src/daemon/transcript.ts';
@@ -1440,5 +1442,24 @@ describe('the wrap-up message', () => {
     assert.match(text, /told to carry on as soon as you are back/);
     assert.ok(!text.includes('\n') && !text.includes('{'), 'typed as one line with nothing left unfilled');
     assert.match(windDownText('{what}: {next}', { kind: 'restart', reason: 'x', continueAfter: false }), /^restarted: The operator will pick it up/);
+  });
+});
+
+describe('quick prompts as the settings page saves them', () => {
+  it('keeps what can be typed, names what has no name, and keeps ids apart', () => {
+    const out = cleanQuickPrompts([
+      { id: 'a', label: ' Next spec ', text: ' give me the next spec ' },
+      { id: 'b', label: 'empty', text: '   ' },
+      { id: 'a', label: '', text: 'start a session for it' },
+      'junk',
+    ]);
+    assert.deepEqual(out.map((p) => p.label), ['Next spec', 'start a session for it']);
+    assert.equal(out[0]!.text, 'give me the next spec');
+    assert.equal(new Set(out.map((p) => p.id)).size, 2, 'a duplicate id would make two prompts one');
+  });
+
+  it('seeds the two prompts the operator types every day', () => {
+    assert.deepEqual(DEFAULT_QUICK_PROMPTS.map((p) => p.id), ['next-spec', 'start-session']);
+    assert.match(DEFAULT_QUICK_PROMPTS[1]!.text, /must not report back to you/);
   });
 });

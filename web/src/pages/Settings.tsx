@@ -7,6 +7,7 @@ import type {
   IntegrationStatus,
   Model,
   PairingCode,
+  QuickPrompt,
   ServiceStatus,
   Run,
   Settings,
@@ -23,6 +24,7 @@ import { fetchDiscoveredRepos, groupRepos } from '../lib/repos.ts';
 import { countdown, timeAgo, useNow } from '../lib/time.ts';
 import { emitToast } from '../lib/toast.ts';
 import { DEFAULT_WIND_DOWN_MESSAGE } from '@shared/respawn.ts';
+import { DEFAULT_QUICK_PROMPTS } from '@shared/prompts.ts';
 
 /** Matches the daemon's clamp in src/daemon/settings.ts. */
 const LIMITS = {
@@ -490,6 +492,10 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
           />
           <span className="field-hint">Space-separated, quote values with spaces. Added to every session Switchboard launches.</span>
         </label>
+      </Section>
+
+      <Section title="Quick prompts">
+        <QuickPromptsEditor prompts={draft.quickPrompts} onChange={(v) => set('quickPrompts', v)} />
       </Section>
 
       <div className="form-actions settings-actions">
@@ -1230,5 +1236,71 @@ function RemoteAccessSection({ port }: { port: number }) {
         <p>The device loses access immediately and has to be paired again.</p>
       </ConfirmDialog>
     </Section>
+  );
+}
+
+/**
+ * The quick prompts offered from a session terminal's top bar (the ⚡ button). Edited here and saved
+ * with the rest of the settings; the order here is the order in the list.
+ */
+function QuickPromptsEditor({ prompts, onChange }: { prompts: QuickPrompt[]; onChange: (v: QuickPrompt[]) => void }) {
+  const update = (i: number, change: Partial<QuickPrompt>) => onChange(prompts.map((p, j) => (j === i ? { ...p, ...change } : p)));
+  const move = (i: number, by: -1 | 1) => {
+    const next = [...prompts];
+    const [p] = next.splice(i, 1);
+    next.splice(i + by, 0, p!);
+    onChange(next);
+  };
+  const add = () => onChange([...prompts, { id: `p${Date.now().toString(36)}`, label: '', text: '' }]);
+  const isDefault = JSON.stringify(prompts) === JSON.stringify(DEFAULT_QUICK_PROMPTS);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <p className="setting-desc">
+        Offered from the ⚡ button in a session&rsquo;s terminal. One click types the prompt into the session and sends it,
+        as if you had typed it there; while the session is working, Claude Code queues it. It is never typed over a question
+        on screen or over something you have already started writing in the session&rsquo;s prompt. A prompt with no text is
+        dropped when you save.
+      </p>
+      {prompts.map((p, i) => (
+        <div className="quick-edit" key={p.id}>
+          <input
+            className="input"
+            value={p.label}
+            onChange={(e) => update(i, { label: e.target.value })}
+            placeholder="Name shown in the list"
+            aria-label={`Quick prompt ${i + 1} name`}
+          />
+          <textarea
+            className="input"
+            rows={4}
+            value={p.text}
+            onChange={(e) => update(i, { text: e.target.value })}
+            placeholder="What is typed into the session"
+            aria-label={`Quick prompt ${i + 1} text`}
+          />
+          <div className="quick-edit-actions">
+            <button type="button" className="btn btn-sm" onClick={() => move(i, -1)} disabled={i === 0} aria-label="Move up">
+              ↑
+            </button>
+            <button type="button" className="btn btn-sm" onClick={() => move(i, 1)} disabled={i === prompts.length - 1} aria-label="Move down">
+              ↓
+            </button>
+            <button type="button" className="btn btn-sm btn-danger" onClick={() => onChange(prompts.filter((_, j) => j !== i))}>
+              Remove
+            </button>
+          </div>
+        </div>
+      ))}
+      <div className="quick-edit-actions" style={{ justifyContent: 'flex-start' }}>
+        <button type="button" className="btn btn-sm" onClick={add}>
+          <Icon name="plus" size={14} /> Add a prompt
+        </button>
+        {!isDefault && (
+          <button type="button" className="btn btn-sm btn-ghost" onClick={() => onChange(DEFAULT_QUICK_PROMPTS)}>
+            Reset to the defaults
+          </button>
+        )}
+      </div>
+    </div>
   );
 }

@@ -463,6 +463,8 @@ export interface Settings {
   windDownMessage: string;
   /** How long a queued respawn waits on a busy session before asking it to wrap up; 0 never asks. */
   windDownAfterMin: number;
+  /** Prompts a session's terminal offers from its top bar, typed into the session with one click. */
+  quickPrompts: QuickPrompt[];
   /**
    * Send it on every resume, not only on a swap made because a limit was hit. A session that
    * starts a new conversation never gets it: there is nothing yet to continue.
@@ -678,6 +680,15 @@ export interface Stalled {
   nextTry: string | null;
   /** how many times it has been told to carry on since its last good turn */
   tries: number;
+}
+
+export interface QuickPrompt {
+  /** stable across edits, so a list can be reordered without losing track of which is which */
+  id: string;
+  /** what the list shows */
+  label: string;
+  /** what is typed into the session */
+  text: string;
 }
 
 export interface WaitingRespawn {
