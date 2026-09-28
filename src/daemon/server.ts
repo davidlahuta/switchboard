@@ -368,6 +368,11 @@ export function createServer(s: Services): http.Server {
   });
   route('POST', '/api/runs/:id/relaunch', ({ params, body }) => s.runs.relaunch(params[0], body.force === true, 'you asked', 'manual'));
   route('POST', '/api/runs/:id/continue', ({ params }) => (s.runs.nudge(params[0]), { ok: true }));
+  route('POST', '/api/runs/:id/prompt', ({ params, body }) => {
+    const refused = s.runs.sendPrompt(params[0], typeof body.text === 'string' ? body.text : '');
+    if (refused) throw Object.assign(new Error(`Not sent: ${refused}.`), { status: 409 });
+    return { ok: true };
+  });
   route('POST', '/api/runs/:id/wind-down', ({ params }) => {
     const refused = s.runs.windDown(params[0], 'the operator asked');
     if (refused) throw Object.assign(new Error(`Not sent: ${refused}.`), { status: 409 });

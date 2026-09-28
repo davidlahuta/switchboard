@@ -375,6 +375,10 @@ const LIMIT_QUIET_AFTER_RESPAWN_MS = 15_000;
 const SUBAGENT_GRACE_MS = 20 * 60_000;
 /** How long after the last subagent finishes before a queued respawn is taken, if nothing else happens. */
 const WORK_SETTLED_MS = 5000;
+/** Smaller than this, a session's window is too small to work in; see guardSize. */
+const MIN_USABLE = { cols: 40, rows: 10 };
+/** What a session too small to use is given when it never had a usable size to go back to. */
+const FALLBACK_SIZE = { cols: 160, rows: 48 };
 /** How long the typed message is given to land before the send-now chord follows it. */
 const WIND_DOWN_KEY_GAP_MS = 400;
 /**
@@ -886,6 +890,8 @@ export class RunManager {
    * while the terminal window is still opening, and the runner it is meant for does not exist yet.
    */
   private readonly webSize = new Map<string, { cols: number; rows: number }>();
+  /** The last size each session had that a person could work in; see guardSize. */
+  private readonly goodSize = new Map<string, { cols: number; rows: number }>();
   /**
    * Unread counts for the whole board, refreshed at most once a second. A state snapshot renders
    * every session at once, and one grouped query for all of them beats one query each.
@@ -1811,6 +1817,7 @@ export class RunManager {
     // definition — the opposite of what treating it as new would say.
     this.runnerStartedAt.set(r.id, msg.startedAt ? Date.parse(msg.startedAt) : 0);
     const mirror = this.mirror(r, msg.cols, msg.rows);
+    this.guardSize(r.id, msg.cols, msg.rows);
     if (msg.alive) {
       // Daemon restarted while the runner kept claude alive: just reattach and repaint.
       this.db.run('UPDATE runs SET pid = ?, cols = ?, rows = ? WHERE id = ?', msg.pid, msg.cols, msg.rows, r.id);
@@ -1846,6 +1853,7 @@ export class RunManager {
           this.versionProvider(),
           runId,
         );
+        this.guardSize(runId, msg.cols, msg.rows);
         this.mirror(r, msg.cols, msg.rows);
         this.setStatus(runId, 'running');
         /*
@@ -1862,6 +1870,7 @@ export class RunManager {
       case 'resize':
         this.db.run('UPDATE runs SET cols = ?, rows = ? WHERE id = ?', msg.cols, msg.rows, runId);
         this.mirror(r).resize(msg.cols, msg.rows);
+        this.guardSize(runId, msg.cols, msg.rows);
         break;
       case 'exit':
         if (this.relaunching.has(runId)) {
@@ -2828,15 +2837,9 @@ export class RunManager {
       return reason;
     };
     if (!r || !plan) return refuse('nothing is queued for it');
-    if (!this.conns.has(runId)) return refuse('it has no terminal attached');
+    const unsafe = this.whyNotType(r);
+    if (unsafe) return refuse(unsafe);
     const status = this.coord.agent(r.session_id)?.status;
-    if (status === 'waiting') return refuse('it is waiting for an answer in its terminal');
-    const mirror = this.mirrors.get(runId);
-    const screen = mirror?.screenText() ?? '';
-    if (CONFIRM_FOOTER.test(screen) || LIMIT_RESET_PROMPT.test(screen)) return refuse('it is showing a dialog');
-    const draft = mirror?.promptDraft();
-    if (draft === null || draft === undefined) return refuse('its prompt is not on screen');
-    if (draft) return refuse('something is typed into its prompt');
     // Marked before it is sent: a refusal is retried on the next tick, a message is not repeated.
     plan.windDownAt = Date.now();
     this.savePending(runId, plan);
@@ -2848,6 +2851,73 @@ export class RunManager {
     }, WIND_DOWN_KEY_GAP_MS);
     this.bus.toast('info', `${r.name}: asked it to wrap up so its ${kindLabel(plan.kind)} can happen.`);
     this.bus.invalidate('state');
+    return null;
+  }
+
+  /**
+   * Keep a session at a size it can be used at, whatever the window hosting it has shrunk to.
+   *
+   * Claude Code runs at the size of the console its runner is in, and a Windows Terminal window
+   * squeezed to a sliver took nine sessions down to 54×1: one line of TUI, nothing readable in the
+   * browser until it re-fitted, and no prompt on screen for the wrap-up or a quick prompt to be
+   * typed at. A size under this is not a size anyone chose to work at, so the session is given its
+   * last usable one instead, the way a browser viewer sizes it: the runner parks its window and
+   * says so, and resizing that window takes the session back, as it always does.
+   */
+  private guardSize(runId: string, cols: number, rows: number): void {
+    if (cols >= MIN_USABLE.cols && rows >= MIN_USABLE.rows) {
+      this.goodSize.set(runId, { cols, rows });
+      return;
+    }
+    if (this.webSize.has(runId)) return; // a browser is sizing it, and knows what it wants
+    const size = this.goodSize.get(runId) ?? FALLBACK_SIZE;
+    log.warn('the window hosting a session is too small to use; sizing it as a viewer would', { run: runId, window: `${cols}x${rows}`, now: `${size.cols}x${size.rows}` });
+    /*
+     * Claude Code repaints only when its size changes, and a runner already parked at this size
+     * does not change it. So it is nudged a column narrower and back. Not with 'redraw': that
+     * repaints at the window's own size, which is the sliver this is getting away from.
+     */
+    this.send(runId, { type: 'resize', cols: size.cols - 1, rows: size.rows });
+    setTimeout(() => this.send(runId, { type: 'resize', cols: size.cols, rows: size.rows }), 150);
+  }
+
+  /**
+   * Why typing into this session now would go wrong, or null when it is safe: no terminal to type
+   * into; a question or dialog on screen, which a keystroke would answer; or something of the
+   * operator's already in the prompt, which would be sent along with it.
+   */
+  private whyNotType(r: RunRow): string | null {
+    if (!this.conns.has(r.id)) return 'it has no terminal attached';
+    if (this.coord.agent(r.session_id)?.status === 'waiting') return 'it is waiting for an answer in its terminal';
+    const mirror = this.mirrors.get(r.id);
+    const screen = mirror?.screenText() ?? '';
+    if (CONFIRM_FOOTER.test(screen) || LIMIT_RESET_PROMPT.test(screen)) return 'it is showing a dialog';
+    const draft = mirror?.promptDraft();
+    if (draft === null || draft === undefined) return 'its prompt is not on screen';
+    if (draft) return 'something is already typed into its prompt';
+    return null;
+  }
+
+  /**
+   * Type a prompt into a session and submit it, as if the operator had: a quick prompt from the
+   * terminal's top bar. Mid-turn, Claude Code queues it and hands it over when it can, which is the
+   * same as typing it there. Several lines go as one bracketed paste, so the session does not read
+   * each line break as Enter. Returns why it was not sent, or null when it was.
+   */
+  sendPrompt(runId: string, text: string): string | null {
+    const r = this.row(runId);
+    if (!r || r.status === 'exited') return 'the session is not running';
+    const body = text.replace(/\r\n?/g, '\n').trim();
+    if (!body) return 'the prompt is empty';
+    const unsafe = this.whyNotType(r);
+    if (unsafe) {
+      log.info('did not type a quick prompt', { run: runId, reason: unsafe });
+      return unsafe;
+    }
+    log.info('typing a quick prompt', { run: runId, chars: body.length, status: this.coord.agent(r.session_id)?.status });
+    this.send(runId, { type: 'input', data: body.includes('\n') ? `\x1b[200~${body.replace(/\n/g, '\r')}\x1b[201~` : body });
+    // Submitted separately, so the TUI does not take the Enter as part of the text.
+    setTimeout(() => this.send(runId, { type: 'input', data: '\r' }), WIND_DOWN_KEY_GAP_MS);
     return null;
   }
 

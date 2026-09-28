@@ -13,6 +13,7 @@ import { SessionName } from '../components/SessionName.tsx';
 import { AutoContinueMark, RunTags } from '../components/RunTags.tsx';
 import { Icon, StatusPill } from '../components/ui.tsx';
 import { statusDetail } from '../lib/activity.ts';
+import { QuickPromptsButton } from '../components/QuickPrompts.tsx';
 import { api, wsUrl } from '../lib/api.ts';
 import { href, navigate } from '../lib/router.ts';
 import { emitToast } from '../lib/toast.ts';
@@ -904,6 +905,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
               onFit={takeOver}
             />
           )}
+          {run && <QuickPromptsButton run={run} disabled={exited} />}
           {run && (
             <ManageMenu
               run={{ ...run, status: status ?? run.status }}
