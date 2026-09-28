@@ -310,6 +310,45 @@ export function findTranscript(sessionId: string, configDirs: string[]): string 
   return null;
 }
 
+/**
+ * The last thing the main thread said in text, from the end of its transcript: what a person
+ * reading the terminal would read last. Null when nothing in the last stretch is prose.
+ */
+export function lastAssistantText(file: string, tailBytes = 512 * 1024): string | null {
+  let fd: number | null = null;
+  try {
+    const size = fs.statSync(file).size;
+    const from = Math.max(0, size - tailBytes);
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(size - from);
+    fs.readSync(fd, buf, 0, buf.length, from);
+    const lines = buf.toString('utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]!;
+      if (!line.includes('"assistant"')) continue;
+      let j: Record<string, any>;
+      try {
+        j = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (j.type !== 'assistant' || j.isSidechain || j.message?.model === '<synthetic>') continue;
+      const content = Array.isArray(j.message?.content) ? j.message.content : [];
+      const text = content
+        .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
+        .map((b: any) => b.text)
+        .join('\n')
+        .trim();
+      if (text) return text;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}
+
 /** Where Claude Code writes a subagent's own transcript, beside its session's. */
 export function subagentTranscript(mainTranscript: string, agentId: string): string {
   return path.join(mainTranscript.replace(/\.jsonl$/i, ''), 'subagents', `agent-${agentId}.jsonl`);

@@ -18,6 +18,9 @@ import { RunManager } from './runs.ts';
 import { createServer } from './server.ts';
 import { SubscriptionManager } from './subscriptions.ts';
 import { TranscriptWatch } from './transcriptWatch.ts';
+import { questionOnScreen, SessionAlerts } from './alerts.ts';
+import { PushService } from './push.ts';
+import { lastAssistantText } from './tasknotes.ts';
 import { Updater } from './updater.ts';
 
 const log = logger('daemon');
@@ -28,6 +31,8 @@ const log = logger('daemon');
  * wrong: an Esc shows as idle, and a finished shell drops off, within this.
  */
 const TRANSCRIPT_POLL_MS = 3000;
+/** How often sessions are looked at for something to notify about; well inside the settle times in alerts.ts. */
+const ALERT_TICK_MS = 2000;
 
 export async function startDaemon(): Promise<void> {
   /*
@@ -68,6 +73,19 @@ export async function startDaemon(): Promise<void> {
   });
   coord.setWorkSwept((sessionId) => runs.onWorkSettled(sessionId));
   // The transcripts, read back to catch what the hooks miss; see TranscriptWatch.
+  // Notifications to phones and browsers that asked for them; see SessionAlerts.
+  const push = new PushService(db);
+  const alerts = new SessionAlerts(
+    {
+      runs: () => runs.list(),
+      question: (id) => questionOnScreen(runs.screenOf(id)),
+      lastWords: (id) => {
+        const file = runs.transcriptOf(id);
+        return file ? lastAssistantText(file) : null;
+      },
+    },
+    push,
+  );
   const watch = new TranscriptWatch(coord, runs, () => [...new Set([HOME_CLAUDE_DIR, ...subs.list().map((s) => s.configDir)])]);
   const auth = new Auth(db);
   const updater = new Updater(db, bus, runs);
@@ -91,6 +109,7 @@ export async function startDaemon(): Promise<void> {
   void models.refresh();
   const sweep = setInterval(() => coord.sweep(), 60_000);
   const transcripts = setInterval(() => watch.poll(), TRANSCRIPT_POLL_MS);
+  const notify = setInterval(() => alerts.tick(), ALERT_TICK_MS);
   watch.poll();
   // Retention runs far less often than the liveness sweep: it is a bulk delete, and an hour of
   // extra history costs nothing next to doing it on every pass.
@@ -113,7 +132,7 @@ export async function startDaemon(): Promise<void> {
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
   const servers: Server[] = [];
   for (const host of BIND_HOSTS) {
-    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch });
+    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch, push });
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') log.error(`${host}:${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
       else if (err.code === 'EADDRNOTAVAIL') log.error(`Cannot bind ${host}: no interface has that address. Check SWITCHBOARD_BIND.`);
@@ -134,6 +153,7 @@ export async function startDaemon(): Promise<void> {
     log.info('shutting down');
     clearInterval(sweep);
     clearInterval(transcripts);
+    clearInterval(notify);
     clearInterval(prune);
     clearInterval(titles);
     clearInterval(logins);

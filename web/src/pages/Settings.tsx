@@ -14,6 +14,7 @@ import type {
   StateSnapshot,
   UpdateStatus,
 } from '@shared/types.ts';
+import { NotificationsSection } from '../components/Notifications.tsx';
 import { PageHead } from '../components/PageHead.tsx';
 import { StaleCodeNotice } from '../components/StaleCode.tsx';
 import { Badge, ConfirmDialog, Empty, Icon, IconButton, Section, Spinner, Toggle } from '../components/ui.tsx';
@@ -38,6 +39,9 @@ export function SettingsPage({ state }: { state: StateSnapshot }) {
   return (
     <div className="page settings-page">
       <PageHead title="Settings" subtitle={`Switchboard v${state.daemon.version} · port ${state.daemon.port}`} />
+      <Section title="Notifications">
+        <NotificationsSection />
+      </Section>
       <SettingsForm settings={state.settings} update={state.update} models={state.models} />
       <FleetSection runs={state.runs} />
       <IntegrationSection />

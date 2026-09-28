@@ -2854,6 +2854,17 @@ export class RunManager {
     return null;
   }
 
+  /** What a session's terminal shows now, as text; empty when there is no copy of it yet. */
+  screenOf(runId: string): string {
+    return this.mirrors.get(runId)?.screenText() ?? '';
+  }
+
+  /** Where a session writes its transcript, once one of its hooks has said. */
+  transcriptOf(runId: string): string | null {
+    const r = this.row(runId);
+    return r ? (this.coord.agent(r.session_id)?.transcript ?? null) : null;
+  }
+
   /**
    * Keep a session at a size it can be used at, whatever the window hosting it has shrunk to.
    *

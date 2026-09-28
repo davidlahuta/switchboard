@@ -15,6 +15,7 @@ import type { Db } from './db.ts';
 import type { RepoScanner } from './discovery.ts';
 import { createHookHandler } from './hooks.ts';
 import type { TranscriptWatch } from './transcriptWatch.ts';
+import type { PushService } from './push.ts';
 import { installIntegration, integrationStatus, uninstallIntegration } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import type { ModelCatalog } from './models.ts';
@@ -80,6 +81,7 @@ export interface Services {
   models: ModelCatalog;
   scanner: RepoScanner;
   watch: TranscriptWatch;
+  push: PushService;
 }
 
 type Body = Record<string, any>;
@@ -368,6 +370,25 @@ export function createServer(s: Services): http.Server {
   });
   route('POST', '/api/runs/:id/relaunch', ({ params, body }) => s.runs.relaunch(params[0], body.force === true, 'you asked', 'manual'));
   route('POST', '/api/runs/:id/continue', ({ params }) => (s.runs.nudge(params[0]), { ok: true }));
+  // Notifications: the key a page subscribes with, its subscription, what it wants told, a test.
+  route('GET', '/api/push/key', () => ({ publicKey: s.push.publicKey() }));
+  route('GET', '/api/push/devices', () => s.push.devices());
+  route('POST', '/api/push/subscribe', ({ req, body }) =>
+    s.push.subscribe({
+      subscription: body.subscription,
+      device: typeof body.device === 'string' && body.device ? body.device : who(req),
+      origin: typeof req.headers.origin === 'string' ? req.headers.origin : '',
+      prefs: body.prefs,
+    }),
+  );
+  route('POST', '/api/push/prefs', ({ body }) => s.push.setPrefs(String(body.endpoint ?? ''), body.prefs ?? {}));
+  route('POST', '/api/push/unsubscribe', ({ body }) => ({ ok: s.push.unsubscribe(String(body.endpoint ?? '')) }));
+  route('POST', '/api/push/test', async ({ body }) => ({
+    sent: await s.push.send(
+      { kind: 'test', title: 'Switchboard', body: 'Notifications work on this device.', url: '/#/sessions', tag: 'test' },
+      String(body.endpoint ?? ''),
+    ),
+  }));
   route('POST', '/api/runs/:id/prompt', ({ params, body }) => {
     const refused = s.runs.sendPrompt(params[0], typeof body.text === 'string' ? body.text : '');
     if (refused) throw Object.assign(new Error(`Not sent: ${refused}.`), { status: 409 });
