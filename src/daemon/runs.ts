@@ -377,6 +377,8 @@ const SUBAGENT_GRACE_MS = 20 * 60_000;
 const WORK_SETTLED_MS = 5000;
 /** How long creating a session waits for git to name its repository before answering without it. */
 const REPO_WAIT_MS = 1500;
+/** A prompt this soon after the daemon typed into a session is the daemon's, not the operator's. */
+const DAEMON_TYPED_MS = 30_000;
 /** How long a prompt has to stay on screen before a session with no hook yet is shown idle. */
 const PROMPT_READY_MS = 3000;
 /** Smaller than this, a session's window is too small to work in; see guardSize. */
@@ -894,6 +896,10 @@ export class RunManager {
    * while the terminal window is still opening, and the runner it is meant for does not exist yet.
    */
   private readonly webSize = new Map<string, { cols: number; rows: number }>();
+  /** When the daemon last typed into each session itself (continue, wrap-up); see operatorPrompted. */
+  private readonly daemonTyped = new Map<string, number>();
+  /** When each session was last typed into from a browser, to mark it viewed at most every few seconds. */
+  private readonly inputSeen = new Map<string, number>();
   /** When each session still reporting "starting" was first seen at its prompt; see readyWithoutHooks. */
   private readonly promptSeenAt = new Map<string, number>();
   /** The last size each session had that a person could work in; see guardSize. */
@@ -1962,6 +1968,20 @@ export class RunManager {
    * opens it and again when it closes, so a long read leaves the mark at the end rather than the
    * beginning and whatever arrived while it was open counts as seen.
    */
+  /**
+   * A prompt reached the session from outside: the operator answered it. Whatever it had said to
+   * them has been read, wherever they answered it — at the desk, in the browser, from the phone. It
+   * was only cleared by opening the web terminal, so a session answered in the native terminal, or
+   * one that spoke while its web terminal was already open, kept its envelope after the reply.
+   * A prompt the daemon typed itself (the continue message, a wrap-up) is not an answer.
+   */
+  operatorPrompted(sessionId: string): void {
+    const r = this.bySession(sessionId);
+    if (!r) return;
+    if (Date.now() - (this.daemonTyped.get(r.id) ?? 0) < DAEMON_TYPED_MS) return;
+    if (this.coord.markHumanReadFrom(r.session_id)) this.bus.invalidate('state');
+  }
+
   markViewed(runId: string): void {
     this.db.run('UPDATE runs SET last_viewed_at = ? WHERE id = ?', now(), runId);
     const r = this.row(runId);
@@ -1998,7 +2018,14 @@ export class RunManager {
       } catch {
         return;
       }
-      if (frame.type === 'input' && typeof frame.data === 'string') this.send(runId, { type: 'input', data: frame.data });
+      if (frame.type === 'input' && typeof frame.data === 'string') {
+        this.send(runId, { type: 'input', data: frame.data });
+        // Typing into it in the browser is reading it: whatever it said is in front of them.
+        if (Date.now() - (this.inputSeen.get(runId) ?? 0) > 5000) {
+          this.inputSeen.set(runId, Date.now());
+          this.markViewed(runId);
+        }
+      }
       if (frame.type === 'resize' && frame.cols >= 20 && frame.rows >= 5 && frame.cols <= 500 && frame.rows <= 200) {
         const cols = Math.floor(frame.cols);
         const rows = Math.floor(frame.rows);
@@ -2896,6 +2923,7 @@ export class RunManager {
     plan.windDownAt = Date.now();
     this.savePending(runId, plan);
     log.info('asking a session to wrap up for a queued respawn', { run: runId, kind: plan.kind, why, waitedMs: Date.now() - plan.queuedAt, status });
+    this.daemonTyped.set(runId, Date.now());
     this.send(runId, { type: 'input', data: windDownText(getSettings(this.db).windDownMessage, plan) });
     setTimeout(() => {
       this.send(runId, { type: 'input', data: SEND_NOW[0] });
@@ -3037,6 +3065,7 @@ export class RunManager {
     // seen in the transcript is the one to suspect.
     if (pending.released) log.info('typing the continue message', { run: runId, text: pending.text, released: 'the session reached a prompt' });
     else log.warn('typing the continue message without the session having said it reached a prompt', { run: runId, text: pending.text });
+    this.daemonTyped.set(runId, Date.now());
     this.send(runId, { type: 'type', text: pending.text });
   }
 

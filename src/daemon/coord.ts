@@ -2255,8 +2255,8 @@ export class Coordinator {
   }
 
   /** Mark what one session told the operator as read, when its terminal has been opened. */
-  markHumanReadFrom(sessionId: string): void {
-    this.db.run("UPDATE messages SET human_read_at = ? WHERE from_id = ? AND to_id = 'human' AND human_read_at IS NULL", now(), sessionId);
+  markHumanReadFrom(sessionId: string): boolean {
+    return this.db.run("UPDATE messages SET human_read_at = ? WHERE from_id = ? AND to_id = 'human' AND human_read_at IS NULL", now(), sessionId).changes > 0;
   }
 
   markHumanRead(repoId: string): void {
