@@ -127,6 +127,9 @@ export function createHookHandler(coord: Coordinator, runs: RunManager, watch: T
         }
         case 'UserPromptSubmit':
           coord.setStatus(sid, 'working', null);
+          // Answering a session is having read what it said. A board message or a task notification
+          // handed to it is not an answer from the operator.
+          if (!/^\s*<(channel|task-notification)\b/.test(typeof p.prompt === 'string' ? p.prompt : '')) runs.operatorPrompted(sid);
           return context('UserPromptSubmit', [coord.piggyback(sid)], titleSync(runs, sid, p));
         case 'PreToolUse': {
           // A subagent's tool call says the subagent is alive, not that the main thread is working.
