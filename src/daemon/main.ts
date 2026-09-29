@@ -19,7 +19,7 @@ import { RunManager } from './runs.ts';
 import { createServer } from './server.ts';
 import { SubscriptionManager } from './subscriptions.ts';
 import { TranscriptWatch } from './transcriptWatch.ts';
-import { questionOnScreen, SessionAlerts } from './alerts.ts';
+import { Presence, questionOnScreen, SessionAlerts } from './alerts.ts';
 import { PushService } from './push.ts';
 import { lastAssistantText } from './tasknotes.ts';
 import { Updater } from './updater.ts';
@@ -76,6 +76,7 @@ export async function startDaemon(): Promise<void> {
   // The transcripts, read back to catch what the hooks miss; see TranscriptWatch.
   // Notifications to phones and browsers that asked for them; see SessionAlerts.
   const push = new PushService(db);
+  const presence = new Presence();
   const alerts = new SessionAlerts(
     {
       runs: () => runs.list(),
@@ -84,6 +85,7 @@ export async function startDaemon(): Promise<void> {
         const file = runs.transcriptOf(id);
         return file ? lastAssistantText(file) : null;
       },
+      quiet: () => presence.atDesktop(),
     },
     push,
   );
@@ -136,7 +138,7 @@ export async function startDaemon(): Promise<void> {
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
   const servers: Server[] = [];
   for (const host of BIND_HOSTS) {
-    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch, push });
+    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch, push, presence });
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') log.error(`${host}:${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
       else if (err.code === 'EADDRNOTAVAIL') log.error(`Cannot bind ${host}: no interface has that address. Check SWITCHBOARD_BIND.`);

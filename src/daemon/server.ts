@@ -16,6 +16,7 @@ import type { RepoScanner } from './discovery.ts';
 import { createHookHandler } from './hooks.ts';
 import type { TranscriptWatch } from './transcriptWatch.ts';
 import type { PushService } from './push.ts';
+import type { Presence } from './alerts.ts';
 import { installIntegration, integrationStatus, uninstallIntegration } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import type { ModelCatalog } from './models.ts';
@@ -82,6 +83,7 @@ export interface Services {
   scanner: RepoScanner;
   watch: TranscriptWatch;
   push: PushService;
+  presence: Presence;
 }
 
 type Body = Record<string, any>;
@@ -371,6 +373,11 @@ export function createServer(s: Services): http.Server {
   route('POST', '/api/runs/:id/relaunch', ({ params, body }) => s.runs.relaunch(params[0], body.force === true, 'you asked', 'manual'));
   route('POST', '/api/runs/:id/continue', ({ params }) => (s.runs.nudge(params[0]), { ok: true }));
   // Notifications: the key a page subscribes with, its subscription, what it wants told, a test.
+  route('GET', '/api/presence', () => ({ holdingNotifications: s.presence.atDesktop() }));
+  route('POST', '/api/presence', ({ body }) => {
+    s.presence.report({ client: String(body.client ?? ''), mobile: body.mobile === true, visible: body.visible === true, idleMs: Number(body.idleMs) || 0 });
+    return { ok: true };
+  });
   route('GET', '/api/push/key', () => ({ publicKey: s.push.publicKey() }));
   route('GET', '/api/push/devices', () => s.push.devices());
   route('POST', '/api/push/subscribe', ({ req, body }) =>
@@ -537,7 +544,8 @@ export function createServer(s: Services): http.Server {
        */
       if (url.pathname.startsWith('/api/') && status < 500) {
         const entry = { status, ms: Date.now() - started, by: who(req), body: bodyShape(body), error };
-        if (req.method !== 'GET') log.info(`${req.method} ${url.pathname}`, entry);
+        // The presence beat is every open page, twice a minute: not something anybody asked for.
+        if (req.method !== 'GET' && url.pathname !== '/api/presence') log.info(`${req.method} ${url.pathname}`, entry);
         else if (status >= 400) log.debug(`${req.method} ${url.pathname}`, entry);
       }
     }
