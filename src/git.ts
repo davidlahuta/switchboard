@@ -78,6 +78,9 @@ export async function resolveRepo(dir: string): Promise<RepoInfo> {
       return alone;
     }
     const [common, top] = res.out.split(/\r?\n/);
+    // An empty answer resolved as a path is the daemon's own folder, which is C:\Windows\System32
+    // when Windows starts it: a repository of that name appeared on the board that way.
+    if (!common || !path.isAbsolute(common)) return alone;
     const root = path.basename(common) === '.git' ? path.dirname(common) : common;
     const branch = await git(dir, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
     const info: RepoInfo = {

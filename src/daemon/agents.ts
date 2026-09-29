@@ -100,7 +100,13 @@ export class AgentHub implements PushTarget {
       const run = hosted ?? (msg.runId ? undefined : this.runs.bySession(msg.sessionId));
       const agent = await this.coord.registerAgent({
         sessionId,
-        cwd: msg.cwd,
+        /*
+         * A hosted session's folder is the one Switchboard launched it in. The shim's own cwd is
+         * whatever Claude Code started it with, and one reported C:\Windows\System32: the session
+         * was filed under a repository of that name, and since Claude Code 2.1.284 sends no hook
+         * until the first prompt, nothing came along to correct it.
+         */
+        cwd: (hosted && this.runs.folderOf(hosted.id)) || msg.cwd,
         pid: parent,
         runId: run?.id ?? null,
         subscriptionId: run?.subscription_id ?? null,

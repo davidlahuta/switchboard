@@ -5,6 +5,7 @@ import { AgentHub } from './agents.ts';
 import { Auth } from './auth.ts';
 import { Bus } from './bus.ts';
 import { findClaude } from './claude.ts';
+import { repairTerminalWindows } from './focus.ts';
 import { Coordinator } from './coord.ts';
 import { Db } from './db.ts';
 import { RepoScanner } from './discovery.ts';
@@ -110,6 +111,9 @@ export async function startDaemon(): Promise<void> {
   const sweep = setInterval(() => coord.sweep(), 60_000);
   const transcripts = setInterval(() => watch.poll(), TRANSCRIPT_POLL_MS);
   const notify = setInterval(() => alerts.tick(), ALERT_TICK_MS);
+  // A terminal window stranded off screen sizes every tab opened in it to 54x1; see repairTerminalWindows.
+  repairTerminalWindows();
+  const windows = setInterval(repairTerminalWindows, 5 * 60_000);
   watch.poll();
   // Retention runs far less often than the liveness sweep: it is a bulk delete, and an hour of
   // extra history costs nothing next to doing it on every pass.
@@ -154,6 +158,7 @@ export async function startDaemon(): Promise<void> {
     clearInterval(sweep);
     clearInterval(transcripts);
     clearInterval(notify);
+    clearInterval(windows);
     clearInterval(prune);
     clearInterval(titles);
     clearInterval(logins);
