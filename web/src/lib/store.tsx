@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { RepoDetail, StateSnapshot, UiFrame } from '@shared/types.ts';
 import { ApiError, request, wsUrl } from './api.ts';
+import { startPresence } from './presence.ts';
 import { emitToast } from './toast.ts';
 
 export type ConnState = 'connecting' | 'open' | 'closed';
@@ -102,6 +103,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Where the operator is working, so the phone is not told about what is already on screen.
+  useEffect(() => startPresence(), []);
 
   // /ws/ui with auto-reconnect + backoff
   useEffect(() => {

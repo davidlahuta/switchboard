@@ -165,6 +165,10 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
     // a console nobody is looking at.
     if (webSized) {
       if (Date.now() - spawnedAt < CONSOLE_SETTLE_MS) return;
+      // A minimized Windows Terminal window redraws its tabs at 54x1. That is not someone taking the
+      // session back at the desk, and handing it over to a sliver threw the browser viewer out.
+      const { cols, rows } = size();
+      if (cols < 40 || rows < 10) return;
       unpark();
       return;
     }

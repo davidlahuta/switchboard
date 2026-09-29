@@ -218,8 +218,23 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
     const key = `${cols}x${rows}`;
     lastRequested.current = { key, at: Date.now() };
     setSize({ cols, rows });
+    /*
+     * Only a page someone is looking at sizes the session. A phone app in the background still
+     * holds its socket, and woken for a moment it re-fitted and took the session over from the
+     * desktop the operator was working at. It fits again the moment it is visible.
+     */
+    if (document.visibilityState !== 'visible') return;
     sendFrame({ type: 'resize', cols, rows });
   }, [sendFrame]);
+
+  // Hidden, a page sends no size (see requestFit); shown again, the one fitting takes it back.
+  useEffect(() => {
+    const onShown = () => {
+      if (document.visibilityState === 'visible' && fit) requestFit();
+    };
+    document.addEventListener('visibilitychange', onShown);
+    return () => document.removeEventListener('visibilitychange', onShown);
+  }, [fit, requestFit]);
 
   /** Take the size back from the desktop terminal and fit to this screen again. */
   const takeOver = useCallback(() => {
@@ -630,6 +645,8 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
         if (disposed) return;
         setConn('closed');
         if (exitedRef.current) return;
+        // A hidden page reconnects when it is shown again (onVisible), not in the background.
+        if (document.visibilityState !== 'visible') return;
         attempt++;
         const delay = Math.min(10_000, 400 * 2 ** Math.min(attempt, 5));
         retry = window.setTimeout(connect, delay);

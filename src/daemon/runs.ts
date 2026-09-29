@@ -2938,8 +2938,15 @@ export class RunManager {
       this.goodSize.set(runId, { cols, rows });
       return;
     }
-    if (this.webSize.has(runId)) return; // a browser is sizing it, and knows what it wants
-    const size = this.goodSize.get(runId) ?? FALLBACK_SIZE;
+    /*
+     * A browser holds the size, and the runner has just handed the session back to its console
+     * because the console "resized". A minimized Windows Terminal window resizes its tabs to 54x1
+     * whenever it redraws them, and the runner reads any console resize as the operator taking the
+     * session back at the desk. Nobody resized anything: the session jumped to a sliver under the
+     * operator working on it in the browser. The browser's size goes straight back.
+     */
+    const web = this.webSize.get(runId);
+    const size = web ?? this.goodSize.get(runId) ?? FALLBACK_SIZE;
     log.warn('the window hosting a session is too small to use; sizing it as a viewer would', { run: runId, window: `${cols}x${rows}`, now: `${size.cols}x${size.rows}` });
     /*
      * Claude Code repaints only when its size changes, and a runner already parked at this size

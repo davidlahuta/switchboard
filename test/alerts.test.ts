@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { DONE_SETTLE_MS, isDone, NEEDS_YOU_SETTLE_MS, needsYou, questionOnScreen, SessionAlerts } from '../src/daemon/alerts.ts';
+import { DONE_SETTLE_MS, IN_USE_IDLE_MS, isDone, NEEDS_YOU_SETTLE_MS, needsYou, Presence, PRESENCE_STALE_MS, questionOnScreen, SessionAlerts } from '../src/daemon/alerts.ts';
 import type { PushMessage } from '../src/daemon/push.ts';
 import type { Run, SessionWork } from '../src/shared/types.ts';
 
@@ -124,5 +124,40 @@ describe('the question on a session screen', () => {
   it('reads a permission prompt, and nothing from a screen with no question', () => {
     assert.equal(questionOnScreen('Bash command\n  rm -rf dist\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel'), 'Do you want to proceed?');
     assert.equal(questionOnScreen('● done\n❯ \n  ⏵⏵ bypass permissions on'), null);
+  });
+});
+
+describe('where the operator is working', () => {
+  it('holds notifications back while a desktop page is visible and in use, and only then', () => {
+    const p = new Presence();
+    const t = 5_000_000;
+    assert.equal(p.atDesktop(t), null, 'nobody anywhere');
+    p.report({ client: 'phone', mobile: true, visible: true, idleMs: 0 }, t);
+    assert.equal(p.atDesktop(t), null, 'the phone being open is exactly when they want them');
+    p.report({ client: 'desk', mobile: false, visible: false, idleMs: 0 }, t);
+    assert.equal(p.atDesktop(t), null, 'a desktop tab in the background');
+    p.report({ client: 'desk', mobile: false, visible: true, idleMs: 1000 }, t);
+    assert.ok(p.atDesktop(t));
+    assert.equal(p.atDesktop(t + PRESENCE_STALE_MS + 1), null, 'a page that stopped beating is gone');
+    p.report({ client: 'desk', mobile: false, visible: true, idleMs: IN_USE_IDLE_MS + 1 }, t);
+    assert.equal(p.atDesktop(t), null, 'open on a desk nobody is sitting at');
+  });
+
+  it('marks a moment told while held back, so leaving the desk brings no burst', () => {
+    let quiet: string | null = 'at the desktop';
+    let current = run({ agentStatus: 'working' });
+    const sent: PushMessage[] = [];
+    const alerts = new SessionAlerts(
+      { runs: () => [current], question: () => null, lastWords: () => null, quiet: () => quiet },
+      { send: async (m) => (sent.push(m), 1) },
+    );
+    alerts.tick(0);
+    current = run();
+    alerts.tick(1000);
+    alerts.tick(1000 + DONE_SETTLE_MS);
+    assert.equal(sent.length, 0);
+    quiet = null;
+    alerts.tick(1000 + DONE_SETTLE_MS * 2);
+    assert.equal(sent.length, 0);
   });
 });

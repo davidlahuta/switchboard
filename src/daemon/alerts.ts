@@ -29,6 +29,43 @@ export function isDone(run: Run): boolean {
   return run.status === 'running' && !run.waiting && atRest(run) && !needsYou(run);
 }
 
+/** A page not heard from in this long is closed, asleep, or on a device that went away. */
+export const PRESENCE_STALE_MS = 75_000;
+/** A desktop page untouched for this long is open on a desk nobody is sitting at. */
+export const IN_USE_IDLE_MS = 5 * 60_000;
+
+/**
+ * Where the operator is working, from the pages open on the web UI.
+ *
+ * Notifications are for when the operator is away. At the desktop, working in the browser, a phone
+ * buzzing for each session that finished was noise about something already on the screen in front
+ * of them. A desktop page that can be seen and was used in the last few minutes means they are
+ * there; a phone's page, visible or not, says nothing about that.
+ */
+export class Presence {
+  private readonly pages = new Map<string, { mobile: boolean; visible: boolean; at: number; lastInput: number }>();
+
+  report(input: { client: string; mobile: boolean; visible: boolean; idleMs: number }, now = Date.now()): void {
+    if (!input.client) return;
+    this.pages.set(input.client.slice(0, 40), {
+      mobile: input.mobile,
+      visible: input.visible,
+      at: now,
+      lastInput: now - Math.max(0, Math.min(input.idleMs || 0, 24 * 3600_000)),
+    });
+    for (const [id, p] of this.pages) if (now - p.at > PRESENCE_STALE_MS * 4) this.pages.delete(id);
+  }
+
+  /** Why notifications are held back now, or null when they are not. */
+  atDesktop(now = Date.now()): string | null {
+    for (const p of this.pages.values()) {
+      if (p.mobile || !p.visible) continue;
+      if (now - p.at < PRESENCE_STALE_MS && now - p.lastInput < IN_USE_IDLE_MS) return 'the operator is using Switchboard on a desktop';
+    }
+    return null;
+  }
+}
+
 interface Seen {
   needsYouSince: number | null;
   notifiedNeedsYou: boolean;
@@ -44,6 +81,8 @@ export interface AlertSource {
   question(runId: string): string | null;
   /** What the session said last, from its transcript. */
   lastWords(runId: string): string | null;
+  /** Why notifications should be held back right now, if they should; see Presence. */
+  quiet?(): string | null;
 }
 
 /**
@@ -109,6 +148,15 @@ export class SessionAlerts {
       }
     }
     for (const id of this.seen.keys()) if (!live.has(id)) this.seen.delete(id);
+    /*
+     * Held back, not queued: each moment is still marked as told, so walking away from the desk
+     * does not bring a burst of notifications about what was already on screen.
+     */
+    const quiet = out.length ? (this.source.quiet?.() ?? null) : null;
+    if (quiet) {
+      log.info('not notifying', { why: quiet, held: out.map((m) => m.title) });
+      return [];
+    }
     for (const msg of out) {
       log.info('notifying', { kind: msg.kind, title: msg.title });
       void this.push.send(msg);
