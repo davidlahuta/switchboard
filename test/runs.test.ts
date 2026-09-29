@@ -1349,23 +1349,30 @@ describe('how a session is moved to another subscription', () => {
 describe('a session another agent started, and the task it was handed', () => {
   it('is left alone once it shows any sign of a turn: the channel got the task through', () => {
     for (const agentStatus of ['working', 'idle', 'waiting', 'limited']) {
-      assert.equal(handoffDecision({ agentStatus, promptSinceMs: 60_000, waitedMs: 60_000 }), 'taken', agentStatus);
+      assert.equal(handoffDecision({ hadTurn: true, agentStatus, promptSinceMs: 60_000, waitedMs: 60_000 }), 'taken', agentStatus);
     }
   });
 
   it('is told where its task is once its prompt has sat idle: the spec-0464 case', () => {
     // Joined, sent the task a millisecond later, and never did a thing: still "starting", prompt on screen.
-    assert.equal(handoffDecision({ agentStatus: 'starting', promptSinceMs: HANDOFF_GRACE_MS, waitedMs: 30_000 }), 'type');
-    assert.equal(handoffDecision({ agentStatus: undefined, promptSinceMs: HANDOFF_GRACE_MS + 1, waitedMs: 30_000 }), 'type', 'no agent row yet');
+    assert.equal(handoffDecision({ hadTurn: true, agentStatus: 'starting', promptSinceMs: HANDOFF_GRACE_MS, waitedMs: 30_000 }), 'type');
+    assert.equal(handoffDecision({ hadTurn: true, agentStatus: undefined, promptSinceMs: HANDOFF_GRACE_MS + 1, waitedMs: 30_000 }), 'type', 'no agent row yet');
   });
 
   it('waits while it is still starting, or its prompt has only just appeared', () => {
-    assert.equal(handoffDecision({ agentStatus: 'starting', promptSinceMs: null, waitedMs: 5_000 }), 'wait', 'a startup dialog, or loading');
-    assert.equal(handoffDecision({ agentStatus: 'starting', promptSinceMs: 2_000, waitedMs: 5_000 }), 'wait', 'the channel may be about to start a turn');
+    assert.equal(handoffDecision({ hadTurn: true, agentStatus: 'starting', promptSinceMs: null, waitedMs: 5_000 }), 'wait', 'a startup dialog, or loading');
+    assert.equal(handoffDecision({ hadTurn: true, agentStatus: 'starting', promptSinceMs: 2_000, waitedMs: 5_000 }), 'wait', 'the channel may be about to start a turn');
+  });
+
+  it('is told where its task is when it only looks idle because its prompt is on screen: the spec-0440 case', () => {
+    // Claude Code 2.1.284 sends no hook before a first prompt, so a session is shown idle from its screen.
+    // No transcript means no turn: the task was never picked up, whatever the status says.
+    assert.equal(handoffDecision({ hadTurn: false, agentStatus: 'idle', promptSinceMs: HANDOFF_GRACE_MS, waitedMs: 30_000 }), 'type');
+    assert.equal(handoffDecision({ hadTurn: false, agentStatus: 'working', promptSinceMs: null, waitedMs: 5_000 }), 'taken', 'working is a turn');
   });
 
   it('gives up, and says so, on a session that never reaches its prompt', () => {
-    assert.equal(handoffDecision({ agentStatus: 'starting', promptSinceMs: null, waitedMs: HANDOFF_GIVE_UP_MS }), 'give-up');
+    assert.equal(handoffDecision({ hadTurn: true, agentStatus: 'starting', promptSinceMs: null, waitedMs: HANDOFF_GIVE_UP_MS }), 'give-up');
   });
 
   it('points it at the message rather than retyping the task, which can run to pages', () => {

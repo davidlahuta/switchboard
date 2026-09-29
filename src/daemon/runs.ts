@@ -210,10 +210,19 @@ export const HANDOFF_GIVE_UP_MS = 5 * 60_000;
  */
 export function handoffDecision(input: {
   agentStatus: string | null | undefined;
+  /**
+   * Whether the conversation has had a turn: Claude Code writes its transcript only once a first
+   * message is handled. "Idle" alone is not one. Since Claude Code 2.1.284 sends no hook before the
+   * first prompt, a session is shown idle from its screen (see readyWithoutHooks), and reading that
+   * idle as "it took up its task" left spec-0440 at its prompt with its task never mentioned.
+   */
+  hadTurn: boolean;
   promptSinceMs: number | null;
   waitedMs: number;
 }): 'taken' | 'type' | 'wait' | 'give-up' {
-  if (input.agentStatus && input.agentStatus !== 'starting' && input.agentStatus !== 'offline') return 'taken';
+  const status = input.agentStatus;
+  if (status === 'working' || status === 'waiting' || status === 'limited') return 'taken';
+  if (status === 'idle' && input.hadTurn) return 'taken';
   if (input.promptSinceMs !== null && input.promptSinceMs >= HANDOFF_GRACE_MS) return 'type';
   if (input.waitedMs >= HANDOFF_GIVE_UP_MS) return 'give-up';
   return 'wait';
@@ -2496,6 +2505,7 @@ export class RunManager {
       else if (promptSince === null) promptSince = Date.now();
       const decision = handoffDecision({
         agentStatus: this.coord.agent(r.session_id)?.status,
+        hadTurn: !!this.sessionFile(r, path.join('..', `${r.session_id}.jsonl`)),
         promptSinceMs: promptSince === null ? null : Date.now() - promptSince,
         waitedMs: Date.now() - armedAt,
       });
