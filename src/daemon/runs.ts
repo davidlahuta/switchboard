@@ -375,6 +375,10 @@ const LIMIT_QUIET_AFTER_RESPAWN_MS = 15_000;
 const SUBAGENT_GRACE_MS = 20 * 60_000;
 /** How long after the last subagent finishes before a queued respawn is taken, if nothing else happens. */
 const WORK_SETTLED_MS = 5000;
+/** How long creating a session waits for git to name its repository before answering without it. */
+const REPO_WAIT_MS = 1500;
+/** How long a prompt has to stay on screen before a session with no hook yet is shown idle. */
+const PROMPT_READY_MS = 3000;
 /** Smaller than this, a session's window is too small to work in; see guardSize. */
 const MIN_USABLE = { cols: 40, rows: 10 };
 /** What a session too small to use is given when it never had a usable size to go back to. */
@@ -890,6 +894,8 @@ export class RunManager {
    * while the terminal window is still opening, and the runner it is meant for does not exist yet.
    */
   private readonly webSize = new Map<string, { cols: number; rows: number }>();
+  /** When each session still reporting "starting" was first seen at its prompt; see readyWithoutHooks. */
+  private readonly promptSeenAt = new Map<string, number>();
   /** The last size each session had that a person could work in; see guardSize. */
   private readonly goodSize = new Map<string, { cols: number; rows: number }>();
   /**
@@ -1372,10 +1378,40 @@ export class RunManager {
       }
       const transcript = this.sessionFile(r, path.join('..', `${r.session_id}.jsonl`));
       if (transcript && this.transcriptChanged(r.id, transcript)) this.syncModel(r.session_id, transcript);
+      this.readyWithoutHooks(r);
       // What the tab says it wants follows the session's state, which changes under hooks rather
       // than under anything here; this poll is where the two are brought back together.
       this.pushTitle(this.row(r.id) ?? r);
     }
+  }
+
+  /**
+   * A session at its prompt is idle, whether or not a hook has said so.
+   *
+   * Claude Code 2.1.284 holds a new session's SessionStart hooks until its first prompt. A session
+   * opened with no task sends nothing at all until someone types into it, so it stayed "starting"
+   * for as long as it sat there — a session created from the phone looked hung while it was
+   * waiting, ready, at its prompt — and after half an hour the liveness sweep took a silent
+   * "starting" session for dead and took it off the board. The prompt is on the screen, and the
+   * screen is here: once it has been there a moment, the session is ready, and says so.
+   */
+  private readyWithoutHooks(r: RunRow): void {
+    if (r.status !== 'running' || !this.conns.has(r.id)) return;
+    const agent = this.coord.agent(r.session_id);
+    if (!agent || agent.status !== 'starting') {
+      this.promptSeenAt.delete(r.id);
+      return;
+    }
+    if (!atPrompt(this.mirrors.get(r.id)?.screenText() ?? '')) {
+      this.promptSeenAt.delete(r.id);
+      return;
+    }
+    const since = this.promptSeenAt.get(r.id) ?? Date.now();
+    this.promptSeenAt.set(r.id, since);
+    if (Date.now() - since < PROMPT_READY_MS) return;
+    this.promptSeenAt.delete(r.id);
+    log.info('a session is at its prompt with no hook yet: showing it idle', { run: r.id, session: r.session_id });
+    this.coord.setStatus(r.session_id, 'idle', null);
   }
 
   private transcriptChanged(runId: string, file: string): boolean {
@@ -1548,7 +1584,23 @@ export class RunManager {
     const subscriptionId = this.resolveSubscription(spec.subscriptionId, undefined, undefined, false, model);
     const id = crypto.randomBytes(4).toString('hex');
     const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
-    const repoId = await this.coord.repoForDir(cwd);
+    /*
+     * Which repository it is in, if git says so quickly. On a busy desk the two git calls took long
+     * enough (each may take five seconds) that the phone asking for a new session sat on a spinner
+     * for fourteen and looked hung. The run does not need its repository to start, so a slow answer
+     * is filled in when it comes.
+     */
+    const resolving = this.coord.repoForDir(cwd);
+    const repoId = await Promise.race([resolving, new Promise<null>((resolve) => setTimeout(() => resolve(null), REPO_WAIT_MS))]);
+    if (repoId === null) {
+      void resolving.then(
+        (late) => {
+          this.db.run('UPDATE runs SET repo_id = ? WHERE id = ? AND repo_id IS NULL', late, id);
+          this.bus.invalidate('state');
+        },
+        () => undefined,
+      );
+    }
     this.db.run(
       `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, diff_panel, continue_on_resume, last_viewed_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2857,6 +2909,12 @@ export class RunManager {
   /** What a session's terminal shows now, as text; empty when there is no copy of it yet. */
   screenOf(runId: string): string {
     return this.mirrors.get(runId)?.screenText() ?? '';
+  }
+
+  /** The folder a hosted session works in, as Switchboard launched it. */
+  folderOf(runId: string): string | null {
+    const r = this.row(runId);
+    return r ? this.homeDir(r) : null;
   }
 
   /** Where a session writes its transcript, once one of its hooks has said. */
