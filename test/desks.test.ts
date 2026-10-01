@@ -245,3 +245,50 @@ describe('a worktree filed as a board of its own', () => {
     assert.equal(board?.root, 'D:\\code\\api');
   });
 });
+
+describe('a Linux desk', () => {
+  it('opens sessions in a graphical terminal when there is a display, tmux when there is not', async () => {
+    const { linuxTerminalChoice } = await import('../src/daemon/launcher.ts');
+    const has = (bins: string[]) => (b: string) => bins.includes(b);
+    assert.deepEqual(linuxTerminalChoice({ WAYLAND_DISPLAY: 'wayland-1' }, has(['alacritty', 'tmux'])), { kind: 'gui', bin: 'alacritty' });
+    assert.deepEqual(linuxTerminalChoice({ WAYLAND_DISPLAY: 'wayland-1' }, has(['xdg-terminal-exec', 'alacritty'])), { kind: 'gui', bin: 'xdg-terminal-exec' });
+    // Started at boot by systemd, before anyone signs in: no display, so tmux.
+    assert.deepEqual(linuxTerminalChoice({}, has(['alacritty', 'tmux'])), { kind: 'tmux' });
+    assert.deepEqual(linuxTerminalChoice({ DISPLAY: ':0', SWITCHBOARD_TERMINAL: 'tmux' }, has(['alacritty', 'tmux'])), { kind: 'tmux' });
+    assert.deepEqual(linuxTerminalChoice({ DISPLAY: ':0', SWITCHBOARD_TERMINAL: 'kitty' }, has(['alacritty', 'kitty'])), { kind: 'gui', bin: 'kitty' });
+    assert.deepEqual(linuxTerminalChoice({}, has([])), { kind: 'none' });
+  });
+
+  it('keeps its agent running from boot, and its sessions alive when the agent restarts', async () => {
+    const { unitText } = await import('../src/daemon/systemd.ts');
+    const unit = unitText('desk', { PATH: '/home/u/.local/bin:/usr/bin' });
+    assert.match(unit, /\nRestart=always\n/);
+    assert.match(unit, /\nStartLimitIntervalSec=0\n/);
+    assert.match(unit, /\nKillMode=process\n/);
+    assert.match(unit, /\nWantedBy=default\.target\n/);
+    assert.match(unit, /ExecStart=".*" ".*cli\.ts" "desk"/);
+    assert.match(unit, /Environment="PATH=\/home\/u\/\.local\/bin:\/usr\/bin"/);
+  });
+});
+
+describe('a hub reading another desk\'s paths', () => {
+  it('reads a Linux desk\'s paths by POSIX rules, whatever the hub runs on', () => {
+    const db = new Db(':memory:');
+    const desks = new DeskManager(db, new Bus(), {
+      liveRuns: () => 0,
+      runsOn: () => [],
+      loginFile: () => null,
+      seed: () => ({ files: {}, claudeJson: {} }),
+      localTools: () => null,
+      localRepoRoots: () => [],
+      scanLocal: async () => [],
+    });
+    const { code } = desks.createPairing('https://hub');
+    const { deskId } = desks.join(code, { hostname: 'omarchy' });
+    db.run('UPDATE desks SET info_json = ? WHERE id = ?', JSON.stringify({ platform: 'linux' }), deskId);
+    const P = desks.pathOf(deskId);
+    assert.equal(P.resolve('/home/u/repo'), '/home/u/repo');
+    assert.equal(P.join('/home/u/repo', 'src'), '/home/u/repo/src');
+    assert.equal(desks.pathOf(LOCAL_DESK), path);
+  });
+});

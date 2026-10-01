@@ -58,7 +58,7 @@ const LINUX_TERMINALS: Array<{ bin: string; argv: (title: string, cwd: string, c
 
 /**
  * How a session's terminal is opened on Linux: SWITCHBOARD_TERMINAL names a terminal from the list
- * above, or `tmux` for a detached tmux session (attach with `tmux attach -t sb-<run>`), or is unset
+ * above, or `tmux` for a detached tmux session (`tmux ls` lists them as sb-<run>-<n>; attach with `tmux attach -t <name>`), or is unset
  * for the first graphical terminal found when there is a display, and tmux when there is not. A
  * satellite nobody is sitting at is driven from the web terminal either way.
  */
@@ -178,9 +178,13 @@ export class Launcher {
       return;
     }
     if (choice.kind === 'tmux') {
-      // One tmux session per run, named after it, sized like a desktop window until a viewer fits it.
+      /*
+       * One tmux session per terminal, named after its run and sized like a desktop window until a
+       * viewer fits it. Named per launch, not per run: a relaunch opens the new one while the old is
+       * still closing, and tmux refuses a second session under a name that is still taken.
+       */
       const at = spec.args.indexOf('--run-id');
-      const name = `sb-${at >= 0 ? spec.args[at + 1] : Date.now().toString(36)}`;
+      const name = `sb-${at >= 0 ? spec.args[at + 1] : 'run'}-${Date.now().toString(36)}`;
       log.info('opening a detached tmux session', { title: spec.title, cwd, session: name });
       const child = spawn('tmux', ['new-session', '-d', '-s', name, '-n', spec.title.slice(0, 40), '-x', '200', '-y', '50', '-c', cwd, ...cmd], { cwd, detached: true, stdio: 'ignore' });
       child.on('error', (err) => log.error('could not start tmux', { error: err.message }));
