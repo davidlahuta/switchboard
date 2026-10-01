@@ -3796,3 +3796,64 @@ a.list-main:hover {
   justify-content: flex-end;
   flex-wrap: wrap;
 }
+
+/* ============ desks ============ */
+.desk-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0;
+}
+.desk-tool {
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.desk-tool-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+.desk-tool-off {
+  color: var(--muted);
+  border-style: dashed;
+}
+.matrix-cell {
+  white-space: nowrap;
+}
+.matrix-allow {
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.steps {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+}
+.copyable {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.copyable code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 12px;
+}

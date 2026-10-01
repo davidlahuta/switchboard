@@ -14,6 +14,8 @@ export interface NewSessionForm {
   cwd: string;
   /** Subscription id, or 'auto' for the one with the most headroom. */
   subscriptionId: string;
+  /** Desk id to run on, or 'auto' to let placement choose by each desk's room. */
+  desk: string;
   /** '' lets the daemon name it after the folder. */
   name: string;
   /** '' for none. Ignored when resuming: a resumed session is already somewhere. */
@@ -36,6 +38,7 @@ export interface NewSessionForm {
 export const NEW_SESSION_FIELDS = [
   'cwd',
   'subscriptionId',
+  'desk',
   'name',
   'worktree',
   'resumeSessionId',
@@ -54,6 +57,7 @@ export function newSessionDefaults(settings: Settings, cwd: string): NewSessionF
   return {
     cwd,
     subscriptionId: 'auto',
+    desk: 'auto',
     name: '',
     worktree: '',
     resumeSessionId: '',
@@ -92,6 +96,7 @@ export function newSessionRequest(form: NewSessionForm): CreateRunRequest {
     ...(resume ? { resumeSessionId: resume } : {}),
     ...(form.model.trim() ? { model: form.model.trim() } : {}),
     ...(args.length ? { args } : {}),
+    ...(form.desk.trim() && form.desk.trim() !== 'auto' ? { desk: form.desk.trim() } : {}),
   };
 }
 
@@ -105,6 +110,7 @@ export function newSessionRequest(form: NewSessionForm): CreateRunRequest {
 export const NEW_SESSION_TOOL_PROPERTIES: Record<(typeof NEW_SESSION_FIELDS)[number] | 'task', { type: string; description: string; items?: { type: string } }> = {
   cwd: { type: 'string', description: 'Folder to start in. Relative paths are from your working directory; default is the root of the worktree you are in.' },
   subscriptionId: { type: 'string', description: "Subscription id or label, or 'auto' (default) for the one with the most headroom." },
+  desk: { type: 'string', description: "Desk (machine) to run on, by id or name, or 'auto' (default): the desk with room, preferring the one you are on." },
   name: { type: 'string', description: 'Session name. Default: named after the folder.' },
   worktree: { type: 'string', description: 'Create a new git worktree with this name for the session. Ignored when resuming.' },
   resumeSessionId: { type: 'string', description: 'GUID of an existing conversation to resume instead of starting a new one.' },

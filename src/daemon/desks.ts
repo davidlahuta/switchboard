@@ -1,9 +1,10 @@
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { WebSocket } from 'ws';
-import { DATA_DIR, VERSION } from '../config.ts';
+import { DATA_DIR, PORT, VERSION } from '../config.ts';
 import { logger } from '../log.ts';
 import {
   defaultMaxSessions,
@@ -348,6 +349,63 @@ export class DeskManager {
   }
 
   // ------------------------------------------------------------ pairing
+
+  /** The address other machines on the tailnet reach this hub at, once found; see detectHubUrl. */
+  hubUrl: string | null = null;
+
+  /**
+   * Find the address a desk joining from another machine should use: the https name `tailscale
+   * serve` publishes this daemon under, which is how the phone reaches it too. Asked of the
+   * tailscale CLI once at startup; null when there is no tailscale or nothing is served.
+   */
+  async detectHubUrl(): Promise<string | null> {
+    const out = await new Promise<string | null>((resolve) =>
+      execFile('tailscale', ['serve', 'status', '--json'], { timeout: 10_000, windowsHide: true }, (err, stdout) => resolve(err ? null : stdout)),
+    );
+    try {
+      const web = (JSON.parse(out ?? '{}') as { Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }> }).Web ?? {};
+      for (const [hostPort, site] of Object.entries(web)) {
+        const proxies = Object.values(site.Handlers ?? {}).map((h) => h.Proxy ?? '');
+        if (!proxies.some((p) => new RegExp(`:${PORT}/?$`).test(p))) continue;
+        const [host, port] = hostPort.split(':');
+        this.hubUrl = port && port !== '443' ? `https://${host}:${port}` : `https://${host}`;
+        log.info('desks will join this hub at its tailscale address', { url: this.hubUrl });
+        return this.hubUrl;
+      }
+    } catch {
+      // no tailscale, or an answer in a shape this does not know
+    }
+    return null;
+  }
+
+  /** Which desks may hold each repository; a repository not listed may be on any. */
+  policies(): Array<{ remoteKey: string; allowedDesks: string[] | null }> {
+    return this.db.all<{ remote_key: string; allowed_desks: string | null }>('SELECT remote_key, allowed_desks FROM repo_policy ORDER BY remote_key').map((r) => {
+      let allowed: string[] | null = null;
+      try {
+        const v = r.allowed_desks ? (JSON.parse(r.allowed_desks) as unknown) : null;
+        allowed = Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : null;
+      } catch {
+        allowed = null;
+      }
+      return { remoteKey: r.remote_key, allowedDesks: allowed };
+    });
+  }
+
+  /** Limit a repository to some desks, or (null) let it be on any. */
+  setPolicy(key: string, allowed: string[] | null): void {
+    if (!key) throw httpError(400, 'remoteKey is required');
+    if (allowed === null) this.db.run('UPDATE repo_policy SET allowed_desks = NULL WHERE remote_key = ?', key);
+    else {
+      const ids = allowed.filter((id) => !!this.row(id));
+      this.db.run(
+        'INSERT INTO repo_policy (remote_key, allowed_desks) VALUES (?, ?) ON CONFLICT(remote_key) DO UPDATE SET allowed_desks = excluded.allowed_desks',
+        key,
+        JSON.stringify(ids),
+      );
+    }
+    this.bus.invalidate('state');
+  }
 
   /** A one-time code for a new desk, and the command that uses it there. */
   createPairing(hubUrl: string): DeskPairing {

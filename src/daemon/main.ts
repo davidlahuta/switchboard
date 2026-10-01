@@ -84,6 +84,7 @@ export async function startDaemon(): Promise<void> {
     },
   });
   runs.desks = desks;
+  void desks.detectHubUrl();
   /*
    * A satellite's folders are asked about on that satellite. Answers are kept for a minute, and the
    * last one is used while the desk cannot be reached, so a session on a desk that drops off for a
@@ -112,6 +113,7 @@ export async function startDaemon(): Promise<void> {
     const { run, text } = await runNewSessionTool(args, { ...caller, deskId: caller.desk_id, pathOf: (id) => desks.pathOf(id) }, {
       settings: () => getSettings(db),
       subscriptions: () => subs.list().map((s) => ({ id: s.id, label: s.label, ready: s.status === 'ready' })),
+      desks: () => desks.list().map((d) => ({ id: d.id, name: d.name })),
       create: (req) => runs.create(req),
     });
     log.info('an agent started a session', { by: caller.name, run: run.id, name: run.name, cwd: run.cwd });

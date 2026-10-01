@@ -31,6 +31,8 @@ function pageName(route: Route, repoName: (id: string) => string | undefined): s
       return null;
     case 'subscriptions':
       return 'Subscriptions';
+    case 'desks':
+      return 'Desks';
     case 'settings':
       return 'Settings';
     case 'pair':

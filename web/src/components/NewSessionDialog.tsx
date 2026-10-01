@@ -36,6 +36,7 @@ export function NewSessionDialog({
   const initial = newSessionDefaults(state.settings, '');
   const [cwd, setCwd] = useState(initial.cwd);
   const [sub, setSub] = useState(initial.subscriptionId);
+  const [desk, setDesk] = useState(initial.desk);
   const [name, setName] = useState(initial.name);
   const [worktree, setWorktree] = useState(initial.worktree);
   /** "" (new session), a session GUID from the recent list, or PASTE. */
@@ -61,6 +62,7 @@ export function NewSessionDialog({
     const d = newSessionDefaults(state.settings, initialCwd ?? state.repos[0]?.root ?? '');
     setCwd(d.cwd);
     setSub(d.subscriptionId);
+    setDesk(d.desk);
     setName(d.name);
     setWorktree(d.worktree);
     setSessionChoice('');
@@ -147,6 +149,7 @@ export function NewSessionDialog({
     const body: CreateRunRequest = newSessionRequest({
       cwd: dir,
       subscriptionId: sub,
+      desk,
       name,
       worktree,
       resumeSessionId: resumeId,
@@ -163,7 +166,7 @@ export function NewSessionDialog({
     setError(null);
     try {
       const run = await request<Run>('POST', '/api/runs', body);
-      emitToast('success', `Started ${run.name} on ${run.subscriptionLabel}`);
+      emitToast('success', `Started ${run.name} on ${run.subscriptionLabel}${run.deskId !== 'local' ? `, on ${run.deskName}` : ''}`);
       onClose();
       openTerminal(run.id);
     } catch (err) {
@@ -216,6 +219,24 @@ export function NewSessionDialog({
           </select>
           {subs.length === 0 && <span className="field-hint warn">No ready subscriptions. Add or log in on the Subscriptions page.</span>}
         </label>
+
+        {state.desks.length > 1 && (
+          <label className="field">
+            <span className="field-label">Desk</span>
+            <select className="input" value={desk} onChange={(e) => setDesk(e.target.value)}>
+              <option value="auto">Auto (the desk with room)</option>
+              {state.desks.map((d) => (
+                <option key={d.id} value={d.id} disabled={!d.online || !d.enabled}>
+                  {d.name} — {d.liveRuns}/{d.recommendedMaxSessions}
+                  {!d.online ? ' (offline)' : !d.enabled ? ' (disabled)' : d.liveRuns >= d.recommendedMaxSessions ? ' (full)' : ''}
+                </option>
+              ))}
+            </select>
+            <span className="field-hint">
+              The folder is on this desk. On another desk the session opens in that desk's clone of the same repository, which is cloned there first if it has none.
+            </span>
+          </label>
+        )}
 
         <div className="field">
           <label className="field-label" htmlFor={`${fieldId}-session`}>

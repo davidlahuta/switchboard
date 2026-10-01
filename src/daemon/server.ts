@@ -434,7 +434,15 @@ export function createServer(s: Services): http.Server {
 
   // desks: the hub and its satellites
   route('GET', '/api/desks', () => s.desks.list());
-  route('POST', '/api/desks/pairing', ({ req, body }) => s.desks.createPairing(typeof body.hubUrl === 'string' && body.hubUrl ? body.hubUrl : hubUrlOf(req)));
+  route('GET', '/api/desks/hub-url', ({ req }) => ({ detected: s.desks.hubUrl, fromRequest: hubUrlOf(req) }));
+  route('POST', '/api/desks/pairing', ({ req, body }) =>
+    s.desks.createPairing(typeof body.hubUrl === 'string' && body.hubUrl ? body.hubUrl : (s.desks.hubUrl ?? hubUrlOf(req))),
+  );
+  route('GET', '/api/repo-policy', () => s.desks.policies());
+  route('POST', '/api/repo-policy', ({ body }) => {
+    s.desks.setPolicy(String(body.remoteKey ?? ''), Array.isArray(body.allowedDesks) ? body.allowedDesks.filter((x: unknown): x is string => typeof x === 'string') : null);
+    return s.desks.policies();
+  });
   // The code is the credential: whoever has it was handed it by the operator, minutes ago.
   route('POST', '/api/desks/join', ({ body }) => s.desks.join(String(body.code ?? ''), { hostname: body.hostname, name: body.name }), 'public');
   route('PATCH', '/api/desks/:id', ({ params, body }) => s.desks.update(params[0], body));
