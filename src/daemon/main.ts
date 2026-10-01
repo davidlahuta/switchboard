@@ -144,6 +144,7 @@ export async function startDaemon(): Promise<void> {
   const auth = new Auth(db);
   const updater = new Updater(db, bus, runs);
   runs.versionProvider = () => updater.currentVersion;
+  updater.desks = desks;
 
   // An installation from an older build is missing whatever hooks this one added; a session
   // started before that is repaired would report nothing about its subagents.

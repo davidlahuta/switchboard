@@ -690,6 +690,8 @@ export class DeskAgent {
         return this.refreshTools();
       case 'update':
         return this.selfUpdate();
+      case 'updateClaude':
+        return this.updateClaude();
       case 'recentSessions':
         return this.recentSessions(String(args?.cwd ?? ''));
       default:
@@ -717,6 +719,32 @@ export class DeskAgent {
     log.info('updated; restarting the agent', { from, to });
     setTimeout(() => process.exit(0), 500);
     return { from, to, restarting: true };
+  }
+
+  /** `claude update` on this desk, saying the version before and after. */
+  private async updateClaude(): Promise<{ before: string | null; after: string | null; error?: string }> {
+    const claude = findClaude();
+    if (!claude) return { before: null, after: null, error: 'claude is not on PATH on this desk' };
+    const version = async (): Promise<string | null> => {
+      try {
+        const cmd = claudeCommand(claude, ['--version']);
+        const { stdout } = await execFileP(cmd.file, cmd.args, { windowsHide: true, timeout: 60_000, cwd: DATA_DIR });
+        return stdout.trim().match(/\d+\.\d+\.\d+[^\s]*/)?.[0] ?? null;
+      } catch {
+        return null;
+      }
+    };
+    const before = await version();
+    let error: string | undefined;
+    try {
+      const cmd = claudeCommand(claude, ['update']);
+      await execFileP(cmd.file, cmd.args, { windowsHide: true, timeout: 10 * 60_000, cwd: DATA_DIR });
+    } catch (err) {
+      error = err instanceof Error ? err.message.split('\n')[0] : String(err);
+    }
+    const after = (await version()) ?? before;
+    if (before !== after) void this.refreshTools();
+    return { before, after, ...(error ? { error } : {}) };
   }
 
   private async scanRepos(refresh = false): Promise<DeskRepo[]> {

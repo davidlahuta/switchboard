@@ -9,6 +9,8 @@ import { claudeCommand, findClaude, readJson } from './claude.ts';
 import type { Db } from './db.ts';
 import { now } from './db.ts';
 import type { RunManager } from './runs.ts';
+import type { DeskManager } from './desks.ts';
+import { LOCAL_DESK } from '../shared/desk.ts';
 import { getSettings } from './settings.ts';
 
 const log = logger('updater');
@@ -59,6 +61,8 @@ export class Updater {
   private lastError: string | null = null;
   private lastUpdate: { from: string; to: string; at: string } | null = null;
   currentVersion: string | null = null;
+  /** The satellites, each with a claude of its own to keep current; set by the daemon. */
+  desks: DeskManager | null = null;
 
   constructor(db: Db, bus: Bus, runs: RunManager) {
     this.db = db;
@@ -180,7 +184,7 @@ export class Updater {
       log.info('claude updated', { from: before, to: after });
       this.bus.toast('info', `Claude Code updated: ${before} → ${after}`);
       if (getSettings(this.db).restartAfterUpdate) {
-        const n = this.runs.restartAll(`claude ${after}`, { trigger: 'update' });
+        const n = this.runs.restartAll(`claude ${after}`, { trigger: 'update', deskId: LOCAL_DESK });
         if (n > 0) this.bus.toast('info', `${n} session(s) will restart on ${after} once idle.`);
       }
     } else {
@@ -191,6 +195,30 @@ export class Updater {
     this.save();
     this.checking = false;
     this.bus.invalidate('state');
+    void this.updateSatellites();
     return this.status();
+  }
+
+  /**
+   * The same for every satellite that is online: its own `claude update`, and on a new version a
+   * restart of the sessions on that desk alone, each when it is idle.
+   */
+  private async updateSatellites(): Promise<void> {
+    const desks = this.desks;
+    if (!desks) return;
+    for (const id of desks.satellites()) {
+      if (!desks.online(id)) continue;
+      try {
+        const r = await desks.rpc<{ before: string | null; after: string | null; error?: string }>(id, 'updateClaude', {}, UPDATE_TIMEOUT_MS + 60_000);
+        if (r.error) log.warn('claude update failed on a desk', { desk: id, error: r.error });
+        if (r.before && r.after && r.before !== r.after) {
+          log.info('claude updated on a desk', { desk: id, from: r.before, to: r.after });
+          this.bus.toast('info', `${desks.name(id)}: Claude Code ${r.before} → ${r.after}`);
+          if (getSettings(this.db).restartAfterUpdate) this.runs.restartAll(`claude ${r.after}`, { trigger: 'update', deskId: id });
+        }
+      } catch (err) {
+        log.warn('could not update claude on a desk', { desk: id, error: err instanceof Error ? err.message : err });
+      }
+    }
   }
 }

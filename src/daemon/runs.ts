@@ -2407,12 +2407,14 @@ export class RunManager {
    * new claude, and `relaunch` opens a fresh one, which is the only way to pick up new Switchboard
    * code — though a session whose host is already out of date gets a new terminal either way.
    */
-  restartAll(reason: string, opts: { kind?: RespawnKind; trigger?: RespawnTrigger; force?: boolean } = {}): number {
+  restartAll(reason: string, opts: { kind?: RespawnKind; trigger?: RespawnTrigger; force?: boolean; deskId?: string } = {}): number {
     const kind = opts.kind ?? 'restart';
     const trigger = opts.trigger ?? 'update';
     let queued = 0;
     for (const r of this.db.all<RunRow>(`SELECT * FROM runs WHERE status IN ('running', 'starting', 'swapping')`)) {
       if (!this.conns.has(r.id)) continue;
+      // A new claude on one desk is nothing to the sessions on another: each desk has its own.
+      if (opts.deskId && this.deskOf(r) !== opts.deskId) continue;
       // A session already queued to come back will come back on the new build anyway; a restart
       // behind that would only take the turn twice. A new terminal is not implied by what is waiting,
       // so it is folded into it instead of skipped. See mergePending.
