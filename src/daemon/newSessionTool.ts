@@ -16,6 +16,8 @@ export interface NewSessionCaller {
 export interface NewSessionDeps {
   settings: () => Settings;
   subscriptions: () => Array<{ id: string; label: string; ready: boolean }>;
+  /** The desks a session can be asked for by name. */
+  desks?: () => Array<{ id: string; name: string }>;
   create: (req: CreateRunRequest) => Promise<Run>;
 }
 
@@ -25,7 +27,7 @@ export interface NewSessionDeps {
  * has and a person in the dialog does not — where "here" is. The dialog opens on a folder the person
  * can see; an agent's own worktree is the equivalent, and a relative path is read from where it is.
  */
-export function newSessionToolRequest(args: Record<string, unknown>, caller: NewSessionCaller, deps: Pick<NewSessionDeps, 'settings' | 'subscriptions'>): CreateRunRequest {
+export function newSessionToolRequest(args: Record<string, unknown>, caller: NewSessionCaller, deps: Pick<NewSessionDeps, 'settings' | 'subscriptions' | 'desks'>): CreateRunRequest {
   const here = caller.worktree ?? caller.cwd ?? process.cwd();
   const P = caller.pathOf?.(caller.deskId) ?? path;
   const cwdArg = typeof args.cwd === 'string' && args.cwd.trim() ? P.resolve(caller.cwd ?? here, args.cwd.trim()) : here;
@@ -34,6 +36,10 @@ export function newSessionToolRequest(args: Record<string, unknown>, caller: New
   const ref = form.subscriptionId.trim();
   const byLabel = deps.subscriptions().find((s) => s.id !== ref && s.label.toLowerCase() === ref.toLowerCase());
   if (byLabel) form.subscriptionId = byLabel.id;
+  // Desks likewise, by the names they are shown under.
+  const deskRef = form.desk.trim().toLowerCase();
+  const byName = deps.desks?.().find((d) => d.id !== form.desk && d.name.toLowerCase() === deskRef);
+  if (byName) form.desk = byName.id;
   const req = newSessionRequest(form);
   // A session an agent on a satellite starts is asked for on that satellite; placement may still move it.
   return caller.deskId ? { ...req, cwdDesk: caller.deskId } : req;

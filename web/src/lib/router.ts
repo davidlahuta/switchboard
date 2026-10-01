@@ -6,6 +6,7 @@ export type Route =
   | { name: 'sessions'; repo: string | null }
   | { name: 'terminal'; runId: string }
   | { name: 'subscriptions' }
+  | { name: 'desks' }
   | { name: 'settings' }
   | { name: 'pair'; code: string | null }
   | { name: 'notfound'; path: string };
@@ -23,6 +24,8 @@ export function parseHash(hash: string): Route {
       return parts[1] ? { name: 'terminal', runId: parts[1] } : { name: 'sessions', repo: query.get('repo') };
     case 'subscriptions':
       return { name: 'subscriptions' };
+    case 'desks':
+      return { name: 'desks' };
     case 'settings':
       return { name: 'settings' };
     case 'pair':
@@ -127,5 +130,6 @@ export const href = {
   },
   terminal: (runId: string) => `#/sessions/${encodeURIComponent(runId)}`,
   subscriptions: () => '#/subscriptions',
+  desks: () => '#/desks',
   settings: () => '#/settings',
 };

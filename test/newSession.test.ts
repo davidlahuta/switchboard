@@ -40,6 +40,7 @@ const dialog = (settings: Settings, change: Partial<NewSessionForm> = {}) => new
 const CHANGES: Record<(typeof NEW_SESSION_FIELDS)[number], { form: Partial<NewSessionForm>; tool: Record<string, unknown> }> = {
   cwd: { form: { cwd: path.join(HERE, 'docs') }, tool: { cwd: path.join(HERE, 'docs') } },
   subscriptionId: { form: { subscriptionId: 'max-1' }, tool: { subscriptionId: 'max-1' } },
+  desk: { form: { desk: 'ab12' }, tool: { desk: 'ab12' } },
   name: { form: { name: 'auth refactor' }, tool: { name: 'auth refactor' } },
   worktree: { form: { worktree: 'auth' }, tool: { worktree: 'auth' } },
   resumeSessionId: { form: { resumeSessionId: '8f322f77-5b11-4993-b179-a3aa782949e6' }, tool: { resumeSessionId: '8f322f77-5b11-4993-b179-a3aa782949e6' } },

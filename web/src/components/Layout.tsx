@@ -18,6 +18,7 @@ const NAV: NavItem[] = [
   { key: 'overview', label: 'Overview', short: 'Overview', icon: 'home', href: href.overview(), match: (r) => r.name === 'overview' || r.name === 'repo' },
   { key: 'sessions', label: 'Sessions', short: 'Sessions', icon: 'terminal', href: href.sessions(), match: (r) => r.name === 'sessions' || r.name === 'terminal' },
   { key: 'subs', label: 'Subscriptions', short: 'Subs', icon: 'card', href: href.subscriptions(), match: (r) => r.name === 'subscriptions' },
+  { key: 'desks', label: 'Desks', short: 'Desks', icon: 'desk', href: href.desks(), match: (r) => r.name === 'desks' },
   { key: 'settings', label: 'Settings', short: 'Settings', icon: 'gear', href: href.settings(), match: (r) => r.name === 'settings' },
 ];
 

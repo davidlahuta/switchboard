@@ -43,9 +43,16 @@ export function RunTags({
    * or stuck. Which of those it is takes a look, and this is what says a look is worth taking.
    */
   const quiet = run.status !== 'exited' && run.agentStatus === 'working' ? quietMs(run, now) : 0;
-  if (!model && !settings && !run.staleRunner && !run.waiting && !work && !next && !run.stalled && quiet < QUIET_NOTE_MS) return null;
+  // Which machine it runs on, said only when that is not the hub: on a desk of one it is noise.
+  const remote = run.deskId && run.deskId !== 'local';
+  if (!remote && !model && !settings && !run.staleRunner && !run.waiting && !work && !next && !run.stalled && quiet < QUIET_NOTE_MS) return null;
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
+      {remote && (
+        <Badge tone="accent" title={`Runs on the desk ${run.deskName}; its folder is a path there.`}>
+          <Icon name="desk" size={12} /> {run.deskName}
+        </Badge>
+      )}
       {run.stalled && (
         <Badge
           tone="warn"
