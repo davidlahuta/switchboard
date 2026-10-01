@@ -13,6 +13,11 @@ export interface RepoInfo {
   worktree: string;
   branch: string | null;
   isGit: boolean;
+  /**
+   * git could not say (a timeout on a busy machine, a locked index), as opposed to saying "not a
+   * repository". Nothing about where the directory belongs can be concluded from such an answer.
+   */
+  failed?: boolean;
 }
 
 const CACHE_MS = 60_000;
@@ -73,7 +78,7 @@ export async function resolveRepo(dir: string): Promise<RepoInfo> {
        * recovered, and an agent that registers inside that window is filed under a repository of its
        * own — on its own board, invisible to the agents it shares a tree with.
        */
-      if (res.failed) return alone;
+      if (res.failed) return { ...alone, failed: true };
       cache.set(key, { info: alone, at: Date.now() });
       return alone;
     }

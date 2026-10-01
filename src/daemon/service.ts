@@ -4,6 +4,15 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { CLI_PATH, DATA_DIR, DAEMON_URL, IS_WINDOWS, ensureDirs } from '../config.ts';
 import type { ServiceStatus } from '../shared/types.ts';
+import * as systemd from './systemd.ts';
+
+const IS_LINUX = process.platform === 'linux';
+
+/** What the last install had to say that the operator should act on (Linux: lingering, tmux). */
+let installNotes: string[] = [];
+export function lastInstallNotes(): string[] {
+  return installNotes;
+}
 
 const run = promisify(execFile);
 
@@ -23,7 +32,7 @@ const files = (role: ServiceRole): { launcher: string; runner: string; log: stri
 const LAUNCHER = files('daemon').launcher;
 
 export function taskName(role: ServiceRole): string {
-  return TASK_NAMES[role];
+  return IS_LINUX ? systemd.unitName(role) : TASK_NAMES[role];
 }
 
 export function serviceLog(role: ServiceRole): string {
@@ -71,10 +80,11 @@ function runnerScript(role: ServiceRole): string {
 
 /** True when a supervisor script is installed, so the daemon comes back if it exits. */
 export function isSupervised(): boolean {
-  return fs.existsSync(LAUNCHER);
+  return IS_LINUX ? fs.existsSync(path.join(process.env.XDG_CONFIG_HOME || path.join(process.env.HOME ?? '', '.config'), 'systemd', 'user', systemd.unitName('daemon'))) : fs.existsSync(LAUNCHER);
 }
 
 export async function serviceStatus(role: ServiceRole = 'daemon'): Promise<ServiceStatus> {
+  if (IS_LINUX) return systemd.status(role);
   const status: ServiceStatus = {
     supported: IS_WINDOWS,
     installed: false,
@@ -119,7 +129,13 @@ export async function serviceStatus(role: ServiceRole = 'daemon'): Promise<Servi
  * daemon therefore comes back when the desk signs in.
  */
 export async function installService(delaySeconds = 20, role: ServiceRole = 'daemon'): Promise<ServiceStatus> {
-  if (!IS_WINDOWS) throw Object.assign(new Error('Automatic start is implemented for Windows Task Scheduler only.'), { status: 400 });
+  if (IS_LINUX) {
+    const r = await systemd.install(role);
+    installNotes = r.notes;
+    return r.status;
+  }
+  installNotes = [];
+  if (!IS_WINDOWS) throw Object.assign(new Error('Automatic start is implemented for Windows Task Scheduler and Linux systemd only.'), { status: 400 });
   ensureDirs();
   const other: ServiceRole = role === 'daemon' ? 'desk' : 'daemon';
   // One role per machine: a hub that becomes a satellite stops starting its daemon, and back.
@@ -162,6 +178,7 @@ export async function installService(delaySeconds = 20, role: ServiceRole = 'dae
 }
 
 export async function uninstallService(role: ServiceRole = 'daemon'): Promise<ServiceStatus> {
+  if (IS_LINUX) return systemd.uninstall(role);
   if (!IS_WINDOWS) throw Object.assign(new Error('Automatic start is implemented for Windows Task Scheduler only.'), { status: 400 });
   await ps(`Unregister-ScheduledTask -TaskName '${TASK_NAMES[role]}' -Confirm:$false -ErrorAction SilentlyContinue`);
   fs.rmSync(files(role).launcher, { force: true });
@@ -171,6 +188,7 @@ export async function uninstallService(role: ServiceRole = 'daemon'): Promise<Se
 
 /** Start the task now, so installing does not require a logout. */
 export async function startService(role: ServiceRole = 'daemon'): Promise<ServiceStatus> {
+  if (IS_LINUX) return systemd.start(role);
   if (!IS_WINDOWS) throw Object.assign(new Error('Automatic start is implemented for Windows Task Scheduler only.'), { status: 400 });
   await ps(`Start-ScheduledTask -TaskName '${TASK_NAMES[role]}'`);
   return serviceStatus(role);

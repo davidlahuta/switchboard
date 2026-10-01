@@ -204,3 +204,44 @@ describe('one board for a repository on two desks', () => {
     assert.ok(db.all<{ desk_id: string | null }>('SELECT desk_id FROM repos').some((r) => r.desk_id === 'ab12'));
   });
 });
+
+describe('a worktree filed as a board of its own', () => {
+  let dir: string;
+  let db: Db;
+  let coord: Coordinator;
+
+  before(() => {
+    dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sb-stray-')));
+    const git = (...args: string[]): void => void execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
+    git('init');
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-m', 'first');
+    git('worktree', 'add', path.join(dir, '.claude', 'worktrees', 'spec-1'));
+    db = new Db(':memory:');
+    coord = new Coordinator(db, new Bus());
+  });
+
+  after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it('is folded into its repository, agents, claims and messages with it', async () => {
+    const main = await coord.registerAgent({ sessionId: 'main-session', cwd: dir });
+    const wt = path.join(dir, '.claude', 'worktrees', 'spec-1');
+    // What a git timeout used to leave behind: the worktree as a board, and an agent on it.
+    const stray = coord.ensureRepo(wt);
+    await coord.registerAgent({ sessionId: 'wt-session', cwd: wt });
+    db.run('UPDATE agents SET repo_id = ? WHERE id = ?', stray.id, 'wt-session');
+    db.run("INSERT INTO claims (repo_id, agent_id, pattern, exclusive, created_at) VALUES (?, 'wt-session', 'src/**', 1, ?)", stray.id, new Date().toISOString());
+    assert.equal(await coord.mergeStrayBoards(), 1);
+    assert.equal(coord.agent('wt-session')?.repo_id, main.repo_id);
+    assert.equal(db.get<{ n: number }>('SELECT COUNT(*) AS n FROM claims WHERE repo_id = ?', main.repo_id)?.n, 1);
+    assert.equal(db.get('SELECT 1 FROM repos WHERE id = ?', stray.id), undefined);
+    assert.equal(await coord.mergeStrayBoards(), 0);
+  });
+
+  it('when git cannot answer, files a new session on the board its folder is inside', async () => {
+    coord.setRepoResolver(async (d) => ({ root: d, worktree: d, branch: null, isGit: false, failed: true }));
+    coord.ensureRepo('D:\\code\\api', 'ab12', 'github.com/contoso/api');
+    const a = await coord.registerAgent({ sessionId: 'slow-git', cwd: 'D:\\code\\api\\.claude\\worktrees\\x', deskId: 'ab12' });
+    const board = db.get<{ root: string }>('SELECT root FROM repos WHERE id = ?', a.repo_id);
+    assert.equal(board?.root, 'D:\\code\\api');
+  });
+});

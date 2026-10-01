@@ -260,10 +260,15 @@ async function main(): Promise<void> {
       const role = f.desk === true ? 'desk' : 'daemon';
       if (sub === 'install') {
         const s = await svc.installService(Number(str(f.delay) ?? 20), role);
-        await svc.startService(role);
-        console.log(`Scheduled task "${svc.taskName(role)}" installed and started.`);
+        if (process.platform === 'linux') {
+          console.log(`systemd user unit ${svc.taskName(role)} installed, enabled and started (${s.state ?? 'state unknown'}).`);
+        } else {
+          await svc.startService(role);
+          console.log(`Scheduled task "${svc.taskName(role)}" installed and started.`);
+          console.log('Note: it starts at logon, because opening terminal tabs needs an interactive desktop.');
+        }
         console.log(`Log: ${s.logPath}`);
-        console.log('Note: it starts at logon, because opening terminal tabs needs an interactive desktop.');
+        for (const n of svc.lastInstallNotes()) console.log(`! ${n}`);
         return;
       }
       if (sub === 'uninstall') {

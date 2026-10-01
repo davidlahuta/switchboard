@@ -7,6 +7,10 @@ export interface NewSessionCaller {
   worktree: string | null;
   /** Where relative folders it names are taken from. */
   cwd: string | null;
+  /** The desk the calling agent runs on: its folders are paths there, and a session it starts begins there. */
+  deskId?: string | null;
+  /** That desk's path rules. */
+  pathOf?: (deskId: string | null | undefined) => typeof path;
 }
 
 export interface NewSessionDeps {
@@ -23,13 +27,16 @@ export interface NewSessionDeps {
  */
 export function newSessionToolRequest(args: Record<string, unknown>, caller: NewSessionCaller, deps: Pick<NewSessionDeps, 'settings' | 'subscriptions'>): CreateRunRequest {
   const here = caller.worktree ?? caller.cwd ?? process.cwd();
-  const cwdArg = typeof args.cwd === 'string' && args.cwd.trim() ? path.resolve(caller.cwd ?? here, args.cwd.trim()) : here;
+  const P = caller.pathOf?.(caller.deskId) ?? path;
+  const cwdArg = typeof args.cwd === 'string' && args.cwd.trim() ? P.resolve(caller.cwd ?? here, args.cwd.trim()) : here;
   const form = newSessionFormFromTool({ ...args, cwd: cwdArg }, newSessionDefaults(deps.settings(), here));
   // An agent knows subscriptions by the labels on the board, not by id.
   const ref = form.subscriptionId.trim();
   const byLabel = deps.subscriptions().find((s) => s.id !== ref && s.label.toLowerCase() === ref.toLowerCase());
   if (byLabel) form.subscriptionId = byLabel.id;
-  return newSessionRequest(form);
+  const req = newSessionRequest(form);
+  // A session an agent on a satellite starts is asked for on that satellite; placement may still move it.
+  return caller.deskId ? { ...req, cwdDesk: caller.deskId } : req;
 }
 
 /** Start the session and say what happened in terms the calling agent can act on. */

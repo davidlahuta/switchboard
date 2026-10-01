@@ -102,13 +102,14 @@ export async function startDaemon(): Promise<void> {
       return hit?.info ?? { root: dir, worktree: dir, branch: null, isGit: false };
     }
   });
+  coord.setDeskPath((id) => desks.pathOf(id));
   const hub = new AgentHub(coord, runs);
   coord.setPushTarget(hub);
   coord.setSessionGone((sessionId) => runs.sessionOver(sessionId));
   coord.setRunName((runId) => runs.row(runId)?.name ?? null);
   coord.setHandedOver((runId, from, messageId) => runs.watchHandoff(runId, from, messageId));
   coord.setSessionStarter(async (caller, args) => {
-    const { run, text } = await runNewSessionTool(args, caller, {
+    const { run, text } = await runNewSessionTool(args, { ...caller, deskId: caller.desk_id, pathOf: (id) => desks.pathOf(id) }, {
       settings: () => getSettings(db),
       subscriptions: () => subs.list().map((s) => ({ id: s.id, label: s.label, ready: s.status === 'ready' })),
       create: (req) => runs.create(req),
@@ -155,12 +156,20 @@ export async function startDaemon(): Promise<void> {
   updater.start();
   desks.start();
   /*
-   * Not at once: the daemon's first seconds are busy enough that `git --version` took fifteen of
-   * them to come back, and came back empty. A minute in, the answers are real.
+   * Not at once, and one after another. The daemon's first seconds are spent reattaching every
+   * session, and each one registering asks git where it is with a five-second budget. A scan of
+   * every repository, a remote read for every board and a round of tool checks fired into that
+   * burst made git miss its budget for six sessions, which were filed as boards of their own
+   * (see mergeStrayBoards). A minute in, the desk is quiet and the answers are real.
    */
-  setTimeout(refreshTools, 60_000).unref?.();
-  void desks.scanLocal().catch(() => undefined);
-  void coord.backfillRemotes().catch((err) => log.warn('could not read the remotes of existing boards', err instanceof Error ? err.message : err));
+  setTimeout(() => {
+    void (async () => {
+      await coord.mergeStrayBoards().catch((err) => log.warn('could not fold stray boards', err instanceof Error ? err.message : err));
+      await coord.backfillRemotes().catch((err) => log.warn('could not read the remotes of existing boards', err instanceof Error ? err.message : err));
+      await desks.scanLocal().catch(() => undefined);
+      refreshTools();
+    })();
+  }, 60_000).unref?.();
   // What this desk has and can do changes rarely; looked at again every ten minutes.
   const deskUpkeep = setInterval(() => {
     refreshTools();
