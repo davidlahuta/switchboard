@@ -2163,7 +2163,9 @@ export class RunManager {
           if (asked) log.info('a session exited as asked', entry);
           else log.warn('a session exited on its own', entry);
         }
-        this.db.run('UPDATE runs SET ended_at = ?, exit_code = ? WHERE id = ?', now(), msg.code, runId);
+        // A claude killed rather than exiting has no code, and JSON drops the undefined field: bound
+        // as is, SQLite threw here, and a stopped session was never marked exited.
+        this.db.run('UPDATE runs SET ended_at = ?, exit_code = ? WHERE id = ?', now(), msg.code ?? null, runId);
         this.setStatus(runId, 'exited');
         this.coord.markOffline(r.session_id, 'session exited');
         this.pendingRespawn.delete(runId);
