@@ -432,6 +432,11 @@ const MIGRATIONS: string[] = [
     updated_at TEXT NOT NULL
   );
   `,
+  `
+  -- A portable desk (a laptop) can leave: new sessions go there only when picked, or when every desk
+  -- that stays is full.
+  ALTER TABLE desks ADD COLUMN portable INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

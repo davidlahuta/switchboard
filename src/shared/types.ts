@@ -323,6 +323,8 @@ export interface Run {
   /** the desk the session runs on ('local' is the hub's own) */
   deskId: string;
   deskName: string;
+  /** its desk is offline (asleep, away, agent stopped): the session waits for it rather than being brought back elsewhere */
+  deskOffline: boolean;
   /** a path on that desk */
   cwd: string;
   repoId: string | null;

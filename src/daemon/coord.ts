@@ -450,6 +450,12 @@ export class Coordinator {
 
   /** The path rules of a desk's platform; the hub's own unless told otherwise. */
   private deskPath: (deskId: string | null | undefined) => typeof path = () => path;
+  /** Whether a satellite is connected and settled; an agent on one that is not is away, not gone. */
+  private deskPresent: (deskId: string) => boolean = () => true;
+
+  setDeskPresent(fn: (deskId: string) => boolean): void {
+    this.deskPresent = fn;
+  }
 
   setDeskPath(fn: (deskId: string | null | undefined) => typeof path): void {
     this.deskPath = fn;
@@ -1197,6 +1203,15 @@ export class Coordinator {
        * is the stale one and gets dropped. A process that genuinely died stops hooking immediately,
        * so a dead pid still ends the session once the hooks stop.
        */
+      /*
+       * A session on a desk that is asleep or away is neither alive nor dead from here: its claims,
+       * lanes and work stand until the desk is back and settled, and its tools get their grace again
+       * from then. A laptop closed for a meeting comes back to the board as it left it.
+       */
+      if (!isLocalDesk(a.desk_id) && !this.deskPresent(a.desk_id!)) {
+        if (this.shimGone.has(a.id)) this.shimGone.set(a.id, Date.now());
+        continue;
+      }
       let dead = false;
       // A pid on a satellite is a process on that machine; this one can say nothing about it.
       if (a.pid && isLocalDesk(a.desk_id)) {

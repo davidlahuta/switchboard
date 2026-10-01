@@ -55,6 +55,10 @@ export interface Desk {
   maxIsDefault: boolean;
   liveRuns: number;
   enabled: boolean;
+  /** a machine that comes and goes, a laptop: placed on only when picked or when every other desk is full */
+  portable: boolean;
+  /** connected again only moments ago: its sessions are still finding their way back */
+  settling: boolean;
   /** where auto-clones go on that desk; null is the agent's default */
   cloneRoot: string | null;
   repoRoots: string[];
@@ -214,6 +218,7 @@ export interface PlacementDesk {
   /** live sessions on this desk in the same repository */
   repoSessions: number;
   hub: boolean;
+  portable?: boolean;
 }
 
 export type PlacementResult =
@@ -229,8 +234,13 @@ export function deskPlacement(desks: PlacementDesk[], opts: { pinned?: string | 
     return why === null;
   });
   if (!eligible.length) return { ok: false, reasons };
+  /*
+   * A portable desk takes what the desks that stay cannot: a session placed on a laptop goes wherever
+   * the laptop goes, offline included. It still beats going over the maximum on a desk that stays.
+   */
   const under = eligible.filter((d) => d.load < d.max);
-  const pool = under.length ? under : eligible;
+  const stays = (ds: PlacementDesk[]): PlacementDesk[] => ds.filter((d) => !d.portable);
+  const pool = [stays(under), under, stays(eligible), eligible].find((p) => p.length)!;
   const ratio = (d: PlacementDesk): number => (d.max > 0 ? d.load / d.max : Number.POSITIVE_INFINITY);
   const best = [...pool].sort(
     (a, b) =>

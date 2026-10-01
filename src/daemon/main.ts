@@ -108,6 +108,7 @@ export async function startDaemon(): Promise<void> {
     }
   });
   coord.setDeskPath((id) => desks.pathOf(id));
+  coord.setDeskPresent((id) => desks.settled(id));
   const hub = new AgentHub(coord, runs);
   coord.setPushTarget(hub);
   coord.setSessionGone((sessionId) => runs.sessionOver(sessionId));
