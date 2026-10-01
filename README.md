@@ -282,6 +282,49 @@ signs in. Switchboard is not, for the reason above — so after a power cut the 
 boots, you reach it over Tailscale with RustDesk, sign in, and Switchboard and every session are one
 click from where they were.
 
+## More than one desk
+
+One Switchboard (the **hub**) can host sessions on other machines too — a laptop, a Linux box — over
+Tailscale. Each extra machine (a **satellite**) runs a small desk agent that dials out to the hub; the
+hub keeps the board, the subscriptions, the logins and the decisions, and the satellite does what
+only a process on that machine can: open terminals, read and write files there, ask git.
+
+Sessions on a satellite need nothing new. They talk to `127.0.0.1` as they always do; the agent
+listens there and relays to the hub. Their logins come from the hub (a satellite never holds or
+renews one of its own), their transcripts are mirrored to it, and the web terminal drives them like
+any other.
+
+**Placement.** Every desk has a *recommended maximum* of sessions (a guess from its cores and memory
+until you set one). A new session goes to a desk under its maximum, preferring one that already has
+the repository, then the least loaded; a desk without the repository clones it first. A desk goes
+over its maximum only when every desk that could take the session is full. New session lets you
+pick a desk instead, and `sb_new_session` takes the same `desk`. A repository can be kept to some
+desks from the Desks page.
+
+**Adding a desk.** The hub needs to be reachable over Tailscale (`tailscale serve --bg 4477`, see
+below). On the hub: **Desks → Add a desk**, which shows a single-use code and the exact commands.
+On the new machine — Windows or Linux, with Node.js 24+, git, Claude Code and Tailscale, and on Linux
+tmux — it comes down to:
+
+```sh
+git clone https://github.com/davidlahuta/switchboard && cd switchboard && npm ci
+node src/cli.ts desk join https://<hub>.<tailnet>.ts.net <code>
+node src/cli.ts service install --desk
+```
+
+The last line keeps the agent running: a logon task on Windows, and on Linux a systemd user unit
+that starts at **boot**, before anyone signs in (it enables lingering), restarts it whenever it
+exits, and leaves its sessions running when it does. On Linux a session opens in the desktop's
+terminal when the agent has a display, and in a detached tmux session (`tmux ls`) when it does
+not — which is always the case for an agent started at boot. The Desks page can update a
+satellite's Switchboard and restart its agent without anybody at it.
+
+**Credentials.** A fresh desk can clone and push without logging in to anything when the hub holds
+the credentials: **Desks → Credentials for sessions** takes a GitHub App (recommended: one-hour
+tokens per repository owner, minted on the hub), GitHub or Azure DevOps tokens, and an Azure
+service principal. git reaches them through a credential helper scoped to those hosts, gh and az
+through shims that fetch a fresh token on every call; nothing is written to a satellite's disk.
+
 ## Claude Code updates
 
 Switchboard can keep `claude` current itself (Settings → Claude Code version). It runs
@@ -381,11 +424,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the [API reference](docs/AP
 
 ```
 src/
-  cli.ts            entry point: daemon | run | mcp | install | service | status
+  cli.ts            entry point: daemon | run | mcp | desk | install | service | status
   daemon/           HTTP + WebSocket server, coordination, subscriptions, runs, auth,
                     usage polling, model catalogue, claude updates, auto-start
   mcp/shim.ts       stdio MCP server + channel, one per Claude Code session
   runner/runner.ts  PTY host that keeps the terminal alive across swaps
+  desk/             the satellite's agent, cloning, and the git/gh/az credential helpers
   shared/           API types, MCP tool definitions, internal protocol
 web/                React UI (Vite)
 apphost.cs          Aspire AppHost for development
@@ -401,6 +445,7 @@ apphost.cs          Aspire AppHost for development
 | `SWITCHBOARD_CLAUDE_PATH` | `claude` on `PATH`                | Claude Code executable                    |
 | `SWITCHBOARD_WT_WINDOW`   | the window you are using          | Windows Terminal window for hosted tabs; overrides the setting |
 | `SWITCHBOARD_LOG_LEVEL`   | `info`                            | `debug` / `info` / `warn` / `error`       |
+| `SWITCHBOARD_TERMINAL`    | *(first one found)*               | Linux desks: a terminal (`alacritty`, `ghostty`, `kitty`, …) or `tmux` |
 
 Runtime settings (auto-swap, thresholds, continue message, repository folders, session defaults
 for model, auto-compact and permission prompts, update schedule, conflict window, polling
