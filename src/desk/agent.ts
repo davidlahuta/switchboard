@@ -79,7 +79,7 @@ export function readDeskConfig(): DeskConfig | null {
   return readJson<DeskConfig>(DESK_CONFIG);
 }
 
-function saveDeskConfig(cfg: DeskConfig): void {
+export function saveDeskConfig(cfg: DeskConfig): void {
   ensureDirs();
   writeJson(DESK_CONFIG, cfg);
   // Where DPAPI is not there to seal the token (Linux), the file is the user's alone.
@@ -115,6 +115,16 @@ export async function joinDesk(hub: string, code: string, opts: { name?: string;
   };
   saveDeskConfig(cfg);
   return cfg;
+}
+
+/** When a login's access token expires, or 0 when that cannot be read. */
+function expiry(content: string): number {
+  try {
+    const v = (JSON.parse(content) as { claudeAiOauth?: { expiresAt?: unknown } }).claudeAiOauth?.expiresAt;
+    return typeof v === 'number' ? v : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /** Where a session's Claude Code keeps its own login, on this desk. */
@@ -167,11 +177,11 @@ interface Follow {
  * daemon would, and does on this machine what the hub asks of it.
  */
 export class DeskAgent {
-  private readonly cfg: DeskConfig;
+  private cfg: DeskConfig;
   private token = '';
   private readonly launcher = new Launcher();
   private readonly localUrl: string;
-  private readonly hubWs: string;
+  private hubWs: string;
   private control: WebSocket | null = null;
   private backoff = 1000;
   private runs = new Map<string, DeskRun>();
@@ -547,6 +557,14 @@ export class DeskAgent {
   }
 
   private connect(): void {
+    // The hub may have moved (`desk set-hub`): every attempt goes where the config now says.
+    const fresh = readDeskConfig();
+    if (fresh && fresh.deskId === this.cfg.deskId && fresh.hub !== this.cfg.hub) {
+      log.info('the hub has moved', { from: this.cfg.hub, to: fresh.hub });
+      this.cfg = { ...this.cfg, hub: fresh.hub };
+      this.hubWs = hubHttp(fresh.hub).replace(/^http/, 'ws');
+      for (const ws of this.upstreams) ws.terminate();
+    }
     const ws = new WebSocket(`${this.hubWs}/ws/desk`, { headers: { authorization: `Bearer ${this.token}` }, maxPayload: 16 * 1024 * 1024 });
     this.watch(ws);
     ws.on('open', () => {
@@ -831,6 +849,20 @@ export class DeskAgent {
   private writeLogin(runId: string, content: string | null): void {
     if (!/^[a-f0-9]+$/.test(runId)) return;
     const file = path.join(loginDir(runId), CREDENTIALS_FILE);
+    const existing = readText(file);
+    if (!this.loginWritten.has(runId) && existing !== null && existing !== content) {
+      /*
+       * A login this agent did not write: the session was started by a daemon on this machine, before
+       * it became a satellite, or by an agent before a restart. Its claude may have renewed it since,
+       * and renewing rotates the refresh token, so overwriting it with an older copy (or removing it)
+       * would log the session out. The newer of the two wins, and the hub is told when that is ours.
+       */
+      if (content === null || expiry(existing) > expiry(content)) {
+        this.loginWritten.set(runId, sha256(existing));
+        this.send({ type: 'login-changed', runId, content: existing });
+        return;
+      }
+    }
     if (content === null) {
       fs.rmSync(loginDir(runId), { recursive: true, force: true });
       this.loginWritten.delete(runId);

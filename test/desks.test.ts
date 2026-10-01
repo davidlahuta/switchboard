@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -137,6 +138,18 @@ describe('desk registry', () => {
       localRepoRoots: () => [],
       scanLocal: async () => [],
     });
+  });
+
+  it('lets the old hub claim the desk an import made of it, once', () => {
+    db.run("INSERT INTO desks (id, name, hostname, created_at) VALUES ('old1', 'old hub', 'OLD', '2026-01-01T00:00:00Z')");
+    const hash = crypto.createHash('sha256').update('CLAIMCODE2').digest('hex');
+    db.run('INSERT INTO desk_claims (code_hash, desk_id, expires_at) VALUES (?, ?, ?)', hash, 'old1', new Date(Date.now() + 60_000).toISOString());
+    const joined = desks.join('claim-code2', { hostname: 'OLD' });
+    assert.equal(joined.deskId, 'old1');
+    assert.equal(joined.name, 'old hub');
+    assert.equal(desks.deskOfToken(`Bearer ${joined.token}`), 'old1');
+    assert.throws(() => desks.join('CLAIMCODE2', { hostname: 'OLD' }), /Invalid or expired/);
+    desks.remove('old1');
   });
 
   it('always has the hub, which cannot be removed', () => {

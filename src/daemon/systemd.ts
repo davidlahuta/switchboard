@@ -57,8 +57,10 @@ export function unitText(role: Role, env: NodeJS.ProcessEnv = process.env): stri
     // The PATH this was installed from, so claude, git, gh, az and tmux are found as they were then.
     `Environment=${quote(`PATH=${env.PATH ?? '/usr/local/bin:/usr/bin:/bin'}`)}`,
   ];
-  if (env.SWITCHBOARD_DATA_DIR) lines.push(`Environment=${quote(`SWITCHBOARD_DATA_DIR=${env.SWITCHBOARD_DATA_DIR}`)}`);
-  if (env.SWITCHBOARD_TERMINAL) lines.push(`Environment=${quote(`SWITCHBOARD_TERMINAL=${env.SWITCHBOARD_TERMINAL}`)}`);
+  // Whatever of Switchboard's own settings the install was made with, the service keeps.
+  for (const key of ['SWITCHBOARD_DATA_DIR', 'SWITCHBOARD_TERMINAL', 'SWITCHBOARD_HUB_URL', 'SWITCHBOARD_BIND', 'SWITCHBOARD_PORT']) {
+    if (env[key]) lines.push(`Environment=${quote(`${key}=${env[key]}`)}`);
+  }
   lines.push(
     'Restart=always',
     'RestartSec=5',

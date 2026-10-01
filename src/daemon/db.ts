@@ -437,6 +437,15 @@ const MIGRATIONS: string[] = [
   -- that stays is full.
   ALTER TABLE desks ADD COLUMN portable INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- A code that lets a machine join as a desk that already exists: the old hub, after \`hub import\`
+  -- made it a satellite of the new one. Stored hashed; used once.
+  CREATE TABLE desk_claims (
+    code_hash TEXT PRIMARY KEY,
+    desk_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

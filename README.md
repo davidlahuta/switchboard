@@ -477,6 +477,143 @@ They are applied to sessions on every desk, the hub included, and nothing is wri
 satellite's disk. With no credentials saved nothing changes: sessions use whatever logins the
 machine already has.
 
+### Moving the hub to another machine
+
+The hub can move — to a new machine, from Windows to Linux or back — without stopping a single
+session. The old hub becomes a satellite of the new one: its sessions stay where they run, and their
+terminals, hooks and tools reconnect to `127.0.0.1:4477` as they do through any daemon restart, where
+the desk agent now listens and relays them to the new hub.
+
+Three commands carry it out:
+
+- `hub stop` stops the daemon for good and removes its automatic start. On Windows it ends the
+  supervisor loop and then the daemon, each by its process id. Sessions keep running.
+- `hub export <file>` packs the hub into one file:
+  - the database;
+  - each subscription's settings and login;
+  - the hub's copy of every live session's login;
+  - the default subscription's login (the old user's own `~/.claude`);
+  - the vault's secrets, opened so the new machine can seal them again.
+
+  The file holds every login and secret in the clear, readable only by you. Copy it over a private
+  channel, and delete it everywhere once the import is done.
+- `hub import <file>` unpacks it on the new machine:
+  - it makes a desk of the old hub, and moves that machine's sessions, agents, repositories,
+    repository folders and placement settings onto it;
+  - it points each subscription at a profile on the new machine;
+  - it prints a claim code, good for a week, that the old machine uses with `desk join` to become
+    that desk.
+
+**Try it first.** `hub export trial.gz --dry-run` works while the daemon keeps running, and carries
+no logins, secrets, paired devices or push subscriptions. Import it with its own data folder and
+port, so it cannot reach anything real:
+
+```sh
+SWITCHBOARD_DATA_DIR=~/sb-trial SWITCHBOARD_PORT=4499 node src/cli.ts hub import trial.gz
+SWITCHBOARD_DATA_DIR=~/sb-trial SWITCHBOARD_PORT=4499 node src/cli.ts daemon
+```
+
+A hub imported from a dry run never revives, restarts or updates anything. Its default subscription
+is a folder of its own rather than `~/.claude`. Open it at `http://127.0.0.1:4499` and check that
+every session is listed on the old hub's desk, waiting for it.
+
+**The move, step by step:**
+
+1. **New machine.** Set it up as a hub would be (Node.js 24+, git, tmux on Linux, Claude Code,
+   Tailscale; see the platform notes above), clone Switchboard and `npm ci`. Don't start the daemon.
+2. **Old hub.** Stop it, then export:
+   ```sh
+   node src/cli.ts hub stop
+   node src/cli.ts hub export hub.gz
+   ```
+   From here until step 4, sessions keep working, but nothing coordinates them: no board, no swaps,
+   no renewals. Keep the gap to minutes.
+3. **New machine.** Copy `hub.gz` over (for example `scp` over the tailnet), then:
+   ```sh
+   node src/cli.ts hub import hub.gz --name <name for the old hub>
+   node src/cli.ts service install
+   tailscale serve --bg 4477            # or your own address; see Headscale below
+   ```
+   `--force` imports over an existing database and keeps it as a `.bak` file.
+4. **Old hub.** Join as the desk it now is, with the code the import printed:
+   ```sh
+   node src/cli.ts desk join https://<new hub> <code>
+   node src/cli.ts service install --desk
+   ```
+   Within seconds its sessions reattach. The new hub mirrors their transcripts, which takes a few
+   minutes for long ones.
+5. **Other satellites** keep their tokens and only need the new address:
+   `node src/cli.ts desk set-hub https://<new hub>`. A running agent moves on its next reconnect,
+   which is right away once the old hub is gone.
+6. **Afterwards:**
+   - Delete `hub.gz` on both machines.
+   - On the phone, open the new address, pair again (**Settings → Remote access**) and turn
+     notifications back on. Pairings and push subscriptions belong to an address.
+   - On the old hub, delete `~/.claude/.credentials.json` if the new hub took it for the default
+     subscription. Two machines holding the same login each renew it, and renewing logs the other
+     one out. Delete the file rather than running `/logout`, which may revoke the login for both.
+     If the new machine already had a login in `~/.claude`, the import kept it and put the old one
+     next to it; it says which.
+
+**Going back.** Until the old hub has joined, `node src/cli.ts service install` on the old hub
+brings it back exactly as it was. The export doesn't change anything there. After it has joined,
+moving back is the same move in the other direction: `hub stop` and `hub export` on the new hub,
+`hub import --force` on the old one.
+
+### Your own control server (Headscale)
+
+[Headscale](https://headscale.net) is the open-source control server for Tailscale clients. With a
+public IP and a domain, it replaces Tailscale's hosted coordination. The clients and the WireGuard
+network stay the same, but MagicDNS names change, and there is no `tailscale serve` with
+certificates. So the hub needs an HTTPS address of its own.
+
+Make it a **separate step from moving the hub**. Move the hub on the tailnet you have, where
+`tailscale serve` works on Linux as it does on Windows. Then switch the tailnet, and point the desks
+at the new address with `desk set-hub`.
+
+A setup that needs no DNS provider API, on an Arch/Omarchy hub (`sudo pacman -S headscale caddy`),
+with `hs.example.com` and `sb.example.com` both pointing at your public IP:
+
+- `/etc/headscale/config.yaml`: `server_url: https://hs.example.com`,
+  `listen_addr: 127.0.0.1:8080`, and under `dns`, `magic_dns: true`, a `base_domain` that is not
+  `example.com` or a parent of it (for example `tail.example.com`), and an extra record that sends
+  `sb.example.com` to the hub's tailnet address *inside* the tailnet:
+  ```yaml
+  dns:
+    extra_records:
+      - name: sb.example.com
+        type: A
+        value: 100.64.0.1      # the hub's address: tailscale ip -4
+  ```
+- `/etc/caddy/Caddyfile`. Caddy fetches both certificates itself (ports 80 and 443 open), and the
+  hub answers only on the tailnet:
+  ```
+  hs.example.com {
+      reverse_proxy 127.0.0.1:8080
+  }
+  sb.example.com {
+      @tailnet remote_ip 100.64.0.0/10 fd7a:115c:a1e0::/48
+      handle @tailnet {
+          reverse_proxy 127.0.0.1:4477
+      }
+      respond 403
+  }
+  ```
+- `sudo systemctl enable --now headscale caddy`, then `sudo headscale users create <you>` and
+  `sudo headscale preauthkeys create --user <id> --expiration 24h` (`headscale users list` shows
+  the id) for each machine.
+- Every machine, the hub included: `sudo tailscale up --login-server https://hs.example.com --authkey <key>`.
+  On Windows it's `tailscale login --login-server https://hs.example.com --authkey <key>`. On the
+  phone, the Tailscale app's account menu has a custom coordination server option.
+- On the hub, tell Switchboard its address and reinstall its service so the setting sticks:
+  `SWITCHBOARD_HUB_URL=https://sb.example.com node src/cli.ts service install`. Then on every
+  satellite: `node src/cli.ts desk set-hub https://sb.example.com`.
+
+Because public DNS resolves `sb.example.com` to the public IP and the tailnet resolves it to the
+hub, Caddy can prove the name over HTTP while the hub itself is only reachable from your machines.
+Anything else gets a 403. Caddy marks requests as proxied, so Switchboard asks for a paired device
+or a desk token on every one, exactly as behind `tailscale serve`.
+
 ## Claude Code updates
 
 Switchboard can keep `claude` current itself (Settings → Claude Code version). It runs
@@ -598,6 +735,7 @@ apphost.cs          Aspire AppHost for development
 | `SWITCHBOARD_WT_WINDOW`   | the window you are using          | Windows Terminal window for hosted tabs; overrides the setting |
 | `SWITCHBOARD_LOG_LEVEL`   | `info`                            | `debug` / `info` / `warn` / `error`       |
 | `SWITCHBOARD_TERMINAL`    | *(first one found)*               | Linux desks: a terminal (`alacritty`, `ghostty`, `kitty`, …) or `tmux` |
+| `SWITCHBOARD_HUB_URL`     | *(from `tailscale serve`)*        | The address desks join this hub at, when it is not `tailscale serve`'s |
 
 Runtime settings (auto-swap, thresholds, continue message, repository folders, session defaults
 for model, auto-compact and permission prompts, update schedule, conflict window, polling
