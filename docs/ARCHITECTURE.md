@@ -590,9 +590,71 @@ The tab's title is the session's name. Tabs are opened without `--suppressApplic
 runner sets the title itself, so renaming a session reaches its tab; title sequences from claude are
 dropped on the way to the console, which would otherwise put the old name back.
 
+## Desks: a hub and its satellites
+
+The daemon is the **hub** of any number of desks. A satellite runs `switchboard desk` (src/desk/agent.ts),
+which keeps one WebSocket to the hub (`/ws/desk`, a desk token from a one-time pairing code, sealed
+with DPAPI where there is DPAPI) and listens on `127.0.0.1` where a daemon would. Hooks, runners and
+MCP shims of sessions there connect to it as they would to a daemon, and it relays each over a
+connection of its own authenticated as that desk. The hub accepts a desk token only on what a
+session uses — `/hooks/*`, `/ws/runner`, `/ws/agent`, `/api/cred/*` — and a run is only ever spoken
+for from the desk it runs on (`runs.desk_id`).
+
+**Nothing about a satellite's user or folders is assumed.** The hub builds a spawn spec as if the
+session ran beside it and adds `DeskSpawnExtras`: claude's arguments, the files they name (by the
+hub's path, with their contents), the subscription, the folder to trust. The agent makes it its
+own: its claude, its profile for the subscription (junctioned to its own `~/.claude`, seeded with the
+hub's settings), its copies of the files, its login directory. Paths a desk reports are read by that
+desk's platform's rules (`DeskManager.pathOf`), so a Windows hub never turns `/home/...` into
+`C:\home\...`.
+
+**Logins.** Only the hub renews a login: renewing rotates the refresh token, and two renewers log each
+other out. A satellite session reads a private copy (`CLAUDE_SECURESTORAGE_CONFIG_DIR`) the agent
+keeps in step with the hub's copy of it, which CredentialSync manages exactly as for a session beside
+the hub; a session that renews anyway has its file sent back and confirmed like any renewal.
+Satellite profiles never hold a login of their own.
+
+**What the hub reads about a session** — its transcript, custom title, the process registry — the
+desk mirrors into `DATA/desks/<id>/` (`home/` for its `~/.claude`, `profile/<sub>/` for its profiles):
+appended as transcripts grow, small files sent whole when they change. A satellite hook's
+`transcript_path` arrives as `desk://home/...`, which the hub maps onto the mirror. So the transcript
+watch, title and model sync, resume checks and open-question detection read local files, unchanged.
+What can only be asked on the machine — is the folder there, is claude alive, where does the session
+open — the desk reports every few seconds for each of its sessions (`DeskRunInfo`).
+
+**Boards across desks.** A repository's identity across desks is its normalised origin
+(`remoteKey`). On the hub a board is still keyed by its main worktree's path, so every existing board
+kept its id; a satellite's clone of a remote that has a board joins that board, and only a
+repository nobody else has gets a board of its own. File paths are repo-relative, so two desks
+editing the same file is a real conflict — in two working copies, so a future merge conflict rather
+than a clobber. A satellite's repository is never judged by what is on the hub's disk.
+
+**Placement** (`deskPlacement`): online, enabled desks the repository is allowed on are eligible;
+among those under their recommended maximum, one that has the repository, then the lowest
+load/max, then the one already running that repository, then the hub. A desk without the
+repository clones it before the session starts. Only when every eligible desk is full does one go
+over. Revive and respawn never move a session: it lives on its desk, and one whose desk is offline
+waits for it without spending revive attempts.
+
+**Always on.** On Windows the agent runs under the same logon-task supervisor as the daemon (`service
+install --desk`). On Linux it is a systemd user unit with `Restart=always`, no start limit, and
+`KillMode=process`, so the tmux server and every claude in it outlive an agent restart; lingering
+starts it at boot. With no display (always, at boot) sessions open in detached tmux sessions.
+
+**Credentials for git, gh and az** live in the hub's vault (src/daemon/vault.ts, DPAPI-sealed). git
+reaches them through `switchboard credential`, placed in front of only the vault's hosts with
+`GIT_CONFIG_*` (each host's helper list reset, `useHttpPath` on, so a GitHub App picks the
+installation for the repository's owner). gh and az go through shims (`switchboard cred-exec`) put
+first on PATH, which fetch a fresh token — or sign az in as a service principal in a config folder of
+its own — on every call, so a one-hour App token never goes stale inside a long session. On a
+satellite these ask the agent, which relays as its desk. With an empty vault none of it is applied.
+
 ## Security
 
 * The daemon binds to `127.0.0.1` only. Remote access is meant to go through `tailscale serve`.
+* A satellite desk authenticates with a bearer token (stored hashed; revocable on the Desks page),
+  accepted only on the endpoints a session uses. Its agent accepts only loopback connections, and
+  runs only the fixed set of requests in DeskAgent.rpc — never a command the hub names.
 * Requests are **local** when the Host header is a loopback name and no proxy headers are present.
   Local requests need no auth.
 * Everything else must carry a device cookie obtained by **pairing**: the local UI shows a
