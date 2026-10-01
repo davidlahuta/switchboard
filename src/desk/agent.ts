@@ -31,6 +31,7 @@ import {
 import type { RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
 import { protect, unprotect } from '../daemon/secret.ts';
 import { cloneRepo } from './clone.ts';
+import { ensureShims, gitHelperEnv, pathWithShims } from './credential.ts';
 import { toolStatus } from './tools.ts';
 
 const log = logger('desk');
@@ -241,6 +242,22 @@ export class DeskAgent {
     };
     if (!this.isLocal(req) || req.headers.origin) return reply(403, { error: 'desk agent: local only' });
     if (url.pathname === '/healthz') return reply(200, { ok: true, desk: this.cfg.deskId, hub: this.online(), version: VERSION });
+    // The vault, for git's helper and the gh/az shims of sessions on this desk: relayed as this desk.
+    if (req.method === 'POST' && (url.pathname === '/api/cred/git' || url.pathname === '/api/cred/tool')) {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      try {
+        const res = await fetch(`${hubHttp(this.cfg.hub)}${url.pathname}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
+          body: Buffer.concat(chunks).toString('utf8'),
+          signal: AbortSignal.timeout(20_000),
+        });
+        return reply(res.status, await res.json().catch(() => ({})));
+      } catch {
+        return reply(503, { error: 'the hub is not reachable' });
+      }
+    }
     const hook = url.pathname.match(/^\/hooks\/([A-Za-z]+)$/);
     if (req.method === 'POST' && hook) {
       const chunks: Buffer[] = [];
@@ -397,6 +414,12 @@ export class DeskAgent {
     }
     const cmd = claudeCommand(claude, args);
     const env: Record<string, string | null> = { ...spec.env, CLAUDE_CONFIG_DIR: profile, SWITCHBOARD_URL: this.localUrl };
+    // The hub's vault, reached through this agent: git's helper, the gh/az shims, the Azure SDKs' environment.
+    if (x.vault) {
+      Object.assign(env, x.vault.env);
+      if (x.vault.hosts.length) Object.assign(env, gitHelperEnv(x.vault.hosts));
+      if (x.vault.shims) Object.assign(env, pathWithShims(ensureShims()));
+    }
     env.CLAUDE_SECURESTORAGE_CONFIG_DIR = x.privateLogin ? await this.loginReady(runId) : null;
     const { desk: _drop, ...rest } = spec;
     return { ...rest, file: cmd.file, args: cmd.args, env };
@@ -647,8 +670,12 @@ export class DeskAgent {
       }
       case 'scanRepos':
         return this.scanRepos(true);
-      case 'clone':
-        return this.clone(String(args?.url ?? ''), typeof args?.name === 'string' ? args.name : null, args?.env ?? null);
+      case 'clone': {
+        // Credentials for the clone come from the vault through this agent, like a session's do.
+        const hosts = Array.isArray(args?.vaultHosts) ? (args.vaultHosts as unknown[]).filter((h): h is string => typeof h === 'string') : [];
+        const env = hosts.length ? { ...gitHelperEnv(hosts), SWITCHBOARD_URL: this.localUrl } : null;
+        return this.clone(String(args?.url ?? ''), typeof args?.name === 'string' ? args.name : null, env);
+      }
       case 'configure': {
         if (Array.isArray(args?.repoRoots)) this.cfg.repoRoots = args.repoRoots.filter((x: unknown): x is string => typeof x === 'string');
         if (args?.cloneRoot === null || typeof args?.cloneRoot === 'string') this.cfg.cloneRoot = args.cloneRoot || null;

@@ -13,6 +13,7 @@ import { findClaude } from './claude.ts';
 import type { Coordinator } from './coord.ts';
 import type { Db } from './db.ts';
 import type { DeskManager } from './desks.ts';
+import type { Vault } from './vault.ts';
 import type { RepoScanner } from './discovery.ts';
 import { createHookHandler } from './hooks.ts';
 import type { TranscriptWatch } from './transcriptWatch.ts';
@@ -86,6 +87,7 @@ export interface Services {
   push: PushService;
   presence: Presence;
   desks: DeskManager;
+  vault: Vault;
 }
 
 type Body = Record<string, any>;
@@ -438,6 +440,20 @@ export function createServer(s: Services): http.Server {
   route('POST', '/api/desks/pairing', ({ req, body }) =>
     s.desks.createPairing(typeof body.hubUrl === 'string' && body.hubUrl ? body.hubUrl : (s.desks.hubUrl ?? hubUrlOf(req))),
   );
+  // credentials for GitHub and Azure: managed here, never read back
+  route('GET', '/api/creds', () => s.vault.list());
+  route('POST', '/api/creds', ({ body }) => s.vault.save(body));
+  route('PATCH', '/api/creds/:id', ({ params, body }) => s.vault.save({ ...body, id: params[0] }));
+  route('DELETE', '/api/creds/:id', async ({ params }) => (await s.vault.remove(params[0]), { ok: true }));
+  route('POST', '/api/creds/:id/test', ({ params }) => s.vault.test(params[0]));
+  // Asked by git's helper and the gh/az shims of sessions on this machine, or relayed by a desk agent.
+  route(
+    'POST',
+    '/api/cred/git',
+    async ({ body }) => (await s.vault.gitCredential(String(body.host ?? ''), String(body.path ?? ''))) ?? fail(404, 'no credential for that'),
+    'desk',
+  );
+  route('POST', '/api/cred/tool', ({ body }) => s.vault.toolCredential(String(body.tool ?? ''), typeof body.target === 'string' ? body.target : null), 'desk');
   route('GET', '/api/repo-policy', () => s.desks.policies());
   route('POST', '/api/repo-policy', ({ body }) => {
     s.desks.setPolicy(String(body.remoteKey ?? ''), Array.isArray(body.allowedDesks) ? body.allowedDesks.filter((x: unknown): x is string => typeof x === 'string') : null);
@@ -453,7 +469,7 @@ export function createServer(s: Services): http.Server {
   });
   route('POST', '/api/desks/:id/clone', async ({ params, body }) => {
     if (typeof body.url !== 'string' || !body.url) fail(400, 'url is required');
-    const repo = await s.desks.clone(params[0], body.url);
+    const repo = await s.desks.clone(params[0], body.url, s.vault.snapshot.hosts);
     s.desks.addRepo(params[0], repo);
     return repo;
   });

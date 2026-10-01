@@ -243,6 +243,13 @@ async function main(): Promise<void> {
     }
     case 'login-shell':
       return loginShell(f);
+    // git's credential helper and the gh/az shims; see src/desk/credential.ts.
+    case 'credential':
+      return (await import('./desk/credential.ts')).gitCredentialHelper(rest[0] ?? '');
+    case 'cred-exec': {
+      const [tool, ...toolArgs] = rest;
+      return (await import('./desk/credential.ts')).credExec(tool ?? '', toolArgs);
+    }
     case 'install': {
       const s = await (await import('./daemon/integration.ts')).installIntegration();
       console.log(`MCP server: ${s.mcpInstalled ? 'registered' : 'FAILED'} · hooks: ${s.hooksInstalled ? 'installed' : 'FAILED'}`);

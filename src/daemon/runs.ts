@@ -27,6 +27,8 @@ import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, readJson, writeRuntimeJson } from './claude.ts';
 import { CREDENTIALS_FILE, CredentialSync } from './credsync.ts';
 import type { DeskManager } from './desks.ts';
+import type { Vault } from './vault.ts';
+import { ensureShims, gitHelperEnv, pathWithShims } from '../desk/credential.ts';
 import { deskPlacement, type DeskRun, type DeskSpawnExtras, LOCAL_DESK, type PlacementDesk } from '../shared/desk.ts';
 import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
@@ -932,6 +934,9 @@ export class RunManager {
   /** The desks sessions can run on besides this one; set by the daemon once both exist. */
   desks: DeskManager | null = null;
 
+  /** The hub's credentials for GitHub and Azure; set by the daemon. See Vault. */
+  vault: Vault | null = null;
+
   /** The desk a run lives on. */
   deskOfRun(runId: string): string {
     return this.row(runId)?.desk_id ?? LOCAL_DESK;
@@ -1804,7 +1809,7 @@ export class RunManager {
   /** Clone a repository onto a desk for a session placed there, and say where it went. */
   private async cloneOn(deskId: string, url: string, key: string): Promise<string> {
     this.bus.toast('info', `Cloning ${key} onto ${this.desks!.name(deskId)} for the new session…`);
-    const repo = await this.desks!.clone(deskId, url);
+    const repo = await this.desks!.clone(deskId, url, this.vault?.snapshot.hosts ?? []);
     this.desks!.addRepo(deskId, repo);
     return repo.path;
   }
@@ -1934,7 +1939,17 @@ export class RunManager {
       title: r.name,
       subscriptionLabel: sub.label,
     };
-    if (!remote) return spec;
+    // The vault, when it holds anything: git's helper for its hosts, the gh/az shims, the Azure SDKs' environment.
+    const vault = this.vault?.snapshot;
+    const vaulted = !!vault && (vault.hosts.length > 0 || vault.shims || Object.keys(vault.env).length > 0);
+    if (!remote) {
+      if (vaulted) {
+        Object.assign(spec.env, vault.env);
+        if (vault.hosts.length) Object.assign(spec.env, gitHelperEnv(vault.hosts));
+        if (vault.shims) Object.assign(spec.env, pathWithShims(ensureShims()));
+      }
+      return spec;
+    }
     // The login the session will read is sent ahead, so it is on the desk by the time claude starts.
     this.desks?.syncLogins([{ runId: r.id, deskId: r.desk_id! }]);
     return {
@@ -1947,6 +1962,7 @@ export class RunManager {
         trust: this.homeDir(r),
         privateLogin: loginDir !== null,
         resume: canResume,
+        ...(vaulted ? { vault } : {}),
       },
     };
   }
