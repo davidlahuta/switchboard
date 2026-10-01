@@ -387,6 +387,12 @@ export class DeskManager {
    * tailscale CLI once at startup; null when there is no tailscale or nothing is served.
    */
   async detectHubUrl(): Promise<string | null> {
+    // Set where the hub is reached some other way than tailscale serve: Headscale behind a proxy, say.
+    const fixed = process.env.SWITCHBOARD_HUB_URL?.trim().replace(/\/+$/, '');
+    if (fixed) {
+      this.hubUrl = fixed;
+      return fixed;
+    }
     const out = await new Promise<string | null>((resolve) =>
       execFile('tailscale', ['serve', 'status', '--json'], { timeout: 10_000, windowsHide: true }, (err, stdout) => resolve(err ? null : stdout)),
     );
@@ -448,12 +454,23 @@ export class DeskManager {
   /** Exchange a pairing code for a desk id and the token the desk will present from now on. */
   join(code: string, info: { hostname?: unknown; name?: unknown }): { deskId: string; token: string; name: string } {
     const normalized = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const token = crypto.randomBytes(32).toString('base64url');
+    const hostname = typeof info.hostname === 'string' ? info.hostname.slice(0, 120) : null;
+    // A claim: the machine joins as a desk that already exists (the old hub; see handover.ts).
+    const claim = this.db.get<{ desk_id: string }>('SELECT desk_id FROM desk_claims WHERE code_hash = ? AND expires_at > ?', sha256(normalized), now());
+    if (claim && this.row(claim.desk_id)) {
+      this.db.run('DELETE FROM desk_claims WHERE code_hash = ?', sha256(normalized));
+      this.db.run('UPDATE desks SET token_hash = ?, hostname = COALESCE(?, hostname), revoked_at = NULL WHERE id = ?', sha256(token), hostname, claim.desk_id);
+      const name = this.name(claim.desk_id);
+      log.info('a desk claimed its place', { desk: claim.desk_id, name, hostname });
+      this.bus.toast('info', `${name} joined as the desk it was.`);
+      this.bus.invalidate('state');
+      return { deskId: claim.desk_id, token, name };
+    }
     const expires = this.codes.get(normalized);
     if (!expires || expires < Date.now()) throw httpError(403, 'Invalid or expired desk pairing code. Make a new one in Settings → Desks.');
     this.codes.delete(normalized);
-    const token = crypto.randomBytes(32).toString('base64url');
     const deskId = crypto.randomBytes(4).toString('hex');
-    const hostname = typeof info.hostname === 'string' ? info.hostname.slice(0, 120) : null;
     const name = (typeof info.name === 'string' && info.name.trim() ? info.name.trim() : (hostname ?? `desk-${deskId}`)).slice(0, 60);
     this.db.run('INSERT INTO desks (id, name, hostname, token_hash, created_at) VALUES (?, ?, ?, ?, ?)', deskId, name, hostname, sha256(token), now());
     log.info('a desk joined', { desk: deskId, name, hostname });

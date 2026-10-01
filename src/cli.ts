@@ -28,6 +28,10 @@ Usage:
       --delay <seconds>              Wait this long after logon (default 20)
   switchboard service uninstall      Remove the automatic start
   switchboard service status         Show the scheduled task and whether the daemon answers
+  switchboard hub stop               Moving the hub: stop this daemon for good (sessions keep running)
+  switchboard hub export <file>      Moving the hub: pack it into one file (--dry-run: no secrets, daemon may run)
+  switchboard hub import <file>      Moving the hub: unpack it here; the old hub becomes a desk of this one
+  switchboard desk set-hub <url>     Point this desk at a hub that moved
   switchboard status                 Print a short summary from the running daemon
   switchboard diag [--json]          Why every session is where it is: host, work, queued respawns
       --screen                       Show every session's screen, not only the ones asking something
@@ -228,6 +232,17 @@ async function main(): Promise<void> {
         console.log('Next: `node src/cli.ts service install --desk` to start the agent at every logon, or `node src/cli.ts desk` to run it now.');
         return;
       }
+      if (sub === 'set-hub') {
+        const [, hub] = rest.filter((a) => !a.startsWith('--'));
+        const cfg = desk.readDeskConfig();
+        if (!hub || !cfg) {
+          console.error(cfg ? 'Usage: switchboard desk set-hub <hub-url>' : 'Not joined to a hub; use desk join.');
+          process.exit(1);
+        }
+        desk.saveDeskConfig({ ...cfg, hub: hub.replace(/\/+$/, '') });
+        console.log(`This desk now connects to ${hub}. A running agent moves there the next time it reconnects; to move it now, restart it (service status --desk shows how it runs).`);
+        return;
+      }
       if (sub === 'status') {
         const cfg = desk.readDeskConfig();
         if (!cfg) {
@@ -259,6 +274,41 @@ async function main(): Promise<void> {
       const s = await (await import('./daemon/integration.ts')).uninstallIntegration();
       console.log(`MCP server: ${s.mcpInstalled ? 'still registered' : 'removed'} · hooks: ${s.hooksInstalled ? 'still present' : 'removed'}`);
       return;
+    }
+    case 'hub': {
+      const h = await import('./daemon/handover.ts');
+      const [sub, arg] = rest.filter((a) => !a.startsWith('--'));
+      if (sub === 'stop') {
+        for (const line of await h.stopHub()) console.log(line);
+        console.log('The daemon is stopped and will not start again here. Sessions keep running; their terminals reconnect to whatever listens on 127.0.0.1 next.');
+        return;
+      }
+      if (sub === 'export') {
+        if (!arg) {
+          console.error('Usage: switchboard hub export <file> [--dry-run]');
+          process.exit(1);
+        }
+        const r = await h.exportHub(arg, { dryRun: f['dry-run'] === true });
+        console.log(`Wrote ${r.file}: ${r.subscriptions} subscription(s), ${r.runs} live session(s), ${r.logins} session login(s), ${r.secrets} credential secret(s).`);
+        console.log(f['dry-run'] === true ? 'Dry run: no logins or secrets in it, for trying the import.' : 'It holds every login and secret in the clear: copy it to the new hub, import it, delete it.');
+        return;
+      }
+      if (sub === 'import') {
+        if (!arg) {
+          console.error('Usage: switchboard hub import <file> [--name <name for the old hub>] [--force]');
+          process.exit(1);
+        }
+        const r = await h.importHub(arg, { force: f.force === true, name: str(f.name) });
+        if (r.backup) console.log(`The database that was here is kept as ${r.backup}.`);
+        console.log(`Imported ${r.subscriptions} subscription(s). The old hub is now the desk "${r.deskName}" (${r.deskId}) with ${r.runs} live session(s) waiting for it.`);
+        for (const n of r.notes) console.log(`! ${n}`);
+        if (r.dryRun) console.log('Dry run: nothing is revived, restarted or updated by this hub.');
+        console.log('Next, here: start the daemon (node src/cli.ts service install).');
+        console.log(`Then on the old hub, within a week:\n  node src/cli.ts desk join ${process.env.SWITCHBOARD_HUB_URL ?? '<this hub\'s URL>'} ${r.code}\n  node src/cli.ts service install --desk`);
+        return;
+      }
+      console.error('Usage: switchboard hub stop | export <file> [--dry-run] | import <file> [--name <n>] [--force]');
+      process.exit(1);
     }
     case 'service': {
       const svc = await import('./daemon/service.ts');
@@ -304,6 +354,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  console.error(err instanceof Error ? (err.stack ?? err.message) : err);
+  // Moving a hub is done by hand, step by step: what went wrong, said plainly, is the useful part.
+  const plain = process.argv[2] === 'hub';
+  console.error(err instanceof Error ? (plain ? err.message : (err.stack ?? err.message)) : err);
   process.exit(1);
 });

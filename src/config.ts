@@ -120,6 +120,14 @@ export const IS_WINDOWS = process.platform === 'win32';
 
 export function ensureDirs(): void {
   for (const dir of [DATA_DIR, PROFILES_DIR, RUNTIME_DIR]) fs.mkdirSync(dir, { recursive: true });
+  // Logins and the vault live here, in the clear where there is no DPAPI: this user's alone.
+  if (process.platform !== 'win32') {
+    try {
+      fs.chmodSync(DATA_DIR, 0o700);
+    } catch {
+      // not ours to change
+    }
+  }
 }
 
 /** Command line that re-invokes this CLI with the current Node binary. */
