@@ -23,6 +23,11 @@ import { Presence, questionOnScreen, SessionAlerts } from './alerts.ts';
 import { PushService } from './push.ts';
 import { lastAssistantText } from './tasknotes.ts';
 import { Updater } from './updater.ts';
+import { DeskManager } from './desks.ts';
+import type { DeskRepoInfo } from './coord.ts';
+import { toolStatus } from '../desk/tools.ts';
+import { originOf } from '../git.ts';
+import { type DeskRepo, type DeskTools, remoteKey } from '../shared/desk.ts';
 
 const log = logger('daemon');
 
@@ -58,6 +63,45 @@ export async function startDaemon(): Promise<void> {
   const models = new ModelCatalog(() => subs.anyReadyToken());
   const scanner = new RepoScanner(() => getSettings(db).repoRoots);
   const runs = new RunManager(db, bus, subs, coord, launcher, models);
+  // The hub's own desk and the satellites paired to it; see DeskManager.
+  let localTools: DeskTools | null = null;
+  const refreshTools = (): void => void toolStatus(!!launcher.wtPath).then((t) => (localTools = t), () => undefined);
+  const desks = new DeskManager(db, bus, {
+    liveRuns: (id) => runs.liveOnDesk(id),
+    runsOn: (id) => runs.runsOnDesk(id),
+    loginFile: (runId) => runs.loginFile(runId),
+    seed: () => subs.profileSeed(),
+    localTools: () => localTools,
+    localRepoRoots: () => getSettings(db).repoRoots,
+    scanLocal: async () => {
+      const out: DeskRepo[] = [];
+      for (const r of await scanner.list(true)) {
+        if (r.isWorktree) continue;
+        const url = await originOf(r.path);
+        out.push({ path: r.path, remoteKey: remoteKey(url), remoteUrl: url, name: r.name, branch: r.branch });
+      }
+      return out;
+    },
+  });
+  runs.desks = desks;
+  /*
+   * A satellite's folders are asked about on that satellite. Answers are kept for a minute, and the
+   * last one is used while the desk cannot be reached, so a session on a desk that drops off for a
+   * moment is not filed under a board of its own in the meantime.
+   */
+  const deskRepoCache = new Map<string, { info: DeskRepoInfo; at: number }>();
+  coord.setRepoResolver(async (dir, deskId) => {
+    const key = `${deskId}|${dir.toLowerCase()}`;
+    const hit = deskRepoCache.get(key);
+    if (hit && Date.now() - hit.at < 60_000) return hit.info;
+    try {
+      const info = await desks.rpc<DeskRepoInfo>(deskId, 'resolveRepo', { dir }, 10_000);
+      deskRepoCache.set(key, { info, at: Date.now() });
+      return info;
+    } catch {
+      return hit?.info ?? { root: dir, worktree: dir, branch: null, isGit: false };
+    }
+  });
   const hub = new AgentHub(coord, runs);
   coord.setPushTarget(hub);
   coord.setSessionGone((sessionId) => runs.sessionOver(sessionId));
@@ -89,7 +133,7 @@ export async function startDaemon(): Promise<void> {
     },
     push,
   );
-  const watch = new TranscriptWatch(coord, runs, () => [...new Set([HOME_CLAUDE_DIR, ...subs.list().map((s) => s.configDir)])]);
+  const watch = new TranscriptWatch(coord, runs, () => [...new Set([HOME_CLAUDE_DIR, ...subs.list().map((s) => s.configDir), ...desks.mirrorHomes()])]);
   const auth = new Auth(db);
   const updater = new Updater(db, bus, runs);
   runs.versionProvider = () => updater.currentVersion;
@@ -109,6 +153,19 @@ export async function startDaemon(): Promise<void> {
   runs.start();
   subs.start();
   updater.start();
+  desks.start();
+  /*
+   * Not at once: the daemon's first seconds are busy enough that `git --version` took fifteen of
+   * them to come back, and came back empty. A minute in, the answers are real.
+   */
+  setTimeout(refreshTools, 60_000).unref?.();
+  void desks.scanLocal().catch(() => undefined);
+  void coord.backfillRemotes().catch((err) => log.warn('could not read the remotes of existing boards', err instanceof Error ? err.message : err));
+  // What this desk has and can do changes rarely; looked at again every ten minutes.
+  const deskUpkeep = setInterval(() => {
+    refreshTools();
+    void desks.scanLocal().catch(() => undefined);
+  }, 10 * 60_000);
   void models.refresh();
   const sweep = setInterval(() => coord.sweep(), 60_000);
   const transcripts = setInterval(() => watch.poll(), TRANSCRIPT_POLL_MS);
@@ -138,7 +195,7 @@ export async function startDaemon(): Promise<void> {
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
   const servers: Server[] = [];
   for (const host of BIND_HOSTS) {
-    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch, push, presence });
+    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch, push, presence, desks });
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') log.error(`${host}:${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
       else if (err.code === 'EADDRNOTAVAIL') log.error(`Cannot bind ${host}: no interface has that address. Check SWITCHBOARD_BIND.`);
@@ -164,6 +221,8 @@ export async function startDaemon(): Promise<void> {
     clearInterval(prune);
     clearInterval(titles);
     clearInterval(logins);
+    clearInterval(deskUpkeep);
+    desks.stop();
     subs.stop();
     updater.stop();
     for (const server of servers) {

@@ -1,6 +1,8 @@
 // API contract shared by the daemon and the web UI. Keep this file dependency-free and
 // erasable-syntax only: the daemon runs it directly with Node's type stripping.
 
+import type { Desk } from './desk.ts';
+
 export type SubscriptionKind = 'default' | 'profile';
 export type SubscriptionStatus = 'pending_login' | 'ready' | 'logged_out' | 'error';
 
@@ -318,6 +320,10 @@ export interface Swap {
 export interface Run {
   id: string;
   name: string;
+  /** the desk the session runs on ('local' is the hub's own) */
+  deskId: string;
+  deskName: string;
+  /** a path on that desk */
   cwd: string;
   repoId: string | null;
   sessionId: string;
@@ -593,6 +599,8 @@ export interface StateSnapshot {
   update: UpdateStatus;
   /** Models offered when starting a session (1M-context only), from the API */
   models: Model[];
+  /** the hub and its satellites */
+  desks: Desk[];
 }
 
 /**
@@ -630,7 +638,12 @@ export interface RepoDetail {
 // ---- request bodies ----
 
 export interface CreateRunRequest {
+  /** a path on `cwdDesk` */
   cwd: string;
+  /** the desk `cwd` is a path on; omitted for the hub's own */
+  cwdDesk?: string;
+  /** where to run it: a desk id, or 'auto' (the default) to let placement decide */
+  desk?: string;
   /** subscription id or 'auto' */
   subscriptionId: string;
   name?: string;

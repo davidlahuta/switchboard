@@ -16,6 +16,12 @@ Usage:
       --compact-at <tokens>          Auto-compact threshold (default from settings)
       -- <args...>                   Everything after a bare -- is passed to claude
   switchboard mcp                    Stdio MCP server (spawned by Claude Code)
+  switchboard desk join <hub> <code> Join this machine to a hub as a satellite desk
+      --name <name>                  How the hub shows it (default: the computer name)
+      --port <n>                     Local port sessions talk to (default 4477)
+  switchboard desk                   Run the desk agent (sessions here are hosted by the hub)
+  switchboard desk status            Show which hub this desk belongs to and whether it answers
+  switchboard service install --desk Start the desk agent automatically at logon instead of a daemon
   switchboard install                Register the MCP server + hooks globally for all sessions
   switchboard uninstall              Remove the global registration
   switchboard service install        Start the daemon automatically at logon (Windows)
@@ -179,6 +185,9 @@ async function main(): Promise<void> {
     case 'mcp':
       return (await import('./mcp/shim.ts')).runShim();
     case 'run': {
+      // Set before the runner connects: config read SWITCHBOARD_URL when this process started.
+      const daemon = str(f.daemon);
+      if (daemon) process.env.SWITCHBOARD_URL = daemon;
       const { runRunner } = await import('./runner/runner.ts');
       const runId = str(f['run-id']);
       // Everything after a bare `--` goes to claude untouched.
@@ -203,6 +212,35 @@ async function main(): Promise<void> {
             },
       );
     }
+    case 'desk': {
+      const desk = await import('./desk/agent.ts');
+      const sub = rest.find((a) => !a.startsWith('--'));
+      if (sub === 'join') {
+        const [, hub, code] = rest.filter((a) => !a.startsWith('--'));
+        if (!hub || !code) {
+          console.error('Usage: switchboard desk join <hub-url> <code>   (the hub shows both under Settings → Desks)');
+          process.exit(1);
+        }
+        const port = Number(str(f.port));
+        const cfg = await desk.joinDesk(hub, code, { name: str(f.name), port: Number.isInteger(port) && port > 0 ? port : undefined });
+        console.log(`Joined ${cfg.hub} as desk ${cfg.name ?? cfg.deskId}.`);
+        console.log(`Config: ${desk.DESK_CONFIG}${cfg.tokenProtected ? ' (token sealed with DPAPI)' : ''}`);
+        console.log('Next: `node src/cli.ts service install --desk` to start the agent at every logon, or `node src/cli.ts desk` to run it now.');
+        return;
+      }
+      if (sub === 'status') {
+        const cfg = desk.readDeskConfig();
+        if (!cfg) {
+          console.log('Not joined to a hub.');
+          return;
+        }
+        const res = await fetch(`http://127.0.0.1:${cfg.port}/healthz`).catch(() => null);
+        const body = res?.ok ? ((await res.json()) as { hub?: boolean }) : null;
+        console.log(`desk ${cfg.name ?? cfg.deskId} · hub ${cfg.hub} · agent ${body ? 'running' : 'NOT RUNNING'}${body ? ` · hub ${body.hub ? 'connected' : 'NOT CONNECTED'}` : ''}`);
+        return;
+      }
+      return desk.runDeskAgent();
+    }
     case 'login-shell':
       return loginShell(f);
     case 'install': {
@@ -218,20 +256,22 @@ async function main(): Promise<void> {
     case 'service': {
       const svc = await import('./daemon/service.ts');
       const sub = rest.find((a) => !a.startsWith('--')) ?? 'status';
+      // --desk: this machine is a satellite, and the task keeps its desk agent running instead.
+      const role = f.desk === true ? 'desk' : 'daemon';
       if (sub === 'install') {
-        const s = await svc.installService(Number(str(f.delay) ?? 20));
-        await svc.startService();
-        console.log(`Scheduled task "${svc.TASK_NAME}" installed and started.`);
+        const s = await svc.installService(Number(str(f.delay) ?? 20), role);
+        await svc.startService(role);
+        console.log(`Scheduled task "${svc.taskName(role)}" installed and started.`);
         console.log(`Log: ${s.logPath}`);
         console.log('Note: it starts at logon, because opening terminal tabs needs an interactive desktop.');
         return;
       }
       if (sub === 'uninstall') {
-        await svc.uninstallService();
+        await svc.uninstallService(role);
         console.log('Automatic start removed.');
         return;
       }
-      const s = await svc.serviceStatus();
+      const s = await svc.serviceStatus(role);
       console.log(`installed: ${s.installed}${s.state ? ` (${s.state})` : ''}`);
       console.log(`daemon responding: ${s.running}`);
       if (s.lastRunTime) console.log(`last run: ${s.lastRunTime} (result ${s.lastResult})`);

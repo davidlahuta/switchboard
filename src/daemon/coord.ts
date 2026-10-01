@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DATA_DIR } from '../config.ts';
-import { forgetRepoCache, matchesPattern, patternsOverlap, relPath, repoIdFor, resolveRepo } from '../git.ts';
+import { forgetRepoCache, matchesPattern, originOf, patternsOverlap, relPath, repoIdFor, resolveRepo, type RepoInfo } from '../git.ts';
+import { LOCAL_DESK, remoteKey } from '../shared/desk.ts';
 import { logger } from '../log.ts';
 import type {
   Agent,
@@ -36,7 +37,26 @@ interface RepoRow {
   name: string;
   created_at: string;
   last_activity: string | null;
+  /** the desk `root` is a path on; NULL is the hub's own */
+  desk_id: string | null;
+  remote_key: string | null;
 }
+
+/** Where a directory sits in git, plus what the repository is across desks. */
+export type DeskRepoInfo = RepoInfo & { remoteKey?: string | null; remoteUrl?: string | null };
+
+/** Answers "where is this directory in git" for a desk; the hub's own desk asks git directly. */
+export type RepoResolver = (dir: string, deskId: string) => Promise<DeskRepoInfo>;
+
+/** The hub's own desk, asked directly. */
+export async function resolveLocal(dir: string): Promise<DeskRepoInfo> {
+  const info = await resolveRepo(dir);
+  if (!info.isGit) return info;
+  const url = await originOf(info.root);
+  return { ...info, remoteUrl: url, remoteKey: remoteKey(url) };
+}
+
+const isLocalDesk = (id: string | null | undefined): boolean => !id || id === LOCAL_DESK;
 
 export interface AgentRow {
   id: string;
@@ -59,6 +79,8 @@ export interface AgentRow {
   read_through_id: number;
   transcript: string | null;
   status_at: string | null;
+  /** the desk the session runs on; NULL is the hub's own */
+  desk_id: string | null;
 }
 
 interface MessageRow {
@@ -146,6 +168,8 @@ export interface RegisterInput {
   subscriptionId?: string | null;
   hasChannel?: boolean;
   name?: string | null;
+  /** the desk the session runs on, whose paths `cwd` is in; omitted for the hub's own */
+  deskId?: string | null;
 }
 
 export interface ToolResult {
@@ -417,6 +441,30 @@ export class Coordinator {
     this.bus = bus;
   }
 
+  /** How a directory on a desk is looked up in git; the hub's own desk by default. */
+  private resolver: RepoResolver = (dir) => resolveLocal(dir);
+
+  setRepoResolver(fn: RepoResolver): void {
+    this.resolver = fn;
+  }
+
+  /** Where a directory on a desk sits in git, and what repository it is across desks. */
+  resolveOn(dir: string, deskId?: string | null): Promise<DeskRepoInfo> {
+    return isLocalDesk(deskId) ? resolveLocal(dir) : this.resolver(dir, deskId!);
+  }
+
+  /**
+   * Give the boards made before desks existed the remote they are clones of, so a satellite working
+   * in the same repository joins the same board. Asked of git in the background, once, at startup.
+   */
+  async backfillRemotes(): Promise<void> {
+    for (const r of this.db.all<RepoRow>('SELECT * FROM repos WHERE desk_id IS NULL AND remote_key IS NULL')) {
+      if (!fs.existsSync(r.root)) continue;
+      const key = remoteKey(await originOf(r.root));
+      if (key) this.db.run('UPDATE repos SET remote_key = ? WHERE id = ? AND remote_key IS NULL', key, r.id);
+    }
+  }
+
   setPushTarget(target: PushTarget): void {
     this.pushTarget = target;
   }
@@ -466,26 +514,61 @@ export class Coordinator {
 
   // ---------------------------------------------------------------- repos
 
-  ensureRepo(root: string): RepoRow {
-    const id = repoIdFor(root);
+  /**
+   * The board for a repository. On the hub's own desk a repository is its main worktree's path, as
+   * it always was, so every board made before desks existed keeps its id. On a satellite, a clone of
+   * a remote that already has a board joins that board -- the same repository on two machines is one
+   * board, and file paths are repo-relative, so conflicts across desks are real conflicts -- and only
+   * a repository nobody else has gets a board of its own, keyed by the desk and its path there.
+   */
+  ensureRepo(root: string, deskId?: string | null, key?: string | null): RepoRow {
+    const local = isLocalDesk(deskId);
+    if (!local && key) {
+      const shared = this.db.get<RepoRow>('SELECT * FROM repos WHERE remote_key = ? ORDER BY (desk_id IS NOT NULL), created_at LIMIT 1', key);
+      if (shared) return shared;
+    }
+    const id = local ? repoIdFor(root) : repoIdFor(`${deskId}:${root}`);
     let row = this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', id);
     if (!row) {
       const ts = now();
-      this.db.run('INSERT INTO repos (id, root, name, created_at, last_activity) VALUES (?, ?, ?, ?, ?)', id, root, path.basename(root), ts, ts);
+      this.db.run(
+        'INSERT INTO repos (id, root, name, created_at, last_activity, desk_id, remote_key) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        id,
+        root,
+        path.basename(root),
+        ts,
+        ts,
+        local ? null : deskId!,
+        key ?? null,
+      );
       row = this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', id)!;
       this.bus.invalidate('state');
+    } else if (key && row.remote_key !== key) {
+      this.db.run('UPDATE repos SET remote_key = ? WHERE id = ?', key, id);
+      row = { ...row, remote_key: key };
     }
     return row;
   }
 
-  async addRepo(dir: string): Promise<Repo> {
-    forgetRepoCache(dir);
-    const info = await resolveRepo(dir);
-    return this.repoDto(this.ensureRepo(info.root));
+  /** The board a repository on a desk files under, without making one; see ensureRepo. */
+  private boardIdFor(root: string, deskId: string | null | undefined, key?: string | null): string {
+    if (isLocalDesk(deskId)) return repoIdFor(root);
+    if (key) {
+      const shared = this.db.get<{ id: string }>('SELECT id FROM repos WHERE remote_key = ? ORDER BY (desk_id IS NOT NULL), created_at LIMIT 1', key);
+      if (shared) return shared.id;
+    }
+    return repoIdFor(`${deskId}:${root}`);
   }
 
-  async repoForDir(dir: string): Promise<string> {
-    return this.ensureRepo((await resolveRepo(dir)).root).id;
+  async addRepo(dir: string): Promise<Repo> {
+    forgetRepoCache(dir);
+    const info = await resolveLocal(dir);
+    return this.repoDto(this.ensureRepo(info.root, null, info.remoteKey));
+  }
+
+  async repoForDir(dir: string, deskId?: string | null): Promise<string> {
+    const info = await this.resolveOn(dir, deskId);
+    return this.ensureRepo(info.root, deskId, info.remoteKey).id;
   }
 
   private repoTouched(repoId: string): void {
@@ -516,8 +599,9 @@ export class Coordinator {
   }
 
   async registerAgent(input: RegisterInput): Promise<AgentRow> {
-    const info = await resolveRepo(input.cwd);
-    const repo = this.ensureRepo(info.root);
+    const desk = isLocalDesk(input.deskId) ? null : input.deskId!;
+    const info = await this.resolveOn(input.cwd, desk);
+    const repo = this.ensureRepo(info.root, desk, info.remoteKey);
     const existing = this.agent(input.sessionId);
     const ts = now();
     // Taking over a terminal rather than joining, if so: consumed either way, so a takeover that
@@ -531,7 +615,7 @@ export class Coordinator {
            run_id = COALESCE(?, run_id), subscription_id = COALESCE(?, subscription_id),
            has_channel = CASE WHEN ? IS NULL THEN has_channel ELSE ? END,
            status = CASE WHEN status = 'offline' THEN 'idle' ELSE status END,
-           ended_at = NULL, last_seen = ?
+           ended_at = NULL, last_seen = ?, desk_id = ?
          WHERE id = ?`,
         repo.id,
         name,
@@ -544,6 +628,7 @@ export class Coordinator {
         input.hasChannel === undefined ? null : 1,
         input.hasChannel ? 1 : 0,
         ts,
+        desk,
         existing.id,
       );
       if (existing.status === 'offline') this.event(repo.id, existing.id, 'joined', `${name} is back`);
@@ -553,9 +638,9 @@ export class Coordinator {
       // seat had read, so nothing said to it while the previous conversation held it is either lost
       // or read out a second time. See sessionReplaced.
       this.db.run(
-        `INSERT INTO agents (id, repo_id, name, worktree, branch, cwd, pid, status, subscription_id, run_id, has_channel, started_at, last_seen, read_through_id)
+        `INSERT INTO agents (id, repo_id, name, worktree, branch, cwd, pid, status, subscription_id, run_id, has_channel, started_at, last_seen, read_through_id, desk_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?,
-           COALESCE(?, (SELECT COALESCE(MAX(id), 0) FROM messages WHERE repo_id = ?)))`,
+           COALESCE(?, (SELECT COALESCE(MAX(id), 0) FROM messages WHERE repo_id = ?)), ?)`,
         input.sessionId,
         repo.id,
         name,
@@ -570,6 +655,7 @@ export class Coordinator {
         ts,
         takeover?.readThrough ?? null,
         repo.id,
+        desk,
       );
       this.event(repo.id, input.sessionId, 'joined', `${name} joined${info.branch ? ` on ${info.branch}` : ''}`);
       log.info('agent joined', { name, repo: repo.name });
@@ -643,10 +729,11 @@ export class Coordinator {
       .map((r) => ({ id: r.id, transcript: r.transcript, status: r.status, statusAt: r.status_at ?? r.last_seen }));
   }
 
-  async setCwd(id: string, cwd: string): Promise<void> {
+  async setCwd(id: string, cwd: string, deskId?: string | null): Promise<void> {
     const a = this.agent(id);
     if (!a) return;
-    const info = await resolveRepo(cwd);
+    const desk = deskId === undefined ? a.desk_id : isLocalDesk(deskId) ? null : deskId;
+    const info = await this.resolveOn(cwd, desk);
     const ts = now();
     /*
      * A session that steps outside version control has not changed projects. It has run a command
@@ -660,7 +747,7 @@ export class Coordinator {
       this.db.run('UPDATE agents SET cwd = ?, last_seen = ? WHERE id = ?', cwd, ts, id);
       return;
     }
-    const repo = this.ensureRepo(info.root);
+    const repo = this.ensureRepo(info.root, desk, info.remoteKey);
     if (repo.id === a.repo_id) {
       this.db.run('UPDATE agents SET cwd = ?, worktree = ?, branch = ?, last_seen = ? WHERE id = ?', cwd, info.worktree, info.branch, ts, id);
       this.bus.invalidate(`repo:${a.repo_id}`);
@@ -998,7 +1085,8 @@ export class Coordinator {
    */
   private forgetVanishedRepos(): void {
     const idle = new Date(Date.now() - 60 * 60_000).toISOString();
-    for (const r of this.db.all<RepoRow>('SELECT * FROM repos')) {
+    // A satellite's repository is a path on that machine, which this one cannot see.
+    for (const r of this.db.all<RepoRow>('SELECT * FROM repos WHERE desk_id IS NULL')) {
       if (fs.existsSync(r.root)) continue;
       if ((r.last_activity ?? r.created_at) > idle) continue;
       if (this.liveAgents(r.id).length) continue;
@@ -1042,7 +1130,8 @@ export class Coordinator {
        * so a dead pid still ends the session once the hooks stop.
        */
       let dead = false;
-      if (a.pid) {
+      // A pid on a satellite is a process on that machine; this one can say nothing about it.
+      if (a.pid && isLocalDesk(a.desk_id)) {
         try {
           process.kill(a.pid, 0);
         } catch {
@@ -1793,8 +1882,8 @@ export class Coordinator {
       const rel = relPath(a.worktree, abs);
       if (rel) return rel;
     }
-    const info = await resolveRepo(path.dirname(abs));
-    if (repoIdFor(info.root) !== a.repo_id) return null;
+    const info = await this.resolveOn(path.dirname(abs), a.desk_id);
+    if (this.boardIdFor(info.root, a.desk_id, info.remoteKey) !== a.repo_id) return null;
     return relPath(info.worktree, abs);
   }
 
