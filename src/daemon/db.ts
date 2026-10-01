@@ -372,6 +372,51 @@ const MIGRATIONS: string[] = [
   ALTER TABLE agents ADD COLUMN status_at TEXT;
   ALTER TABLE session_work ADD COLUMN until TEXT;
   `,
+  `
+  -- Desks: the hub's own ('local') and the satellites paired to it. A satellite holds a token (stored
+  -- hashed) for the one connection it keeps to the hub. max_sessions NULL is the hardware's guess.
+  CREATE TABLE desks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    hostname TEXT,
+    token_hash TEXT,
+    max_sessions INTEGER,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    clone_root TEXT,
+    repo_roots TEXT,
+    info_json TEXT,
+    version TEXT,
+    last_seen TEXT,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+  );
+  -- Which desk a session, an agent and a repository path belong to. NULL is the hub's own desk, which
+  -- is every row from before desks existed.
+  ALTER TABLE runs ADD COLUMN desk_id TEXT;
+  ALTER TABLE agents ADD COLUMN desk_id TEXT;
+  ALTER TABLE repos ADD COLUMN desk_id TEXT;
+  -- A repository's identity across desks: its normalised origin (see remoteKey).
+  ALTER TABLE repos ADD COLUMN remote_key TEXT;
+  CREATE INDEX repos_remote_key ON repos (remote_key);
+  -- What each desk has cloned, as it last reported.
+  CREATE TABLE desk_repos (
+    desk_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    remote_key TEXT,
+    remote_url TEXT,
+    name TEXT NOT NULL,
+    branch TEXT,
+    scanned_at TEXT NOT NULL,
+    PRIMARY KEY (desk_id, path)
+  );
+  CREATE INDEX desk_repos_remote ON desk_repos (remote_key);
+  -- Per repository: which desks may hold it (NULL: all), as a JSON array of desk ids.
+  CREATE TABLE repo_policy (
+    remote_key TEXT PRIMARY KEY,
+    allowed_desks TEXT,
+    cred_profiles TEXT
+  );
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

@@ -83,3 +83,34 @@ export function readCustomTitle(file: string): string | null {
     return null;
   }
 }
+
+/** What a conversation is called: its custom title or summary, else its first prompt. */
+export function transcriptTitle(file: string): string {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(256 * 1024);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    let firstPrompt: string | null = null;
+    for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let j: Record<string, any>;
+      try {
+        j = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if ((j.type === 'custom-title' || j.type === 'summary') && typeof (j.customTitle ?? j.summary) === 'string') return j.customTitle ?? j.summary;
+      if (!firstPrompt && j.type === 'user') {
+        const c = j.message?.content;
+        const text = typeof c === 'string' ? c : Array.isArray(c) ? c.find((p: any) => p?.type === 'text')?.text : null;
+        if (typeof text === 'string' && !text.startsWith('<')) firstPrompt = text.replace(/\s+/g, ' ').slice(0, 100);
+      }
+    }
+    return firstPrompt ?? '(no prompt)';
+  } catch {
+    return '(unreadable)';
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}

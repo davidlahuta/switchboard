@@ -2,6 +2,7 @@ import { logger } from '../log.ts';
 import { type Coordinator, editedPath } from './coord.ts';
 import type { RunManager } from './runs.ts';
 import { SCHEDULED_WORK, SPENDING_WORK } from '../shared/types.ts';
+import { LOCAL_DESK } from '../shared/desk.ts';
 import { toolResultFacts } from './tasknotes.ts';
 import type { TranscriptWatch } from './transcriptWatch.ts';
 
@@ -48,9 +49,15 @@ function titleSync(runs: RunManager, sid: string, p: Payload): Record<string, un
   return push ? { sessionTitle: push } : undefined;
 }
 
-/** Claude Code HTTP hook endpoint: presence, conflict checks, lazy message delivery, swap signals. */
-export function createHookHandler(coord: Coordinator, runs: RunManager, watch: TranscriptWatch) {
-  return async (event: string, p: Payload, runHeader: string | undefined): Promise<object> => {
+/**
+ * Claude Code HTTP hook endpoint: presence, conflict checks, lazy message delivery, swap signals.
+ *
+ * `deskId` is the satellite a hook was relayed from, or null for a session beside the hub. A
+ * satellite's paths are paths on that machine: its transcript arrives as desk://, which `deskPath`
+ * turns into the hub's mirror of it, and its working directory is only ever asked about on that desk.
+ */
+export function createHookHandler(coord: Coordinator, runs: RunManager, watch: TranscriptWatch, deskPath: (deskId: string, p: string | null) => string | null = (_d, p) => p) {
+  return async (event: string, p: Payload, runHeader: string | undefined, deskId: string | null = null): Promise<object> => {
     const sid = typeof p.session_id === 'string' ? p.session_id : null;
     /*
      * Present only when the hook came from inside a subagent, and the reason a session's status can
@@ -60,7 +67,8 @@ export function createHookHandler(coord: Coordinator, runs: RunManager, watch: T
      */
     const agentId = typeof p.agent_id === 'string' && p.agent_id ? p.agent_id : null;
     const cwd = typeof p.cwd === 'string' ? p.cwd : null;
-    const transcript = typeof p.transcript_path === 'string' ? p.transcript_path : null;
+    const reported = typeof p.transcript_path === 'string' ? p.transcript_path : null;
+    const transcript = deskId ? deskPath(deskId, reported) : reported;
     if (!sid) return {};
     const runId = runHeader && !runHeader.startsWith('$') ? runHeader : null;
     /*
@@ -74,6 +82,8 @@ export function createHookHandler(coord: Coordinator, runs: RunManager, watch: T
      */
     const owner = runs.ownerOfHook(runId, sid, { kind: 'hook', event, source: typeof p.source === 'string' ? p.source : null });
     if (runId && owner === null) return {};
+    // A run belongs to one desk, and only hooks from that desk speak for it.
+    if (owner && runs.deskOfRun(owner) !== (deskId ?? LOCAL_DESK)) return {};
 
     /*
      * A session we have never heard of that is telling us it has ended has nothing to join. Claude
@@ -91,6 +101,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager, watch: T
         subscriptionId: run?.subscription_id ?? null,
         hasChannel: run ? true : undefined,
         name: run?.name ?? null,
+        deskId,
       });
     }
 
@@ -119,7 +130,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager, watch: T
             // A resume appends to the same file; read on from here, not from before the restart.
             watch.read(sid, transcript);
           }
-          if (cwd) await coord.setCwd(sid, cwd);
+          if (cwd) await coord.setCwd(sid, cwd, deskId);
           coord.setStatus(sid, 'idle');
           runs.onSessionStart(sid, cwd);
           runs.syncModel(sid, transcript);
@@ -215,7 +226,7 @@ export function createHookHandler(coord: Coordinator, runs: RunManager, watch: T
           return {};
         case 'CwdChanged':
           if (cwd) {
-            await coord.setCwd(sid, cwd);
+            await coord.setCwd(sid, cwd, deskId);
             runs.onCwd(sid, cwd);
           }
           return {};

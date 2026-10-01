@@ -12,6 +12,7 @@ import type { Bus } from './bus.ts';
 import { findClaude } from './claude.ts';
 import type { Coordinator } from './coord.ts';
 import type { Db } from './db.ts';
+import type { DeskManager } from './desks.ts';
 import type { RepoScanner } from './discovery.ts';
 import { createHookHandler } from './hooks.ts';
 import type { TranscriptWatch } from './transcriptWatch.ts';
@@ -84,6 +85,7 @@ export interface Services {
   watch: TranscriptWatch;
   push: PushService;
   presence: Presence;
+  desks: DeskManager;
 }
 
 type Body = Record<string, any>;
@@ -99,8 +101,11 @@ interface Route {
   method: string;
   pattern: RegExp;
   handler: Handler;
-  /** 'public': no auth; 'local': desk only; default: local or paired device */
-  access?: 'public' | 'local';
+  /**
+   * 'public': no auth; 'local': this machine only; 'desk': this machine or a paired satellite desk
+   * (Claude Code's hooks, relayed); default: this machine or a paired device.
+   */
+  access?: 'public' | 'local' | 'desk';
 }
 
 const fail = (status: number, message: string): never => {
@@ -159,8 +164,23 @@ async function readBody(req: IncomingMessage): Promise<Body> {
   }
 }
 
+/**
+ * The address a desk joining from another machine should use for this hub, as best this request can
+ * tell: the name it was reached by through `tailscale serve`, or the Host it asked for. A request
+ * made on this machine names 127.0.0.1, which no other machine can reach; the UI says so and lets
+ * the operator put in the tailnet name instead.
+ */
+function hubUrlOf(req: IncomingMessage): string {
+  const fwdHost = req.headers['x-forwarded-host'];
+  const host = (Array.isArray(fwdHost) ? fwdHost[0] : fwdHost) ?? req.headers.host ?? `127.0.0.1:${PORT}`;
+  const proto = req.headers['x-forwarded-proto'] === 'https' || fwdHost ? 'https' : 'http';
+  return `${proto}://${host}`;
+}
+
 export function createServer(s: Services): http.Server {
-  const hook = createHookHandler(s.coord, s.runs, s.watch);
+  const hook = createHookHandler(s.coord, s.runs, s.watch, (deskId, p) => s.desks.fromDeskPath(deskId, p));
+  /** The satellite a request comes from, by the token it presents; null for anything else. */
+  const deskOf = (req: IncomingMessage): string | null => s.desks.deskOfToken(req.headers.authorization);
 
   const state = (req: IncomingMessage): StateSnapshot => {
     const subscriptions = s.subs.list();
@@ -215,6 +235,7 @@ export function createServer(s: Services): http.Server {
       burn: s.subs.burn(),
       update: s.updater.status(),
       models: s.models.list(),
+      desks: s.desks.list(),
     };
   };
 
@@ -294,7 +315,6 @@ export function createServer(s: Services): http.Server {
   route('PATCH', '/api/subscriptions/:id', ({ params, body }) => s.subs.update(params[0], body));
   route('DELETE', '/api/subscriptions/:id', ({ params, url }) => (s.subs.remove(params[0], url.searchParams.get('purge') === '1'), { ok: true }));
   route('POST', '/api/subscriptions/:id/login', ({ params }) => (s.subs.openLogin(params[0]), { ok: true }));
-  // Opens Claude Code's reset prompt for the operator to answer; never answers it. No agent tool reaches this.
   route('POST', '/api/subscriptions/:id/refresh', async ({ params }) => {
     if (!s.subs.row(params[0])) fail(404, 'not found');
     await s.subs.refreshIdentity(params[0]);
@@ -357,6 +377,8 @@ export function createServer(s: Services): http.Server {
       skipPermissions: typeof body.skipPermissions === 'boolean' ? body.skipPermissions : undefined,
       diffPanel: typeof body.diffPanel === 'boolean' ? body.diffPanel : undefined,
       continueOnResume: typeof body.continueOnResume === 'boolean' ? body.continueOnResume : undefined,
+      desk: typeof body.desk === 'string' && body.desk ? body.desk : undefined,
+      cwdDesk: typeof body.cwdDesk === 'string' && body.cwdDesk ? body.cwdDesk : undefined,
     });
   });
   route('POST', '/api/runs/:id/swap', ({ params, body }) =>
@@ -408,7 +430,25 @@ export function createServer(s: Services): http.Server {
   route('POST', '/api/runs/:id/handoff', ({ params }) => (s.runs.handoff(params[0]), { ok: true }));
   route('POST', '/api/runs/:id/stop', ({ params }) => (s.runs.stop(params[0]), { ok: true }));
   route('DELETE', '/api/runs/:id', ({ params }) => (s.runs.forget(params[0]), { ok: true }));
-  route('GET', '/api/sessions/recent', ({ url }) => s.runs.recentSessions(url.searchParams.get('cwd') ?? fail(400, 'cwd is required')));
+  route('GET', '/api/sessions/recent', ({ url }) => s.runs.recentSessionsOn(url.searchParams.get('cwd') ?? fail(400, 'cwd is required'), url.searchParams.get('desk')));
+
+  // desks: the hub and its satellites
+  route('GET', '/api/desks', () => s.desks.list());
+  route('POST', '/api/desks/pairing', ({ req, body }) => s.desks.createPairing(typeof body.hubUrl === 'string' && body.hubUrl ? body.hubUrl : hubUrlOf(req)));
+  // The code is the credential: whoever has it was handed it by the operator, minutes ago.
+  route('POST', '/api/desks/join', ({ body }) => s.desks.join(String(body.code ?? ''), { hostname: body.hostname, name: body.name }), 'public');
+  route('PATCH', '/api/desks/:id', ({ params, body }) => s.desks.update(params[0], body));
+  route('DELETE', '/api/desks/:id', ({ params }) => (s.desks.remove(params[0]), { ok: true }));
+  route('POST', '/api/desks/:id/scan', async ({ params }) => {
+    if (params[0] === 'local') return s.desks.scanLocal();
+    return s.desks.rpc(params[0], 'scanRepos', {}, 120_000);
+  });
+  route('POST', '/api/desks/:id/clone', async ({ params, body }) => {
+    if (typeof body.url !== 'string' || !body.url) fail(400, 'url is required');
+    const repo = await s.desks.clone(params[0], body.url);
+    s.desks.addRepo(params[0], repo);
+    return repo;
+  });
 
   // automatic start (desk only: it registers a task for the logged-in user)
   route('GET', '/api/service', () => serviceStatus(), 'local');
@@ -471,8 +511,8 @@ export function createServer(s: Services): http.Server {
   route(
     'POST',
     '/hooks/:event',
-    ({ params, body, req }) => hook(params[0], body, req.headers['x-switchboard-run'] as string | undefined),
-    'local',
+    ({ params, body, req }) => hook(params[0], body, req.headers['x-switchboard-run'] as string | undefined, deskOf(req)),
+    'desk',
   );
 
   const serveStatic = (req: IncomingMessage, res: ServerResponse, url: URL): void => {
@@ -522,6 +562,7 @@ export function createServer(s: Services): http.Server {
       if (!match) fail(404, 'Not found');
       if (req.method !== 'GET' && !s.auth.originOk(req)) fail(403, 'Cross-origin request refused');
       if (match!.access === 'local' && !s.auth.isLocal(req)) fail(403, 'Only available on the desk itself');
+      if (match!.access === 'desk' && !s.auth.isLocal(req) && !deskOf(req)) fail(403, 'Only available on the desk itself or a paired desk');
       if (!match!.access && !s.auth.allowed(req)) fail(401, 'Pair this device first');
       const params = (url.pathname.match(match!.pattern) ?? []).slice(1).map(decodeURIComponent);
       body = await readBody(req);
@@ -571,8 +612,11 @@ export function createServer(s: Services): http.Server {
       socket.write(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\n\r\n`);
       socket.destroy();
     };
-    const internal = url.pathname === '/ws/agent' || url.pathname === '/ws/runner';
-    if (internal && (!s.auth.isLocal(req) || req.headers.origin)) return reject(403, 'Forbidden');
+    const internal = url.pathname === '/ws/agent' || url.pathname === '/ws/runner' || url.pathname === '/ws/desk';
+    // A satellite speaks for its own sessions with its desk token; nothing else of this machine's.
+    const desk = deskOf(req);
+    if (url.pathname === '/ws/desk' && (!desk || req.headers.origin)) return reject(401, 'Unauthorized');
+    if (internal && !desk && (!s.auth.isLocal(req) || req.headers.origin)) return reject(403, 'Forbidden');
     if (!internal && (!s.auth.originOk(req) || !s.auth.allowed(req))) return reject(401, 'Unauthorized');
     const termMatch = url.pathname.match(/^\/ws\/term\/([a-f0-9]+)$/);
     if (!internal && url.pathname !== '/ws/ui' && !termMatch) return reject(404, 'Not Found');
@@ -581,8 +625,9 @@ export function createServer(s: Services): http.Server {
       alive.set(ws, true);
       ws.on('pong', () => alive.set(ws, true));
       ws.on('error', () => ws.terminate());
-      if (url.pathname === '/ws/agent') s.hub.attach(ws);
-      else if (url.pathname === '/ws/runner') s.runs.attachRunner(ws);
+      if (url.pathname === '/ws/agent') s.hub.attach(ws, desk);
+      else if (url.pathname === '/ws/runner') s.runs.attachRunner(ws, desk);
+      else if (url.pathname === '/ws/desk') s.desks.attach(desk!, ws);
       else if (termMatch) s.runs.attachViewer(termMatch[1], ws);
       else {
         const listener = (frame: unknown): void => {

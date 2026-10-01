@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, IS_WINDOWS, PROFILES_DIR, SPAWN_CWD, VERSION, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
 import type { BurnForecast, Subscription, SubscriptionKind, SubscriptionStatus, Usage, UsagePoint } from '../shared/types.ts';
+import type { ProfileSeed } from '../shared/desk.ts';
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, mcpServerEntry, readJson, writeJson } from './claude.ts';
 import { forecast, pointsOf } from './burn.ts';
@@ -19,11 +20,11 @@ const log = logger('subscriptions');
 const execFileP = promisify(execFile);
 
 /** Folders shared with ~/.claude through junctions so sessions can resume across subscriptions. */
-const SHARED_DIRS = ['projects', 'file-history', 'todos', 'plans', 'plugins', 'skills', 'agents', 'commands', 'output-styles'];
+export const SHARED_DIRS = ['projects', 'file-history', 'todos', 'plans', 'plugins', 'skills', 'agents', 'commands', 'output-styles'];
 /** Files copied from ~/.claude when the source is newer. */
-const SHARED_FILES = ['settings.json', 'CLAUDE.md', 'keybindings.json'];
+export const SHARED_FILES = ['settings.json', 'CLAUDE.md', 'keybindings.json'];
 /** ~/.claude.json keys worth carrying into a profile (onboarding state, MCP servers, preferences). */
-const CLAUDE_JSON_KEYS = [
+export const CLAUDE_JSON_KEYS = [
   'hasCompletedOnboarding',
   'lastOnboardingVersion',
   'installMethod',
@@ -686,6 +687,24 @@ export class SubscriptionManager {
       );
     }
     return out;
+  }
+
+  /**
+   * What a satellite desk's profiles are seeded with: this machine's own customisations, carried as
+   * contents, so one set of settings, instructions and key bindings is used on every desk. Folder
+   * trust is left out: those are paths on this machine.
+   */
+  profileSeed(): ProfileSeed {
+    const files: Record<string, string> = {};
+    for (const f of SHARED_FILES) {
+      try {
+        files[f] = fs.readFileSync(path.join(HOME_CLAUDE_DIR, f), 'utf8');
+      } catch {
+        // not there: nothing to carry
+      }
+    }
+    const { projects: _projects, ...claudeJson } = this.homeClaudeJsonSubset();
+    return { files, claudeJson: { ...claudeJson, hasCompletedOnboarding: true } };
   }
 
   /** Refresh shared settings/config in a profile before launching a session on it. */

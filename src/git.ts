@@ -97,7 +97,26 @@ export async function resolveRepo(dir: string): Promise<RepoInfo> {
   return pending;
 }
 
+const remotes = new Map<string, { url: string | null; at: number }>();
+
+/**
+ * The origin a repository was cloned from, or null for one without an origin. This is what a
+ * repository is across desks: the same remote on two machines is the same repository, wherever each
+ * keeps its clone. Cached like resolveRepo, and never thrown from.
+ */
+export async function originOf(dir: string): Promise<string | null> {
+  const key = pathKey(dir);
+  const hit = remotes.get(key);
+  if (hit && Date.now() - hit.at < CACHE_MS * 10) return hit.url;
+  const res = await git(dir, ['config', '--get', 'remote.origin.url']);
+  // `config --get` exits 1 for a key that is not set, which is an answer too: no origin.
+  const url = 'out' in res ? res.out || null : null;
+  remotes.set(key, { url, at: Date.now() });
+  return url;
+}
+
 export function forgetRepoCache(dir: string): void {
+  remotes.delete(pathKey(dir));
   cache.delete(pathKey(dir));
   inflight.delete(pathKey(dir));
 }

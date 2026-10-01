@@ -411,7 +411,8 @@ export async function runRunner(opts: { runId?: string; manual?: ManualRunSpec }
   };
 
   const connect = (): void => {
-    const socket = new WebSocket(`${DAEMON_WS}/ws/runner`);
+    // A desk agent on another port names itself with --daemon, which `switchboard run` puts here.
+    const socket = new WebSocket(`${process.env.SWITCHBOARD_URL ? process.env.SWITCHBOARD_URL.replace(/^http/, 'ws') : DAEMON_WS}/ws/runner`);
     socket.on('open', () => {
       ws = socket;
       everConnected = true;

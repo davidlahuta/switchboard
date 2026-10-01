@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import { logger } from '../log.ts';
 import type { DaemonToShim, ShimToDaemon } from '../shared/protocol.ts';
+import { LOCAL_DESK } from '../shared/desk.ts';
 import type { Coordinator, PushTarget } from './coord.ts';
 import type { RunManager } from './runs.ts';
 
@@ -24,7 +25,8 @@ export class AgentHub implements PushTarget {
     this.runs = runs;
   }
 
-  attach(ws: WebSocket): void {
+  /** `deskId` is the satellite the shim's connection was relayed from, or null beside the hub. */
+  attach(ws: WebSocket, deskId: string | null = null): void {
     let sessionId: string | null = null;
     const reply = (msg: DaemonToShim): void => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -39,7 +41,7 @@ export class AgentHub implements PushTarget {
       } catch {
         return;
       }
-      queue = queue.then(() => this.onMessage(ws, msg, reply, (id) => (sessionId = id), () => this.sessionOf(ws) ?? sessionId)).catch((err) => {
+      queue = queue.then(() => this.onMessage(ws, msg, reply, (id) => (sessionId = id), () => this.sessionOf(ws) ?? sessionId, deskId)).catch((err) => {
         log.warn('shim message failed', err instanceof Error ? err.message : err);
       });
     });
@@ -64,6 +66,7 @@ export class AgentHub implements PushTarget {
     reply: (m: DaemonToShim) => void,
     setSession: (id: string) => void,
     getSession: () => string | null,
+    deskId: string | null,
   ): Promise<void> {
     if (msg.type === 'hello') {
       /*
@@ -85,6 +88,12 @@ export class AgentHub implements PushTarget {
        */
       const hosted = msg.runId ? this.runs.row(msg.runId) : undefined;
       const parent = msg.ppid ?? msg.pid;
+      // A run is hosted on one desk; a shim on any other is not its channel, whatever it says.
+      if (hosted && this.runs.deskOfRun(hosted.id) !== (deskId ?? LOCAL_DESK)) {
+        reply({ type: 'disowned', reason: `${hosted.id} runs on another desk` });
+        ws.close();
+        return;
+      }
       if (hosted && !this.runs.hostsProcess(hosted.id, parent)) {
         log.debug('a claude that is not this run announced itself under its id', { run: hosted.id, pid: parent, claimed: msg.sessionId });
         // Told, not just dropped: a shim that is only hung up on comes straight back.
@@ -112,6 +121,7 @@ export class AgentHub implements PushTarget {
         subscriptionId: run?.subscription_id ?? null,
         hasChannel: msg.channel,
         name: this.coord.agent(sessionId) ? null : (run?.name ?? null),
+        deskId,
       });
       const previous = this.conns.get(sessionId);
       if (previous && previous.ws !== ws) previous.ws.close();

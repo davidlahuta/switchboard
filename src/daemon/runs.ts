@@ -25,21 +25,26 @@ import type {
 import { SCHEDULED_WORK, SPENDING_WORK } from '../shared/types.ts';
 import type { Bus } from './bus.ts';
 import { claudeCommand, findClaude, hooksConfig, mcpServerEntry, projectSlug, readJson, writeRuntimeJson } from './claude.ts';
-import { CredentialSync } from './credsync.ts';
+import { CREDENTIALS_FILE, CredentialSync } from './credsync.ts';
+import type { DeskManager } from './desks.ts';
+import { deskPlacement, type DeskRun, type DeskSpawnExtras, LOCAL_DESK, type PlacementDesk } from '../shared/desk.ts';
 import type { Coordinator } from './coord.ts';
 import { bool, type Db, now } from './db.ts';
 import { newestRunnerSourceMtime } from './source.ts';
 import { WHEEL_LINES } from '../shared/scroll.ts';
-import { readCustomTitle, readSessionModel } from './transcript.ts';
+import { readCustomTitle, readSessionModel, transcriptTitle } from './transcript.ts';
 import { hooksInstalledIn } from './integration.ts';
 import type { Launcher } from './launcher.ts';
 import { TermMirror } from './mirror.ts';
 import type { ModelCatalog } from './models.ts';
 import { keepFocus } from './focus.ts';
 import { getSettings } from './settings.ts';
+import { sessionDir } from './sessionDir.ts';
 import { modelWindows, SPENT_PCT, SWAP_MARGIN, type SubscriptionManager } from './subscriptions.ts';
 
 const log = logger('runs');
+
+export { sessionDir };
 
 interface RunRow {
   id: string;
@@ -81,6 +86,8 @@ interface RunRow {
   claude_title: string | null;
   continue_on_resume: number | null;
   last_viewed_at: string | null;
+  /** the desk the session runs on; NULL is the hub's own */
+  desk_id: string | null;
 }
 
 /** One session as `switchboard diag` shows it; see RunManager.diagnostics. */
@@ -595,37 +602,6 @@ export function swapMethod(input: { hotSwapOn: boolean; privateCopy: boolean; at
 }
 
 /**
- * The folder a session is opened in when it comes back: where it last was, while that is still part
- * of the folder it was started in, and otherwise the folder it was started in.
- *
- * `last_cwd` follows the session's shell wherever it goes, and sessions go to odd places. serensia
- * and agent loop rename had wandered into their own temp scratchpads, and the next terminal opened
- * there: Claude Code took that folder's settings instead of the repository's, and a scratchpad
- * cleaned up by Windows would have left the session impossible to open anywhere. A worktree inside
- * the repository is where a session genuinely works, so that is kept.
- */
-export function sessionDir(cwd: string, lastCwd: string | null, exists: (dir: string) => boolean): string {
-  if (!lastCwd || !exists(lastCwd)) return cwd;
-  const norm = (p: string): string => {
-    const resolved = path.resolve(p).replace(/[\\/]+$/, '');
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  };
-  const root = norm(cwd);
-  const last = norm(lastCwd);
-  if (last !== root && !last.startsWith(root + path.sep)) return cwd;
-  /*
-   * The working tree it was in, not whichever folder of it the shell happened to be in. A worktree
-   * under .claude/worktrees has a .git of its own and is kept; 0376 literal reader's shell was in
-   * the repository's .docs/specs, and its 17:40 terminal opened there and trusted that folder as if
-   * it were a project.
-   */
-  for (let dir = path.resolve(lastCwd); ; dir = path.dirname(dir)) {
-    if (exists(path.join(dir, '.git'))) return dir;
-    if (norm(dir) === root || path.dirname(dir) === dir) return cwd;
-  }
-}
-
-/**
  * The one plan a session is left with when a second respawn is asked for while the first waits.
  *
  * Replacing the plan used to be the whole answer, and it lost whichever ask came first: press
@@ -953,6 +929,75 @@ export class RunManager {
   /** Each session's own copy of its login; see CredentialSync. */
   readonly creds: CredentialSync;
 
+  /** The desks sessions can run on besides this one; set by the daemon once both exist. */
+  desks: DeskManager | null = null;
+
+  /** The desk a run lives on. */
+  deskOfRun(runId: string): string {
+    return this.row(runId)?.desk_id ?? LOCAL_DESK;
+  }
+
+  private deskOf(r: RunRow): string {
+    return r.desk_id ?? LOCAL_DESK;
+  }
+
+  /** A session on a satellite, whose files and processes are on another machine. */
+  private isRemote(r: RunRow): boolean {
+    return !!r.desk_id && r.desk_id !== LOCAL_DESK;
+  }
+
+  /** What a satellite last said about one of its sessions; null beside the hub, or before it has said. */
+  private remoteInfo(r: RunRow) {
+    return this.isRemote(r) && this.desks ? this.desks.runInfo(r.desk_id!, r.id) : null;
+  }
+
+  /** Whether the claude a run's terminal started is still running, wherever that is. */
+  private claudeAlive(r: RunRow): boolean {
+    if (r.pid === null) return false;
+    if (!this.isRemote(r)) return processAlive(r.pid);
+    return this.remoteInfo(r)?.claudeAlive ?? false;
+  }
+
+  /**
+   * The Claude Code config directories a run's files are found under: its profiles and ~/.claude.
+   * For a satellite these are the hub's mirrors of that desk's, which the desk keeps current.
+   */
+  private claudeRoots(r: RunRow): string[] {
+    if (this.isRemote(r) && this.desks) {
+      const d = r.desk_id!;
+      return [...new Set([this.desks.mirrorProfile(d, r.host_sub ?? r.subscription_id), this.desks.mirrorProfile(d, r.subscription_id), this.desks.mirrorHome(d)])];
+    }
+    return [...new Set([this.hostDir(r), this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR])].filter((x): x is string => !!x);
+  }
+
+  /** The sessions a satellite hosts, as it is told about them. */
+  runsOnDesk(deskId: string): DeskRun[] {
+    return this.db.all<RunRow>("SELECT * FROM runs WHERE desk_id = ? AND status <> 'exited'", deskId).map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      cwd: r.cwd,
+      lastCwd: r.last_cwd,
+      pid: r.pid,
+      subscriptionId: r.subscription_id,
+      hostSub: r.host_sub,
+      live: LIVE.includes(r.status),
+    }));
+  }
+
+  /** Live sessions on a desk: what its recommended maximum is measured against. */
+  liveOnDesk(deskId: string): number {
+    const placeholders = LIVE.map(() => '?').join(', ');
+    const where = deskId === LOCAL_DESK ? "(desk_id IS NULL OR desk_id = 'local')" : 'desk_id = ?';
+    const params = deskId === LOCAL_DESK ? LIVE : [...LIVE, deskId];
+    return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE status IN (${placeholders}) AND ${where}`, ...params)?.n ?? 0;
+  }
+
+  /** The hub's copy of a session's private login, when it has one. */
+  loginFile(runId: string): string | null {
+    const r = this.row(runId);
+    return r?.creds_sub ? path.join(this.creds.dirFor(runId), CREDENTIALS_FILE) : null;
+  }
+
   /**
    * Keep every session's login current, and let go of the copies of sessions that have ended. A run
    * that exits keeps its row, and its copy would otherwise go on being renewed for nobody.
@@ -963,6 +1008,12 @@ export class RunManager {
       this.db.run('UPDATE runs SET creds_sub = NULL WHERE id = ?', r.id);
     }
     await this.creds.tick();
+    // A satellite session reads a copy on its own desk, kept in step with the hub's copy.
+    this.desks?.syncLogins(
+      this.db
+        .all<{ id: string; desk_id: string }>("SELECT id, desk_id FROM runs WHERE creds_sub IS NOT NULL AND status <> 'exited' AND desk_id IS NOT NULL AND desk_id <> 'local'")
+        .map((r) => ({ runId: r.id, deskId: r.desk_id })),
+    );
   }
 
   /**
@@ -1043,10 +1094,17 @@ export class RunManager {
    * opened for it in a row without one. See watchTerminal.
    */
   private readonly openingTerminal = new Map<string, { tries: number; timer: NodeJS.Timeout }>();
-  /** How far down ESCAPES terminals are currently being opened, and the window that step named. */
-  private escaped = 0;
-  private escapeWindow: string | null = null;
-  private escapes = 0;
+  /** How far down ESCAPES terminals are currently being opened on each desk, and the window that step named. */
+  private readonly escapes = new Map<string, { escaped: number; window: string | null; count: number }>();
+
+  private escapeState(desk: string): { escaped: number; window: string | null; count: number } {
+    let e = this.escapes.get(desk);
+    if (!e) {
+      e = { escaped: 0, window: null, count: 0 };
+      this.escapes.set(desk, e);
+    }
+    return e;
+  }
 
   /**
    * Stop opening terminals where the last one opened empty.
@@ -1057,18 +1115,23 @@ export class RunManager {
    * window that has stopped starting processes does not recover — but a daemon restart begins again
    * at the operator's setting, which is right, because the window it named is usually gone by then.
    */
-  private escapeFrom(step: number): void {
-    if (step <= this.escaped) return;
-    this.escaped = step;
+  private escapeFrom(desk: string, step: number): void {
+    const e = this.escapeState(desk);
+    if (step <= e.escaped) return;
+    e.escaped = step;
     // A name, not 'new': the first session to escape makes the window and the rest join it there,
     // so the desk ends up in one window again instead of one window each.
-    this.escapeWindow = step === 1 ? `switchboard-${++this.escapes}` : this.escapeWindow;
-    log.warn('opening session terminals somewhere else', { step, where: ESCAPES[step]?.what, window: this.escapeWindow });
+    e.window = step === 1 ? `switchboard-${++e.count}` : e.window;
+    log.warn('opening session terminals somewhere else', { desk, step, where: ESCAPES[step]?.what, window: e.window });
   }
 
   private runnerStale(runId: string): boolean {
     const started = this.runnerStartedAt.get(runId);
-    return started !== undefined && newestRunnerSourceMtime() > started;
+    if (started === undefined) return false;
+    // A satellite's runner is measured against that desk's source, by that desk's clock.
+    const r = this.row(runId);
+    const newest = r && this.isRemote(r) ? (this.desks?.runnerSourceMtime(r.desk_id!) ?? 0) : newestRunnerSourceMtime();
+    return newest > started;
   }
 
   private dto(r: RunRow): Run {
@@ -1094,6 +1157,8 @@ export class RunManager {
     return {
       id: r.id,
       name: r.name,
+      deskId: this.deskOf(r),
+      deskName: this.desks?.name(this.deskOf(r)) ?? this.deskOf(r),
       cwd: r.last_cwd ?? r.cwd,
       repoId: r.repo_id,
       sessionId: r.session_id,
@@ -1203,7 +1268,7 @@ export class RunManager {
     const key = sessionFileKey(r.id, r.session_id, name);
     const cached = this.sessionFiles.get(key);
     if (cached && fs.existsSync(cached)) return cached;
-    const roots = [...new Set([this.hostDir(r), this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR])].filter((x): x is string => !!x);
+    const roots = this.claudeRoots(r);
     const remember = (file: string): string => {
       this.sessionFiles.set(key, file);
       return file;
@@ -1567,15 +1632,23 @@ export class RunManager {
     skipPermissions?: boolean;
     diffPanel?: boolean;
     continueOnResume?: boolean;
+    /** the desk the session runs on, whose path `cwd` is; omitted for the hub's own */
+    deskId?: string | null;
   }): Promise<RunRow> {
+    const desk = spec.deskId && spec.deskId !== LOCAL_DESK ? spec.deskId : null;
     const cwd = path.resolve(spec.cwd);
     let isDir = false;
-    try {
-      isDir = fs.statSync(cwd).isDirectory();
-    } catch {
-      isDir = false;
+    if (desk) {
+      const st = await this.desks!.rpc<{ isDir: boolean } | null>(desk, 'stat', { path: cwd }).catch(() => null);
+      isDir = !!st?.isDir;
+    } else {
+      try {
+        isDir = fs.statSync(cwd).isDirectory();
+      } catch {
+        isDir = false;
+      }
     }
-    if (!isDir) throw httpError(400, `Directory not found: ${cwd}`);
+    if (!isDir) throw httpError(400, `Directory not found${desk ? ` on ${this.desks!.name(desk)}` : ''}: ${cwd}`);
     if (spec.resumeSessionId && this.bySession(spec.resumeSessionId)) throw httpError(409, 'That session is already running in Switchboard.');
     const extraArgs = (spec.args ?? []).filter((a) => a.trim() !== '');
     rejectReservedArgs(extraArgs);
@@ -1595,7 +1668,7 @@ export class RunManager {
      * for fourteen and looked hung. The run does not need its repository to start, so a slow answer
      * is filled in when it comes.
      */
-    const resolving = this.coord.repoForDir(cwd);
+    const resolving = this.coord.repoForDir(cwd, desk);
     const repoId = await Promise.race([resolving, new Promise<null>((resolve) => setTimeout(() => resolve(null), REPO_WAIT_MS))]);
     if (repoId === null) {
       void resolving.then(
@@ -1607,8 +1680,8 @@ export class RunManager {
       );
     }
     this.db.run(
-      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, diff_panel, continue_on_resume, last_viewed_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, diff_panel, continue_on_resume, last_viewed_at, created_at, desk_id)
+       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       name.slice(0, 80),
       cwd,
@@ -1627,6 +1700,7 @@ export class RunManager {
       spec.continueOnResume === undefined ? null : spec.continueOnResume ? 1 : 0,
       now(),
       now(),
+      desk,
     );
     this.subs.syncProfile(subscriptionId);
     this.bus.invalidate('state');
@@ -1634,20 +1708,114 @@ export class RunManager {
   }
 
   async create(req: CreateRunRequest): Promise<Run> {
-    if (!findClaude()) throw httpError(500, 'claude executable not found on PATH');
-    const r = await this.insertRun(req);
-    this.launcher.openTerminal({
-      title: r.name,
-      cwd: r.cwd,
-      args: ['run', '--run-id', r.id],
-      window: this.escapeWindow ?? this.terminalWindow(),
-      withoutWindowsTerminal: this.escaped >= 2,
-    });
+    const placed = await this.place(req);
+    if (placed.deskId === LOCAL_DESK && !findClaude()) throw httpError(500, 'claude executable not found on PATH');
+    const r = await this.insertRun({ ...req, cwd: placed.cwd, deskId: placed.deskId });
     // A new session's terminal can open empty just as a relaunched one's can, and a session that
-    // never starts is the easiest of all to miss. See watchTerminal.
-    this.watchTerminal(r.id, r.name, this.escaped + 1);
-    log.info('run created', { id: r.id, name: r.name, subscription: r.subscription_id });
+    // never starts is the easiest of all to miss; launch watches for it. See watchTerminal.
+    this.launch(r, r.cwd);
+    log.info('run created', { id: r.id, name: r.name, subscription: r.subscription_id, desk: placed.deskId === LOCAL_DESK ? undefined : placed.deskId });
     return this.dto(r);
+  }
+
+  /**
+   * Which desk a new session runs on, and the folder there.
+   *
+   * The folder a session is asked for is a path on one desk (`cwdDesk`, the hub's own unless said).
+   * Without a satellite online, or for a folder that is not a repository with an origin, that is
+   * where it runs. Otherwise the repository is what is being asked for, and deskPlacement picks the
+   * desk: one under its recommended maximum, preferring a desk that already has the repository; a
+   * desk without it clones it first. The same place inside the repository is opened there.
+   */
+  private async place(req: CreateRunRequest): Promise<{ deskId: string; cwd: string }> {
+    const from = req.cwdDesk && req.cwdDesk !== LOCAL_DESK ? req.cwdDesk : LOCAL_DESK;
+    const target = req.desk ?? 'auto';
+    const here = { deskId: from, cwd: req.cwd };
+    if (!this.desks || target === from) return here;
+    if (target !== 'auto' && !this.desks.row(target)) throw httpError(404, `Unknown desk ${target}`);
+    const others = this.desks.satellites().filter((d) => d !== from && this.desks!.online(d));
+    if (target === 'auto' && !others.length && from === LOCAL_DESK) return here;
+    const info = await this.coord.resolveOn(req.cwd, from).catch(() => null);
+    if (!info?.isGit || !info.remoteKey || !info.remoteUrl) {
+      if (target === 'auto') return here;
+      throw httpError(409, `${req.cwd} is not a git repository with an origin, so it can only run on ${this.desks.name(from)}, where it is.`);
+    }
+    const key = info.remoteKey;
+    const allowed = this.allowedDesks(key);
+    const boardId = this.db.get<{ id: string }>('SELECT id FROM repos WHERE remote_key = ? ORDER BY (desk_id IS NOT NULL), created_at LIMIT 1', key)?.id ?? null;
+    const placeholders = LIVE.map(() => '?').join(', ');
+    const candidates: PlacementDesk[] = [LOCAL_DESK, ...this.desks.satellites()].map((id) => ({
+      id,
+      online: this.desks!.online(id),
+      enabled: this.desks!.enabled(id),
+      allowed: allowed === null || allowed.includes(id),
+      hasRepo: id === from || this.desks!.repoPath(id, key) !== null,
+      load: this.liveOnDesk(id),
+      max: this.desks!.maxSessions(id),
+      repoSessions: boardId
+        ? (this.db.get<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM runs WHERE repo_id = ? AND status IN (${placeholders}) AND ${id === LOCAL_DESK ? "(desk_id IS NULL OR desk_id = 'local')" : 'desk_id = ?'}`,
+            boardId,
+            ...LIVE,
+            ...(id === LOCAL_DESK ? [] : [id]),
+          )?.n ?? 0)
+        : 0,
+      hub: id === LOCAL_DESK,
+    }));
+    const placed = deskPlacement(candidates, { pinned: target === 'auto' ? null : target, canClone: true });
+    if (!placed.ok) {
+      throw httpError(409, `No desk can take it: ${placed.reasons.map((x) => `${this.desks!.name(x.desk)} is ${x.why}`).join('; ')}.`);
+    }
+    if (placed.desk === from) return here;
+    // The same place inside the repository: a linked worktree is not on the other desk, so its root is used.
+    const inMain = path.resolve(info.worktree).toLowerCase() === path.resolve(info.root).toLowerCase();
+    const rel = inMain ? path.relative(info.root, req.cwd) : '';
+    let base = placed.desk === LOCAL_DESK ? this.desks.repoPath(LOCAL_DESK, key) : this.desks.repoPath(placed.desk, key);
+    if (!base) base = await this.cloneOn(placed.desk, info.remoteUrl, key);
+    let cwd = rel && !rel.startsWith('..') ? path.join(base, rel) : base;
+    if (cwd !== base) {
+      const there = placed.desk === LOCAL_DESK ? fs.existsSync(cwd) : !!(await this.desks.rpc<{ isDir: boolean } | null>(placed.desk, 'stat', { path: cwd }).catch(() => null))?.isDir;
+      if (!there) cwd = base;
+    }
+    if (placed.overflow) {
+      this.bus.toast('warn', `Every desk is at its recommended maximum; ${this.desks.name(placed.desk)} takes one more (${this.liveOnDesk(placed.desk) + 1}/${this.desks.maxSessions(placed.desk)}).`);
+    }
+    log.info('placed a new session', { from, on: placed.desk, repo: key, overflow: placed.overflow, cloned: placed.clone, cwd });
+    return { deskId: placed.desk, cwd };
+  }
+
+  /** The desks a repository may be held on, or null for every desk. */
+  private allowedDesks(key: string): string[] | null {
+    const row = this.db.get<{ allowed_desks: string | null }>('SELECT allowed_desks FROM repo_policy WHERE remote_key = ?', key);
+    if (!row?.allowed_desks) return null;
+    try {
+      const list = JSON.parse(row.allowed_desks) as unknown;
+      return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Clone a repository onto a desk for a session placed there, and say where it went. */
+  private async cloneOn(deskId: string, url: string, key: string): Promise<string> {
+    this.bus.toast('info', `Cloning ${key} onto ${this.desks!.name(deskId)} for the new session…`);
+    const repo = await this.desks!.clone(deskId, url);
+    this.desks!.addRepo(deskId, repo);
+    return repo.path;
+  }
+
+  /** Open a terminal for a run on its own desk, and watch that something starts in it. */
+  private launch(r: RunRow, cwd: string): void {
+    const desk = this.deskOf(r);
+    const e = this.escapeState(desk);
+    const spec = { title: r.name, cwd, args: ['run', '--run-id', r.id], window: e.window ?? this.terminalWindow(), withoutWindowsTerminal: e.escaped >= 2 };
+    if (desk === LOCAL_DESK) this.launcher.openTerminal(spec);
+    else {
+      void this.desks!.rpc(desk, 'openTerminal', { runId: r.id, title: spec.title, cwd, window: spec.window, withoutWindowsTerminal: spec.withoutWindowsTerminal }).catch((err: Error) =>
+        log.warn('a desk could not open a terminal', { run: r.id, desk, error: err.message }),
+      );
+    }
+    this.watchTerminal(r.id, r.name, e.escaped + 1);
   }
 
   /**
@@ -1663,9 +1831,11 @@ export class RunManager {
     return dir;
   }
 
-  private buildSpec(r: RunRow, subscriptionId: string, resume: boolean): SpawnSpec {
+  private buildSpec(r: RunRow, subscriptionId: string, resume: boolean): SpawnSpec & { desk?: DeskSpawnExtras } {
+    // A satellite runs its own claude; the hub only builds the arguments for it.
+    const remote = this.isRemote(r);
     const claude = findClaude();
-    if (!claude) throw new Error('claude executable not found on PATH');
+    if (!claude && !remote) throw new Error('claude executable not found on PATH');
     const sub = this.subs.row(subscriptionId);
     if (!sub) throw new Error(`unknown subscription ${subscriptionId}`);
     // Claude Code exits with "No conversation found" when asked to resume a session it never wrote
@@ -1677,12 +1847,15 @@ export class RunManager {
     this.db.run('UPDATE runs SET resuming = ? WHERE id = ?', canResume ? r.session_id : null, r.id);
     this.resumeLostReported.delete(r.id);
     const args: string[] = canResume ? ['--resume', r.session_id] : ['--session-id', r.session_id];
-    // Before the process exists, so it never reaches the trust dialog: the folder was chosen here.
-    this.subs.trustFolder(subscriptionId, this.homeDir(r));
-    // Likewise the diff panel, which Claude Code reads from the profile rather than from any flag.
-    this.subs.setDiffPanel(subscriptionId, this.dto(r).diffPanel);
-    // And so the channel this session is about to ask for resolves to something.
-    this.subs.ensureMcpRegistered(subscriptionId);
+    // On a satellite the desk does these three to its own profile; see DeskSpawnExtras.
+    if (!remote) {
+      // Before the process exists, so it never reaches the trust dialog: the folder was chosen here.
+      this.subs.trustFolder(subscriptionId, this.homeDir(r));
+      // Likewise the diff panel, which Claude Code reads from the profile rather than from any flag.
+      this.subs.setDiffPanel(subscriptionId, this.dto(r).diffPanel);
+      // And so the channel this session is about to ask for resolves to something.
+      this.subs.ensureMcpRegistered(subscriptionId);
+    }
     /*
      * Always, rather than only when the user's own config lacks the server.
      *
@@ -1697,7 +1870,8 @@ export class RunManager {
      * Passing it per launch settles the question at the point of use, and carries the run id so the
      * shim knows which session it belongs to, which the registered copy cannot.
      */
-    const file = writeRuntimeJson(`mcp-${r.id}.json`, { mcpServers: { switchboard: mcpServerEntry({ SWITCHBOARD_RUN_ID: r.id }) } });
+    const mcpData = { mcpServers: { switchboard: mcpServerEntry({ SWITCHBOARD_RUN_ID: r.id }) } };
+    const file = writeRuntimeJson(`mcp-${r.id}.json`, mcpData);
     args.push('--mcp-config', file);
     args.push('--dangerously-load-development-channels', 'server:switchboard');
     // Auto-compact is a setting, not a flag, so it rides in the per-run settings file next to the
@@ -1716,7 +1890,8 @@ export class RunManager {
       tui: 'fullscreen',
     };
     if (!hooksInstalledIn(path.join(sub.config_dir, 'settings.json'))) runSettings.hooks = hooksConfig();
-    args.push('--settings', writeRuntimeJson(`settings-${r.id}.json`, runSettings));
+    const settingsFile = writeRuntimeJson(`settings-${r.id}.json`, runSettings);
+    args.push('--settings', settingsFile);
     // What it was asked to come back on, if anything, and otherwise what it is on now.
     const model = r.model_wanted ?? r.model;
     if (model) args.push('--model', model);
@@ -1726,8 +1901,9 @@ export class RunManager {
     if (!resume) args.push('--name', r.name);
     // Global settings first, then this session's own arguments, so a session can override.
     args.push(...getSettings(this.db).claudeArgs, ...parseArgs(r.extra_args));
-    const cmd = claudeCommand(claude, args);
-    return {
+    const cmd = claudeCommand(claude ?? 'claude', args);
+    const loginDir = this.privateLogin(r, subscriptionId);
+    const spec: SpawnSpec = {
       runId: r.id,
       sessionId: r.session_id,
       resume,
@@ -1736,7 +1912,7 @@ export class RunManager {
       args: cmd.args,
       env: {
         ...this.subs.envFor(subscriptionId),
-        CLAUDE_SECURESTORAGE_CONFIG_DIR: this.privateLogin(r, subscriptionId),
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: loginDir,
         // One wheel report is the same number of lines in every session; see shared/scroll.ts.
         CLAUDE_CODE_SCROLL_SPEED: String(WHEEL_LINES),
         /*
@@ -1752,6 +1928,21 @@ export class RunManager {
       },
       title: r.name,
       subscriptionLabel: sub.label,
+    };
+    if (!remote) return spec;
+    // The login the session will read is sent ahead, so it is on the desk by the time claude starts.
+    this.desks?.syncLogins([{ runId: r.id, deskId: r.desk_id! }]);
+    return {
+      ...spec,
+      desk: {
+        subscriptionId,
+        claudeArgs: args,
+        files: { [file]: JSON.stringify(mcpData, null, 2), [settingsFile]: JSON.stringify(runSettings, null, 2) },
+        diffPanel: this.dto(r).diffPanel,
+        trust: this.homeDir(r),
+        privateLogin: loginDir !== null,
+        resume: canResume,
+      },
     };
   }
 
@@ -1797,7 +1988,8 @@ export class RunManager {
     this.bus.invalidate('state');
   }
 
-  attachRunner(ws: WebSocket): void {
+  /** `deskId` is the satellite the runner's connection was relayed from, or null beside the hub. */
+  attachRunner(ws: WebSocket, deskId: string | null = null): void {
     let runId: string | null = null;
     /*
      * Handled one after another rather than as they arrive. A hello that creates a manual run has to
@@ -1815,7 +2007,7 @@ export class RunManager {
       }
       queue = queue
         .then(async () => {
-          if (msg.type === 'hello') runId = await this.onHello(ws, msg);
+          if (msg.type === 'hello') runId = await this.onHello(ws, msg, deskId);
           else if (runId) this.onRunnerMessage(runId, msg);
         })
         .catch((err) => {
@@ -1843,13 +2035,19 @@ export class RunManager {
   }
 
   /** The run this host now speaks for, or null when it was turned away as a second host; see hostDecision. */
-  private async onHello(ws: WebSocket, msg: Extract<RunnerToDaemon, { type: 'hello' }>): Promise<string | null> {
+  private async onHello(ws: WebSocket, msg: Extract<RunnerToDaemon, { type: 'hello' }>, deskId: string | null): Promise<string | null> {
     let r: RunRow | undefined;
     if (msg.runId) {
       r = this.row(msg.runId);
       if (!r) throw new Error(`Unknown run ${msg.runId}`);
+      // A run is hosted on one desk, and a terminal on any other cannot be it.
+      if (this.deskOf(r) !== (deskId ?? LOCAL_DESK)) {
+        log.warn('a terminal on another desk said hello for a session; turned away', { run: r.id, from: deskId ?? LOCAL_DESK, hostedOn: this.deskOf(r) });
+        ws.send(JSON.stringify({ type: 'stop' } satisfies DaemonToRunner));
+        return null;
+      }
     } else if (msg.manual) {
-      r = await this.insertRun(msg.manual satisfies ManualRunSpec);
+      r = await this.insertRun({ ...(msg.manual satisfies ManualRunSpec), deskId });
     } else {
       throw new Error('hello without run');
     }
@@ -1858,7 +2056,7 @@ export class RunManager {
       previousOpen: !!previous && previous !== ws && previous.readyState === previous.OPEN,
       sameHost: !!msg.startedAt && this.runnerStartedAt.get(r.id) === Date.parse(msg.startedAt),
       replacing: this.relaunching.has(r.id) || this.stopping.has(r.id),
-      previousClaudeAlive: r.pid !== null && processAlive(r.pid),
+      previousClaudeAlive: this.claudeAlive(r),
     });
     if (decision === 'refuse') {
       log.warn('a second terminal came up for a session that already has one; closing it', { run: r.id, claude: msg.pid, keeping: r.pid });
@@ -2092,7 +2290,7 @@ export class RunManager {
         hotSwapOn: getSettings(this.db).hotSwap,
         privateCopy: r.creds_sub !== null,
         attached: this.conns.has(r.id),
-        running: r.status === 'running' && r.pid !== null && processAlive(r.pid),
+        running: r.status === 'running' && r.pid !== null && (this.isRemote(r) ? (this.remoteInfo(r)?.claudeAlive ?? true) : processAlive(r.pid)),
         fresh,
       }) === 'hot'
     );
@@ -2364,7 +2562,7 @@ export class RunManager {
           stale: this.runnerStale(r.id),
           relaunching: this.relaunching.has(r.id),
         },
-        claude: { pid: r.pid, alive: r.pid !== null && processAlive(r.pid) },
+        claude: { pid: r.pid, alive: this.claudeAlive(r) },
         agent: agent ? { status: agent.status, pid: agent.pid, lastSeen: agent.last_seen } : null,
         work: this.coord.liveWork(r.session_id).map((w) => ({ kind: w.kind, label: w.label, since: w.since, silentMs: at - Date.parse(w.lastSeen) })),
         queued: plan
@@ -2597,10 +2795,15 @@ export class RunManager {
       now(),
     );
     for (const r of due) {
+      // A session on a desk that is offline waits for the desk, without spending an attempt.
+      if (this.isRemote(r) && !this.desks?.online(r.desk_id)) {
+        this.db.run('UPDATE runs SET revive_after = ? WHERE id = ?', new Date(Date.now() + REVIVE_BACKOFF_MS[0]).toISOString(), r.id);
+        continue;
+      }
       const held = this.reviveHeldSince.get(r.id);
       const decision = reviveDecision({
         connected: this.conns.has(r.id),
-        claudeAlive: r.pid !== null && processAlive(r.pid),
+        claudeAlive: this.claudeAlive(r),
         heldForMs: held === undefined ? null : Date.now() - held,
       });
       if (decision === 'already-back') {
@@ -3060,12 +3263,18 @@ export class RunManager {
    */
   /** The folder a session works in, or nothing if it has since been moved or deleted. */
   private workDir(r: RunRow): string | null {
+    if (this.isRemote(r)) {
+      // Only that desk can look. Until it has said, the folder is taken to be there.
+      const info = this.remoteInfo(r);
+      return info && !info.workDir ? null : this.homeDir(r);
+    }
     const dir = this.homeDir(r);
     return fs.existsSync(dir) ? dir : null;
   }
 
   /** Where the session is opened, whether or not it still exists; see sessionDir. */
   private homeDir(r: RunRow): string {
+    if (this.isRemote(r)) return this.remoteInfo(r)?.home ?? r.cwd;
     return sessionDir(r.cwd, r.last_cwd, fs.existsSync);
   }
 
@@ -3106,7 +3315,7 @@ export class RunManager {
         // Whatever it was opened in is not starting processes, and it will not start starting: every
         // session opened there from here on goes somewhere else too, rather than each discovering it
         // in turn forty-five seconds apart.
-        this.escapeFrom(decision.step);
+        this.escapeFrom(this.deskOf(fresh), decision.step);
         this.openTerminalFor(fresh);
         return;
       }
@@ -3130,6 +3339,13 @@ export class RunManager {
 
   private openTerminalFor(r: RunRow): void {
     this.relaunching.delete(r.id);
+    if (this.isRemote(r) && !this.desks?.online(r.desk_id)) {
+      // Nothing can be opened on a desk that is not there; it is tried again when it is.
+      log.warn('cannot open a terminal for a session: its desk is offline', { run: r.id, desk: r.desk_id });
+      if (r.status !== 'exited') this.setStatus(r.id, 'disconnected');
+      this.scheduleRevive(this.row(r.id) ?? r, `its desk ${this.desks?.name(r.desk_id) ?? r.desk_id} is offline`);
+      return;
+    }
     if (!this.workDir(r)) {
       // Launching anyway gives a terminal that exits on a Win32 error code and nothing else.
       this.db.run('UPDATE runs SET ended_at = ? WHERE id = ?', now(), r.id);
@@ -3147,16 +3363,10 @@ export class RunManager {
     const dir = this.homeDir(r);
     // Names where the session was last seen when that is not where it is being opened, so the choice is visible.
     const lastCwd = r.last_cwd && r.last_cwd !== dir ? r.last_cwd : undefined;
-    log.info('opening a terminal for a session', { run: r.id, session: r.session_id, subscription: r.subscription_id, cwd: dir, lastCwd, escape: this.escaped || undefined });
-    this.launcher.openTerminal({
-      title: r.name,
-      cwd: dir,
-      args: ['run', '--run-id', r.id],
-      window: this.escapeWindow ?? this.terminalWindow(),
-      withoutWindowsTerminal: this.escaped >= 2,
-    });
-    // Nothing else checks that this worked: wt exits 0 either way. See watchTerminal.
-    this.watchTerminal(r.id, r.name, this.escaped + 1);
+    const escape = this.escapeState(this.deskOf(r)).escaped;
+    log.info('opening a terminal for a session', { run: r.id, session: r.session_id, subscription: r.subscription_id, cwd: dir, lastCwd, escape: escape || undefined, desk: r.desk_id ?? undefined });
+    // Nothing else checks that this worked: wt exits 0 either way. launch watches; see watchTerminal.
+    this.launch(r, dir);
   }
 
   /**
@@ -3389,8 +3599,7 @@ export class RunManager {
 
   /** What Claude Code's registry says about a process: its conversation, and any job it moved it to. */
   private registryEntry(r: RunRow, pid: number): { sessionId: string; parkedJobId: string | null } | null {
-    for (const root of new Set([this.hostDir(r), this.subs.row(r.subscription_id)?.config_dir, HOME_CLAUDE_DIR])) {
-      if (!root) continue;
+    for (const root of this.claudeRoots(r)) {
       const entry = readJson<{ sessionId?: unknown; parkedJobId?: unknown }>(path.join(root, 'sessions', `${pid}.json`));
       if (typeof entry?.sessionId === 'string') {
         return { sessionId: entry.sessionId, parkedJobId: typeof entry.parkedJobId === 'string' && entry.parkedJobId ? entry.parkedJobId : null };
@@ -3834,6 +4043,11 @@ export class RunManager {
 
   // ------------------------------------------------------------ transcripts
 
+  async recentSessionsOn(cwd: string, deskId: string | null): Promise<Array<{ id: string; title: string; mtime: string }>> {
+    if (!deskId || deskId === LOCAL_DESK || !this.desks) return this.recentSessions(cwd);
+    return this.desks.rpc<Array<{ id: string; title: string; mtime: string }>>(deskId, 'recentSessions', { cwd });
+  }
+
   recentSessions(cwd: string): Array<{ id: string; title: string; mtime: string }> {
     const dir = path.join(HOME_CLAUDE_DIR, 'projects', projectSlug(cwd));
     let files: Array<{ file: string; mtime: number }> = [];
@@ -3847,36 +4061,6 @@ export class RunManager {
     } catch {
       return [];
     }
-    return files.map(({ file, mtime }) => ({ id: file.slice(0, -6), title: this.transcriptTitle(path.join(dir, file)), mtime: new Date(mtime).toISOString() }));
-  }
-
-  private transcriptTitle(file: string): string {
-    let fd: number | null = null;
-    try {
-      fd = fs.openSync(file, 'r');
-      const buf = Buffer.alloc(256 * 1024);
-      const n = fs.readSync(fd, buf, 0, buf.length, 0);
-      let firstPrompt: string | null = null;
-      for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
-        if (!line.trim()) continue;
-        let j: Record<string, any>;
-        try {
-          j = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if ((j.type === 'custom-title' || j.type === 'summary') && typeof (j.customTitle ?? j.summary) === 'string') return j.customTitle ?? j.summary;
-        if (!firstPrompt && j.type === 'user') {
-          const c = j.message?.content;
-          const text = typeof c === 'string' ? c : Array.isArray(c) ? c.find((p: any) => p?.type === 'text')?.text : null;
-          if (typeof text === 'string' && !text.startsWith('<')) firstPrompt = text.replace(/\s+/g, ' ').slice(0, 100);
-        }
-      }
-      return firstPrompt ?? '(no prompt)';
-    } catch {
-      return '(unreadable)';
-    } finally {
-      if (fd !== null) fs.closeSync(fd);
-    }
+    return files.map(({ file, mtime }) => ({ id: file.slice(0, -6), title: transcriptTitle(path.join(dir, file)), mtime: new Date(mtime).toISOString() }));
   }
 }
