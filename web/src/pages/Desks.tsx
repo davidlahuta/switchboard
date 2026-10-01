@@ -96,6 +96,13 @@ function DeskCard({ desk: d, now, onRemove }: { desk: Desk; now: number; onRemov
     await api.post(`/api/desks/${id}/scan`);
     setScanning(false);
   };
+  const [updating, setUpdating] = useState(false);
+  const update = async () => {
+    setUpdating(true);
+    const r = await api.post<{ from: string; to: string; restarting: boolean }>(`/api/desks/${id}/update`);
+    setUpdating(false);
+    if (r) emitToast('info', r.restarting ? `${d.name}: ${r.from} → ${r.to}, its agent is restarting. Its sessions keep running.` : `${d.name} is already on ${r.to}.`);
+  };
   const full = d.liveRuns >= d.recommendedMaxSessions;
   const t = d.tools;
 
@@ -222,6 +229,17 @@ function DeskCard({ desk: d, now, onRemove }: { desk: Desk; now: number; onRemov
             <Icon name="refresh" size={14} />
             <span>{scanning ? 'Scanning…' : 'Rescan'}</span>
           </button>
+          {!d.hub && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => void update()}
+              disabled={updating || !d.online}
+              title="git pull and npm ci on that desk, then restart its agent. Its sessions keep running."
+            >
+              <span>{updating ? 'Updating…' : 'Update Switchboard'}</span>
+            </button>
+          )}
           {!d.hub && <IconButton icon="trash" label={`Remove ${d.name}`} variant="danger" onClick={onRemove} />}
         </span>
       </footer>
