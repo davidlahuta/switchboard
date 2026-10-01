@@ -24,6 +24,7 @@ import { PushService } from './push.ts';
 import { lastAssistantText } from './tasknotes.ts';
 import { Updater } from './updater.ts';
 import { DeskManager } from './desks.ts';
+import { Vault } from './vault.ts';
 import type { DeskRepoInfo } from './coord.ts';
 import { toolStatus } from '../desk/tools.ts';
 import { originOf } from '../git.ts';
@@ -84,6 +85,9 @@ export async function startDaemon(): Promise<void> {
     },
   });
   runs.desks = desks;
+  const vault = new Vault(db, bus);
+  runs.vault = vault;
+  void vault.refreshSnapshot();
   void desks.detectHubUrl();
   /*
    * A satellite's folders are asked about on that satellite. Answers are kept for a minute, and the
@@ -206,7 +210,7 @@ export async function startDaemon(): Promise<void> {
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
   const servers: Server[] = [];
   for (const host of BIND_HOSTS) {
-    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch, push, presence, desks });
+    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch, push, presence, desks, vault });
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') log.error(`${host}:${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
       else if (err.code === 'EADDRNOTAVAIL') log.error(`Cannot bind ${host}: no interface has that address. Check SWITCHBOARD_BIND.`);

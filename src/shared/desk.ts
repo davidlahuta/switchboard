@@ -93,6 +93,12 @@ export interface DeskSpawnExtras {
   privateLogin: boolean;
   /** what the hub expects: the agent corrects it to what is actually on that desk's disk */
   resume: boolean;
+  /**
+   * What the session gets from the hub's vault: hosts git's credential helper goes in front of,
+   * whether gh and az go through shims, and environment for the Azure SDKs. The agent builds the
+   * helper and the shims with its own Node and its own install.
+   */
+  vault?: { hosts: string[]; shims: boolean; env: Record<string, string> };
 }
 
 /** Everything a desk profile is seeded with: the hub's own customisations, carried as contents. */

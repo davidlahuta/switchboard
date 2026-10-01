@@ -24,6 +24,7 @@ import {
 import type { Bus } from './bus.ts';
 import { writeCredentials } from './credsync.ts';
 import { cloneRepo } from '../desk/clone.ts';
+import { gitHelperEnv } from '../desk/credential.ts';
 import { type Db, bool, now } from './db.ts';
 
 const log = logger('desks');
@@ -220,13 +221,14 @@ export class DeskManager {
   }
 
   /** Clone a repository onto a desk: in this process for the hub's own, by asking for a satellite. */
-  async clone(deskId: string, url: string, env: Record<string, string> | null = null): Promise<DeskRepo> {
+  async clone(deskId: string, url: string, vaultHosts: string[] = []): Promise<DeskRepo> {
     if (deskId === LOCAL_DESK) {
+      const env = vaultHosts.length ? gitHelperEnv(vaultHosts) : null;
       const repo = await cloneRepo(url, this.cloneRoot(LOCAL_DESK), { env });
       this.addRepo(LOCAL_DESK, repo);
       return repo;
     }
-    return this.rpc<DeskRepo>(deskId, 'clone', { url, env }, 30 * 60_000);
+    return this.rpc<DeskRepo>(deskId, 'clone', { url, vaultHosts }, 30 * 60_000);
   }
 
   /** Replace what a desk is known to have cloned. */

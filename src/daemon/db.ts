@@ -417,6 +417,21 @@ const MIGRATIONS: string[] = [
     cred_profiles TEXT
   );
   `,
+  `
+  -- Credentials for GitHub and Azure, handed to sessions on request (see Vault). The secret is sealed
+  -- with DPAPI where sealed = 1, and never leaves the hub except as an answer to a request.
+  CREATE TABLE cred_profiles (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    config_json TEXT,
+    secret TEXT,
+    sealed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import type { Desk, DeskPairing, DeskRepo } from '@shared/desk.ts';
 import type { StateSnapshot } from '@shared/types.ts';
 import { PageHead } from '../components/PageHead.tsx';
+import { CredentialsSection } from '../components/CredentialsSection.tsx';
 import { Badge, ConfirmDialog, Dialog, Empty, Icon, IconButton, Section, Toggle } from '../components/ui.tsx';
 import { api, request } from '../lib/api.ts';
 import { countdown, timeAgo, useNow } from '../lib/time.ts';
@@ -37,6 +38,8 @@ export function DesksPage({ state }: { state: StateSnapshot }) {
       </div>
 
       <RepoMatrix desks={desks} />
+
+      <CredentialsSection />
 
       <AddDeskDialog open={adding} onClose={() => setAdding(false)} now={now} />
       <ConfirmDialog
