@@ -26,7 +26,6 @@ import {
   swapMethod,
   handoffDecision,
   hookOwner,
-  limitResetHost,
   handoffPrompt,
   HANDOFF_GRACE_MS,
   HANDOFF_GIVE_UP_MS,
@@ -1408,7 +1407,7 @@ describe('which run a hook belongs to', () => {
   });
 });
 
-describe('opening Claude Code’s usage reset prompt for the operator', () => {
+describe('Claude Code’s usage reset prompt', () => {
   const prompt = '──────\n❯ \n──────\n  bypass permissions on (shift+tab to cycle)';
   const asking =
     ' Use your reset?\n Refills your session limit now · your weekly reset day stays Monday\n ❯ 1. Yes, use my reset\n   2. No, keep it\n';
@@ -1417,28 +1416,6 @@ describe('opening Claude Code’s usage reset prompt for the operator', () => {
     assert.equal(atPrompt(prompt), true);
     assert.equal(atPrompt(prompt + '\n' + asking), false, 'even when the input footer is still drawn under it');
     assert.equal(atPrompt(asking), false);
-  });
-
-  it('opens it where the reset is wanted: a session stopped on the limit, at its prompt', () => {
-    assert.equal(
-      limitResetHost([
-        { id: 'idle', agentStatus: 'idle', atPrompt: true },
-        { id: 'stopped', agentStatus: 'limited', atPrompt: true },
-      ]),
-      'stopped',
-    );
-    assert.equal(limitResetHost([{ id: 'idle', agentStatus: 'idle', atPrompt: true }]), 'idle');
-  });
-
-  it('never types into a session that is working, asking, or not at its prompt', () => {
-    assert.equal(
-      limitResetHost([
-        { id: 'busy', agentStatus: 'working', atPrompt: true },
-        { id: 'asking', agentStatus: 'waiting', atPrompt: true },
-        { id: 'dialog', agentStatus: 'limited', atPrompt: false },
-      ]),
-      null,
-    );
   });
 });
 
