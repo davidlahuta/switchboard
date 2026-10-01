@@ -448,6 +448,13 @@ export class Coordinator {
     this.resolver = fn;
   }
 
+  /** The path rules of a desk's platform; the hub's own unless told otherwise. */
+  private deskPath: (deskId: string | null | undefined) => typeof path = () => path;
+
+  setDeskPath(fn: (deskId: string | null | undefined) => typeof path): void {
+    this.deskPath = fn;
+  }
+
   /** Where a directory on a desk sits in git, and what repository it is across desks. */
   resolveOn(dir: string, deskId?: string | null): Promise<DeskRepoInfo> {
     return isLocalDesk(deskId) ? resolveLocal(dir) : this.resolver(dir, deskId!);
@@ -560,6 +567,56 @@ export class Coordinator {
     return repoIdFor(`${deskId}:${root}`);
   }
 
+  /** The board whose repository a folder is inside, by path: the deepest one that contains it. */
+  private boardContaining(dir: string, deskId: string | null): string | null {
+    const P = this.deskPath(deskId);
+    const norm = (p: string): string => {
+      const r = P.resolve(p).replace(/[\\/]+$/, '');
+      return P === path.posix ? r : r.toLowerCase();
+    };
+    const target = norm(dir);
+    let best: RepoRow | null = null;
+    for (const r of this.db.all<RepoRow>(isLocalDesk(deskId) ? 'SELECT * FROM repos WHERE desk_id IS NULL' : 'SELECT * FROM repos WHERE desk_id = ?', ...(isLocalDesk(deskId) ? [] : [deskId!]))) {
+      const root = norm(r.root);
+      if ((target === root || target.startsWith(root + P.sep)) && (!best || root.length > norm(best.root).length)) best = r;
+    }
+    return best?.id ?? null;
+  }
+
+  /**
+   * Fold boards that should never have existed into the board they belong to: a linked worktree
+   * filed as a repository of its own, because git was too slow to say otherwise when its first
+   * session spoke. Everything on the stray board moves — agents with their claims, intents and
+   * names, messages, notes, events, touches, conflicts, waits and runs — so nobody loses what they
+   * were doing or what was said to them; then the stray board goes.
+   */
+  async mergeStrayBoards(): Promise<number> {
+    let merged = 0;
+    for (const r of this.db.all<RepoRow>('SELECT * FROM repos WHERE desk_id IS NULL')) {
+      if (!fs.existsSync(r.root)) continue;
+      forgetRepoCache(r.root);
+      const info = await resolveLocal(r.root);
+      if (!info.isGit || info.failed) continue;
+      const home = repoIdFor(info.root);
+      if (home === r.id) continue;
+      const target = this.ensureRepo(info.root, null, info.remoteKey);
+      this.db.tx(() => {
+        for (const a of this.db.all<AgentRow>('SELECT * FROM agents WHERE repo_id = ?', r.id)) {
+          const name = a.status === 'offline' ? a.name : this.uniqueName(target.id, a.name, a.id);
+          this.db.run('UPDATE agents SET repo_id = ?, name = ? WHERE id = ?', target.id, name, a.id);
+        }
+        for (const table of ['claims', 'messages', 'notes', 'events', 'file_touches', 'conflicts', 'blocks', 'runs']) {
+          this.db.run(`UPDATE ${table} SET repo_id = ? WHERE repo_id = ?`, target.id, r.id);
+        }
+        this.db.run('DELETE FROM repos WHERE id = ?', r.id);
+      });
+      merged++;
+      log.info('folded a worktree filed as its own board into its repository', { stray: r.name, root: r.root, into: target.name });
+      this.bus.invalidate('state', `repo:${r.id}`, `repo:${target.id}`);
+    }
+    return merged;
+  }
+
   async addRepo(dir: string): Promise<Repo> {
     forgetRepoCache(dir);
     const info = await resolveLocal(dir);
@@ -601,7 +658,13 @@ export class Coordinator {
   async registerAgent(input: RegisterInput): Promise<AgentRow> {
     const desk = isLocalDesk(input.deskId) ? null : input.deskId!;
     const info = await this.resolveOn(input.cwd, desk);
-    const repo = this.ensureRepo(info.root, desk, info.remoteKey);
+    /*
+     * git could not answer: the session goes where it was, or onto the board of the repository its
+     * folder is inside, never onto a board made for the folder. Six worktrees became boards of their
+     * own that way on a desk busy restarting, each cut off from the agents it shared a tree with.
+     */
+    const known = info.failed ? (this.agent(input.sessionId)?.repo_id ?? this.boardContaining(input.cwd, desk)) : null;
+    const repo = (known && this.db.get<RepoRow>('SELECT * FROM repos WHERE id = ?', known)) || this.ensureRepo(info.root, desk, info.remoteKey);
     const existing = this.agent(input.sessionId);
     const ts = now();
     // Taking over a terminal rather than joining, if so: consumed either way, so a takeover that
@@ -735,6 +798,11 @@ export class Coordinator {
     const desk = deskId === undefined ? a.desk_id : isLocalDesk(deskId) ? null : deskId;
     const info = await this.resolveOn(cwd, desk);
     const ts = now();
+    // git could not say where this is, so nothing is concluded from it: the session stays where it is.
+    if (info.failed) {
+      this.db.run('UPDATE agents SET cwd = ?, last_seen = ? WHERE id = ?', cwd, ts, id);
+      return;
+    }
     /*
      * A session that steps outside version control has not changed projects. It has run a command
      * in a temp directory, or gone to read something under ~/.claude — and taking that for a move
@@ -1875,14 +1943,15 @@ export class Coordinator {
   }
 
   private async relFor(a: AgentRow, absPath: string): Promise<string | null> {
-    const abs = path.resolve(a.cwd ?? '.', absPath);
+    const P = this.deskPath(a.desk_id);
+    const abs = P.resolve(a.cwd ?? '.', absPath);
     // The overwhelmingly common case, and the reason the hot path usually costs no git at all:
     // the file is inside the worktree the agent is already known to be working in.
     if (a.worktree) {
       const rel = relPath(a.worktree, abs);
       if (rel) return rel;
     }
-    const info = await this.resolveOn(path.dirname(abs), a.desk_id);
+    const info = await this.resolveOn(P.dirname(abs), a.desk_id);
     if (this.boardIdFor(info.root, a.desk_id, info.remoteKey) !== a.repo_id) return null;
     return relPath(info.worktree, abs);
   }

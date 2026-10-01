@@ -159,6 +159,19 @@ export class DeskManager {
     }
   }
 
+  /**
+   * The path rules of a desk's own platform. A Windows hub must not resolve a Linux desk's
+   * /home/... into C:\home\..., and the other way round; a desk that has not said yet is taken to
+   * be like the hub.
+   */
+  pathOf(id: string | null | undefined): typeof path {
+    if (!id || id === LOCAL_DESK) return path;
+    const r = this.row(id);
+    const platform = r ? this.info(r).platform : undefined;
+    if (!platform) return path;
+    return platform === 'win32' ? path.win32 : path.posix;
+  }
+
   maxSessions(id: string): number {
     const r = this.row(id);
     if (!r) return 0;

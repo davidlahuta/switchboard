@@ -1636,7 +1636,9 @@ export class RunManager {
     deskId?: string | null;
   }): Promise<RunRow> {
     const desk = spec.deskId && spec.deskId !== LOCAL_DESK ? spec.deskId : null;
-    const cwd = path.resolve(spec.cwd);
+    // A path on that desk, by that desk's rules.
+    const P = desk && this.desks ? this.desks.pathOf(desk) : path;
+    const cwd = P.resolve(spec.cwd);
     let isDir = false;
     if (desk) {
       const st = await this.desks!.rpc<{ isDir: boolean } | null>(desk, 'stat', { path: cwd }).catch(() => null);
@@ -1661,7 +1663,7 @@ export class RunManager {
     const diffPanel = spec.diffPanel ?? settings.defaultDiffPanel;
     const subscriptionId = this.resolveSubscription(spec.subscriptionId, undefined, undefined, false, model);
     const id = crypto.randomBytes(4).toString('hex');
-    const name = spec.name?.trim() || `${path.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
+    const name = spec.name?.trim() || `${P.basename(cwd)}${spec.worktree ? `/${spec.worktree}` : ''}`;
     /*
      * Which repository it is in, if git says so quickly. On a busy desk the two git calls took long
      * enough (each may take five seconds) that the phone asking for a new session sat on a spinner
@@ -1768,11 +1770,14 @@ export class RunManager {
     }
     if (placed.desk === from) return here;
     // The same place inside the repository: a linked worktree is not on the other desk, so its root is used.
-    const inMain = path.resolve(info.worktree).toLowerCase() === path.resolve(info.root).toLowerCase();
-    const rel = inMain ? path.relative(info.root, req.cwd) : '';
-    let base = placed.desk === LOCAL_DESK ? this.desks.repoPath(LOCAL_DESK, key) : this.desks.repoPath(placed.desk, key);
+    // Each side's paths by its own platform's rules: the two desks need not be the same kind of machine.
+    const fromP = this.desks.pathOf(from);
+    const toP = this.desks.pathOf(placed.desk);
+    const inMain = fromP.resolve(info.worktree).toLowerCase() === fromP.resolve(info.root).toLowerCase();
+    const rel = inMain ? fromP.relative(info.root, req.cwd) : '';
+    let base = this.desks.repoPath(placed.desk, key);
     if (!base) base = await this.cloneOn(placed.desk, info.remoteUrl, key);
-    let cwd = rel && !rel.startsWith('..') ? path.join(base, rel) : base;
+    let cwd = rel && !rel.startsWith('..') && !fromP.isAbsolute(rel) ? toP.join(base, ...rel.split(/[\\/]+/)) : base;
     if (cwd !== base) {
       const there = placed.desk === LOCAL_DESK ? fs.existsSync(cwd) : !!(await this.desks.rpc<{ isDir: boolean } | null>(placed.desk, 'stat', { path: cwd }).catch(() => null))?.isDir;
       if (!there) cwd = base;

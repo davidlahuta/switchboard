@@ -71,6 +71,8 @@ export function readDeskConfig(): DeskConfig | null {
 function saveDeskConfig(cfg: DeskConfig): void {
   ensureDirs();
   writeJson(DESK_CONFIG, cfg);
+  // Where DPAPI is not there to seal the token (Linux), the file is the user's alone.
+  if (!IS_WINDOWS) fs.chmodSync(DESK_CONFIG, 0o600);
 }
 
 const sha256 = (s: string): string => crypto.createHash('sha256').update(s).digest('hex');

@@ -39,6 +39,41 @@ export interface TerminalSpec {
  */
 const TAB_GAP_MS = Number(process.env.SWITCHBOARD_TAB_GAP_MS ?? 700);
 
+/**
+ * Graphical terminals on Linux, in the order tried, and how each is told a title, a folder and a
+ * command. xdg-terminal-exec comes first because it is how a desktop names its own choice — Omarchy
+ * sets it to the terminal the user picked — and the rest are the common ones, newest first.
+ */
+const LINUX_TERMINALS: Array<{ bin: string; argv: (title: string, cwd: string, cmd: string[]) => string[] }> = [
+  { bin: 'xdg-terminal-exec', argv: (t, d, c) => [`--title=${t}`, `--dir=${d}`, '--', ...c] },
+  { bin: 'ghostty', argv: (t, d, c) => [`--title=${t}`, `--working-directory=${d}`, '-e', ...c] },
+  { bin: 'alacritty', argv: (t, d, c) => ['--title', t, '--working-directory', d, '-e', ...c] },
+  { bin: 'kitty', argv: (t, d, c) => ['--title', t, '--directory', d, ...c] },
+  { bin: 'foot', argv: (t, d, c) => ['--title', t, '--working-directory', d, ...c] },
+  { bin: 'wezterm', argv: (_t, d, c) => ['start', '--cwd', d, '--', ...c] },
+  { bin: 'gnome-terminal', argv: (t, d, c) => ['--title', t, '--working-directory', d, '--', ...c] },
+  { bin: 'konsole', argv: (_t, d, c) => ['--workdir', d, '-e', ...c] },
+  { bin: 'xterm', argv: (t, _d, c) => ['-T', t, '-e', ...c] },
+];
+
+/**
+ * How a session's terminal is opened on Linux: SWITCHBOARD_TERMINAL names a terminal from the list
+ * above, or `tmux` for a detached tmux session (attach with `tmux attach -t sb-<run>`), or is unset
+ * for the first graphical terminal found when there is a display, and tmux when there is not. A
+ * satellite nobody is sitting at is driven from the web terminal either way.
+ */
+export function linuxTerminalChoice(env: NodeJS.ProcessEnv, has: (bin: string) => boolean): { kind: 'gui'; bin: string } | { kind: 'tmux' } | { kind: 'none' } {
+  const wanted = env.SWITCHBOARD_TERMINAL?.trim();
+  if (wanted === 'tmux') return has('tmux') ? { kind: 'tmux' } : { kind: 'none' };
+  const display = !!(env.WAYLAND_DISPLAY || env.DISPLAY);
+  if (display) {
+    if (wanted && LINUX_TERMINALS.some((t) => t.bin === wanted) && has(wanted)) return { kind: 'gui', bin: wanted };
+    const found = LINUX_TERMINALS.find((t) => has(t.bin));
+    if (found) return { kind: 'gui', bin: found.bin };
+  }
+  return has('tmux') ? { kind: 'tmux' } : { kind: 'none' };
+}
+
 function findOnPath(name: string): string | null {
   for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
     if (!dir) continue;
@@ -65,7 +100,7 @@ export class Launcher {
   readonly windowName = process.env.SWITCHBOARD_WT_WINDOW ?? '0';
 
   get available(): boolean {
-    return IS_WINDOWS || process.platform === 'darwin';
+    return IS_WINDOWS || process.platform === 'darwin' || process.platform === 'linux';
   }
 
   /** Tail of the queue that keeps Windows Terminal requests TAB_GAP_MS apart; see TAB_GAP_MS. */
@@ -125,6 +160,36 @@ export class Launcher {
       }).unref();
       return;
     }
-    throw new Error('Opening terminals is implemented for Windows Terminal and macOS Terminal. Run `switchboard run` in a terminal yourself.');
+    if (process.platform === 'linux') {
+      this.spawnLinux(spec, cwd, [node, CLI_PATH, ...spec.args]);
+      return;
+    }
+    throw new Error('Opening terminals is implemented for Windows, macOS and Linux. Run `switchboard run` in a terminal yourself.');
+  }
+
+  private spawnLinux(spec: TerminalSpec, cwd: string, cmd: string[]): void {
+    const choice = linuxTerminalChoice(process.env, (bin) => findOnPath(bin) !== null);
+    if (choice.kind === 'gui') {
+      const term = LINUX_TERMINALS.find((t) => t.bin === choice.bin)!;
+      log.info('opening a terminal window', { title: spec.title, cwd, terminal: term.bin });
+      const child = spawn(term.bin, term.argv(spec.title, cwd, cmd), { cwd, detached: true, stdio: 'ignore' });
+      child.on('error', (err) => log.error('could not open a terminal', { terminal: term.bin, error: err.message }));
+      child.unref();
+      return;
+    }
+    if (choice.kind === 'tmux') {
+      // One tmux session per run, named after it, sized like a desktop window until a viewer fits it.
+      const at = spec.args.indexOf('--run-id');
+      const name = `sb-${at >= 0 ? spec.args[at + 1] : Date.now().toString(36)}`;
+      log.info('opening a detached tmux session', { title: spec.title, cwd, session: name });
+      const child = spawn('tmux', ['new-session', '-d', '-s', name, '-n', spec.title.slice(0, 40), '-x', '200', '-y', '50', '-c', cwd, ...cmd], { cwd, detached: true, stdio: 'ignore' });
+      child.on('error', (err) => log.error('could not start tmux', { error: err.message }));
+      child.on('exit', (code) => {
+        if (code) log.warn('tmux refused a session', { session: name, code });
+      });
+      child.unref();
+      return;
+    }
+    throw new Error('No terminal to open a session in: install tmux, or run the desk agent inside a graphical session with a terminal such as alacritty, ghostty, kitty or foot.');
   }
 }
