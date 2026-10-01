@@ -1164,6 +1164,7 @@ export class RunManager {
       name: r.name,
       deskId: this.deskOf(r),
       deskName: this.desks?.name(this.deskOf(r)) ?? this.deskOf(r),
+      deskOffline: this.isRemote(r) && !(this.desks?.online(r.desk_id) ?? false),
       cwd: r.last_cwd ?? r.cwd,
       repoId: r.repo_id,
       sessionId: r.session_id,
@@ -1768,6 +1769,7 @@ export class RunManager {
           )?.n ?? 0)
         : 0,
       hub: id === LOCAL_DESK,
+      portable: this.desks!.portable(id),
     }));
     const placed = deskPlacement(candidates, { pinned: target === 'auto' ? null : target, canClone: true });
     if (!placed.ok) {
@@ -2820,8 +2822,9 @@ export class RunManager {
       now(),
     );
     for (const r of due) {
-      // A session on a desk that is offline waits for the desk, without spending an attempt.
-      if (this.isRemote(r) && !this.desks?.online(r.desk_id)) {
+      // A session on a desk that is offline waits for the desk, without spending an attempt; and one on
+      // a desk that has only just come back is given the time to reattach by itself first.
+      if (this.isRemote(r) && !this.desks?.settled(r.desk_id)) {
         this.db.run('UPDATE runs SET revive_after = ? WHERE id = ?', new Date(Date.now() + REVIVE_BACKOFF_MS[0]).toISOString(), r.id);
         continue;
       }

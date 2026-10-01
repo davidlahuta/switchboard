@@ -70,6 +70,24 @@ describe('where a new session goes', () => {
     assert.deepEqual(r, { ok: true, desk: 'b', overflow: true, clone: false });
   });
 
+  it('places on a portable desk only once every desk that stays is at its maximum', () => {
+    const laptop = desk('laptop', { load: 0, max: 4, portable: true });
+    const room = deskPlacement([desk(LOCAL_DESK, { load: 3, max: 4, hasRepo: false }), laptop]);
+    assert.deepEqual(room, { ok: true, desk: LOCAL_DESK, overflow: false, clone: true });
+    const full = deskPlacement([desk(LOCAL_DESK, { load: 4, max: 4 }), laptop]);
+    assert.deepEqual(full, { ok: true, desk: 'laptop', overflow: false, clone: false });
+  });
+
+  it('overflows onto a desk that stays rather than a portable one', () => {
+    const r = deskPlacement([desk(LOCAL_DESK, { load: 4, max: 4 }), desk('laptop', { load: 2, max: 2, portable: true })]);
+    assert.deepEqual(r, { ok: true, desk: LOCAL_DESK, overflow: true, clone: false });
+  });
+
+  it('places on a portable desk when it is picked', () => {
+    const r = deskPlacement([desk(LOCAL_DESK, { load: 0 }), desk('laptop', { portable: true })], { pinned: 'laptop', canClone: true });
+    assert.equal(r.ok && r.desk, 'laptop');
+  });
+
   it('never counts a desk that cannot take it: offline, disabled, not allowed', () => {
     const r = deskPlacement([desk(LOCAL_DESK, { load: 9, max: 4 }), desk('b', { online: false }), desk('c', { enabled: false }), desk('d', { allowed: false })]);
     assert.deepEqual(r, { ok: true, desk: LOCAL_DESK, overflow: true, clone: false });

@@ -136,7 +136,9 @@ function DeskCard({ desk: d, now, onRemove }: { desk: Desk; now: number; onRemov
           )}
           <div className="sub-badges">
             <Badge tone={d.hub ? 'accent' : 'neutral'}>{d.hub ? 'hub' : 'satellite'}</Badge>
-            <Badge tone={d.online ? 'ok' : 'crit'}>{d.online ? 'online' : 'offline'}</Badge>
+            <Badge tone={d.online ? (d.settling ? 'warn' : 'ok') : d.portable ? 'warn' : 'crit'}>
+              {d.online ? (d.settling ? 'reconnecting' : 'online') : d.portable ? 'away' : 'offline'}
+            </Badge>
             <Badge tone={full ? 'warn' : 'muted'} title="Live sessions against its recommended maximum">
               {d.liveRuns}/{d.recommendedMaxSessions} sessions
             </Badge>
@@ -154,6 +156,15 @@ function DeskCard({ desk: d, now, onRemove }: { desk: Desk; now: number; onRemov
             <span className="small dim">Takes sessions</span>
             <Toggle checked={d.enabled} label={`${d.enabled ? 'Stop placing sessions on' : 'Place sessions on'} ${d.name}`} onChange={(v) => void patch({ enabled: v })} />
           </label>
+          {!d.hub && (
+            <label
+              className="inline-field"
+              title="A machine that comes and goes, like a laptop. New sessions go here only when picked, or when every other desk is at its maximum."
+            >
+              <span className="small dim">Portable</span>
+              <Toggle checked={d.portable} label={`${d.name} is ${d.portable ? 'portable' : 'always on'}`} onChange={(v) => void patch({ portable: v })} />
+            </label>
+          )}
           <label className="inline-field" title="How many sessions placement puts here before it looks elsewhere. 0 makes it take only overflow.">
             <span className="small dim">Recommended max</span>
             <input
@@ -178,8 +189,10 @@ function DeskCard({ desk: d, now, onRemove }: { desk: Desk; now: number; onRemov
 
       {!d.hub && !d.online && (
         <div className="callout callout-warn">
-          This desk's agent is not connected. Its sessions keep running there, but nothing new is placed on it and nothing there is
-          brought back until it reconnects. On that machine: <span className="mono">node src/cli.ts desk status</span>.
+          {d.portable
+            ? `${d.name} is away. Its ${d.liveRuns} session(s) are kept there, nothing new is placed on it, and its sessions reattach by themselves when it is back.`
+            : "This desk's agent is not connected. Its sessions keep running there, but nothing new is placed on it and nothing there is brought back until it reconnects."}{' '}
+          If it should be online, on that machine: <span className="mono">node src/cli.ts desk status</span>.
         </div>
       )}
 

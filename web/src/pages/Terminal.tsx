@@ -989,7 +989,15 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             </span>
           </div>
         )}
-        {status === 'disconnected' && (
+        {status === 'disconnected' && run?.deskOffline && (
+          <div className="term-banner term-banner-warn" role="status">
+            <span>
+              {run.deskName} is offline — asleep, away, or its agent stopped. The session is kept there and reattaches by itself
+              when the desk is back.
+            </span>
+          </div>
+        )}
+        {status === 'disconnected' && !run?.deskOffline && (
           <div className="term-banner term-banner-warn" role="status">
             <span>This session has no terminal — the machine may have been restarted. The conversation is kept.</span>
             {run && (

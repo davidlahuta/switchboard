@@ -49,8 +49,16 @@ export function RunTags({
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
       {remote && (
-        <Badge tone="accent" title={`Runs on the desk ${run.deskName}; its folder is a path there.`}>
+        <Badge
+          tone={run.deskOffline ? 'warn' : 'accent'}
+          title={
+            run.deskOffline
+              ? `${run.deskName} is offline (asleep, away, or its agent stopped). The session is kept there and reattaches when the desk is back.`
+              : `Runs on the desk ${run.deskName}; its folder is a path there.`
+          }
+        >
           <Icon name="desk" size={12} /> {run.deskName}
+          {run.deskOffline ? ' · offline' : ''}
         </Badge>
       )}
       {run.stalled && (

@@ -35,6 +35,12 @@ const RPC_TIMEOUT_MS = 30_000;
 const RUNS_EVERY_MS = 10_000;
 /** A desk that has said nothing for this long is offline, whatever its socket says. */
 const SILENT_OFFLINE_MS = 45_000;
+/**
+ * How long a desk that has just come back is left to settle before its sessions are judged. A laptop
+ * waking up reconnects its agent first and its sessions' terminals over the next few seconds; one
+ * judged in between looks dead and would be opened a second time.
+ */
+const SETTLE_MS = 60_000;
 
 interface DeskRow {
   id: string;
@@ -43,6 +49,7 @@ interface DeskRow {
   token_hash: string | null;
   max_sessions: number | null;
   enabled: number;
+  portable: number;
   clone_root: string | null;
   repo_roots: string | null;
   info_json: string | null;
@@ -63,6 +70,8 @@ interface DeskInfo {
 }
 
 interface Conn {
+  /** when this connection was made, for settled() */
+  since: number;
   ws: WebSocket;
   lastHeard: number;
   runnerSourceMtime: number;
@@ -96,6 +105,8 @@ const httpError = (status: number, message: string): Error => Object.assign(new 
 
 /** The hub's registry of desks, and its end of every satellite's connection. */
 export class DeskManager {
+  /** desks that went offline with sessions on them, so their return can be said */
+  private readonly away = new Set<string>();
   private readonly db: Db;
   private readonly bus: Bus;
   private readonly deps: DeskDeps;
@@ -185,6 +196,18 @@ export class DeskManager {
   enabled(id: string): boolean {
     const r = this.row(id);
     return !!r && bool(r.enabled);
+  }
+
+  portable(id: string): boolean {
+    const r = this.row(id);
+    return !!r && bool(r.portable);
+  }
+
+  /** Online and connected long enough for its sessions to have come back; see SETTLE_MS. */
+  settled(id: string | null | undefined): boolean {
+    if (!id || id === LOCAL_DESK) return true;
+    const c = this.conns.get(id);
+    return this.online(id) && !!c && Date.now() - c.since >= SETTLE_MS;
   }
 
   name(id: string | null | undefined): string {
@@ -301,6 +324,8 @@ export class DeskManager {
       maxIsDefault: r.max_sessions === null,
       liveRuns: this.deps.liveRuns(r.id),
       enabled: bool(r.enabled),
+      portable: bool(r.portable),
+      settling: !hub && this.online(r.id) && !this.settled(r.id),
       cloneRoot: r.clone_root ?? info.cloneRoot ?? null,
       repoRoots: hub ? this.deps.localRepoRoots() : roots.length ? roots : (info.repoRoots ?? []),
       cores,
@@ -311,7 +336,7 @@ export class DeskManager {
     };
   }
 
-  update(id: string, patch: { name?: unknown; recommendedMaxSessions?: unknown; enabled?: unknown; cloneRoot?: unknown; repoRoots?: unknown }): Desk {
+  update(id: string, patch: { name?: unknown; recommendedMaxSessions?: unknown; enabled?: unknown; portable?: unknown; cloneRoot?: unknown; repoRoots?: unknown }): Desk {
     const r = this.row(id);
     if (!r) throw httpError(404, 'Unknown desk');
     if (typeof patch.name === 'string' && patch.name.trim()) this.db.run('UPDATE desks SET name = ? WHERE id = ?', patch.name.trim().slice(0, 60), id);
@@ -320,6 +345,7 @@ export class DeskManager {
       this.db.run('UPDATE desks SET max_sessions = ? WHERE id = ?', Math.max(0, Math.min(200, Math.round(patch.recommendedMaxSessions))), id);
     }
     if (typeof patch.enabled === 'boolean') this.db.run('UPDATE desks SET enabled = ? WHERE id = ?', patch.enabled ? 1 : 0, id);
+    if (typeof patch.portable === 'boolean' && id !== LOCAL_DESK) this.db.run('UPDATE desks SET portable = ? WHERE id = ?', patch.portable ? 1 : 0, id);
     if (patch.cloneRoot === null || typeof patch.cloneRoot === 'string') {
       const v = typeof patch.cloneRoot === 'string' && patch.cloneRoot.trim() ? patch.cloneRoot.trim() : null;
       this.db.run('UPDATE desks SET clone_root = ? WHERE id = ?', v, id);
@@ -449,7 +475,7 @@ export class DeskManager {
   attach(deskId: string, ws: WebSocket): void {
     const previous = this.conns.get(deskId);
     if (previous && previous.ws !== ws) previous.ws.close(4409, 'replaced by a newer connection');
-    const conn: Conn = { ws, lastHeard: Date.now(), runnerSourceMtime: 0, runs: new Map(), pending: new Map(), loginsSent: new Map(), runsSent: '' };
+    const conn: Conn = { ws, since: Date.now(), lastHeard: Date.now(), runnerSourceMtime: 0, runs: new Map(), pending: new Map(), loginsSent: new Map(), runsSent: '' };
     this.conns.set(deskId, conn);
     ws.on('message', (raw) => {
       let msg: DeskToHub;
@@ -473,6 +499,13 @@ export class DeskManager {
         p.reject(new Error(`${this.name(deskId)} disconnected`));
       }
       log.warn('a desk disconnected', { desk: deskId, name: this.name(deskId) });
+      this.db.run('UPDATE desks SET last_seen = ? WHERE id = ?', now(), deskId);
+      // Said once, when it had sessions: a laptop closed for a meeting is not an error, but it is worth knowing.
+      const live = this.deps.liveRuns(deskId);
+      if (live > 0 && !this.away.has(deskId)) {
+        this.away.add(deskId);
+        this.bus.toast('warn', `${this.name(deskId)} went offline. Its ${live} session(s) keep running there and reattach when it is back.`);
+      }
       this.bus.invalidate('state');
     });
   }
@@ -499,6 +532,7 @@ export class DeskManager {
         const r = this.row(deskId);
         if (r?.repo_roots || r?.clone_root) void this.rpc(deskId, 'configure', { repoRoots: r.repo_roots ? JSON.parse(r.repo_roots) : undefined, cloneRoot: r.clone_root }).catch(() => undefined);
         log.info('a desk connected', { desk: deskId, name: this.name(deskId), version: msg.version, host: msg.hostname, user: msg.user });
+        if (this.away.delete(deskId)) this.bus.toast('info', `${this.name(deskId)} is back; its sessions are reattaching.`);
         this.bus.invalidate('state');
         break;
       }

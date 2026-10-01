@@ -295,7 +295,7 @@ function SessionRow({
             <Icon name="terminal" size={16} />
           </a>
           {/* No terminal of its own: exited on its own, or the machine was off. */}
-          {(exited || r.status === 'disconnected') && <ResumeButton run={r} compact />}
+          {(exited || (r.status === 'disconnected' && !r.deskOffline)) && <ResumeButton run={r} compact />}
           {!exited && <ContinueButton run={r} compact />}
         </span>
       </div>

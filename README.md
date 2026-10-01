@@ -71,7 +71,7 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
 
 ## Requirements
 
-- Windows 10/11 with [Windows Terminal](https://aka.ms/terminal) (for one-click sessions)
+- Windows 10/11 with [Windows Terminal](https://aka.ms/terminal) (for one-click sessions); satellite desks can also be Linux, see [More than one desk](#more-than-one-desk)
 - [Node.js](https://nodejs.org) 24 or newer (uses the built-in `node:sqlite` and native TypeScript type stripping)
 - [Claude Code](https://code.claude.com) 2.1.x on `PATH`
 - For development orchestration: [.NET 10 SDK](https://dotnet.microsoft.com) + [Aspire CLI](https://aspire.dev)
@@ -287,43 +287,195 @@ click from where they were.
 One Switchboard (the **hub**) can host sessions on other machines too — a laptop, a Linux box — over
 Tailscale. Each extra machine (a **satellite**) runs a small desk agent that dials out to the hub; the
 hub keeps the board, the subscriptions, the logins and the decisions, and the satellite does what
-only a process on that machine can: open terminals, read and write files there, ask git.
+only a process on that machine can: open terminals, read and write files there, ask git. The hub
+runs sessions of its own as well.
 
 Sessions on a satellite need nothing new. They talk to `127.0.0.1` as they always do; the agent
 listens there and relays to the hub. Their logins come from the hub (a satellite never holds or
 renews one of its own), their transcripts are mirrored to it, and the web terminal drives them like
-any other.
+any other. Nothing about a satellite's user name, home folder or repository folders has to match
+the hub's.
 
 **Placement.** Every desk has a *recommended maximum* of sessions (a guess from its cores and memory
-until you set one). A new session goes to a desk under its maximum, preferring one that already has
-the repository, then the least loaded; a desk without the repository clones it first. A desk goes
-over its maximum only when every desk that could take the session is full. New session lets you
-pick a desk instead, and `sb_new_session` takes the same `desk`. A repository can be kept to some
-desks from the Desks page.
+until you set one on the Desks page). A new session goes to a desk under its maximum, preferring one
+that already has the repository, then the least loaded; a desk without the repository clones it
+first. A desk goes over its maximum only when every desk that could take the session is full. New
+session lets you pick a desk instead, and `sb_new_session` takes the same `desk`. The Desks page
+also keeps a repository to some desks only.
 
-**Adding a desk.** The hub needs to be reachable over Tailscale (`tailscale serve --bg 4477`, see
-below). On the hub: **Desks → Add a desk**, which shows a single-use code and the exact commands.
-On the new machine — Windows or Linux, with Node.js 24+, git, Claude Code and Tailscale, and on Linux
-tmux — it comes down to:
+### Setting up the hub
 
-```sh
-git clone https://github.com/davidlahuta/switchboard && cd switchboard && npm ci
-node src/cli.ts desk join https://<hub>.<tailnet>.ts.net <code>
-node src/cli.ts service install --desk
+The hub is an ordinary Switchboard (see [Quick start](#quick-start) and [Always on](#always-on)) that
+satellites can reach over your tailnet:
+
+1. Install [Tailscale](https://tailscale.com/download) and sign in.
+2. Share the daemon with the tailnet. Satellites connect over HTTPS, so this is required, not
+   optional:
+
+   ```powershell
+   tailscale serve --bg 4477
+   ```
+
+   The hub then answers at `https://<machine>.<tailnet>.ts.net`. Your tailnet must have HTTPS
+   certificates and Serve enabled; the CLI prints an approval link when they are not. The Desks
+   page reads this address from `tailscale serve status`, so the commands it shows are ready to
+   paste.
+3. Optional, but it saves logging in on every satellite: **Desks → Credentials for sessions** (see
+   [Credentials](#credentials) below).
+
+### Adding a satellite
+
+The same on every platform:
+
+1. On the hub, open **Desks → Add a desk**. It shows a single-use pairing code (good for ten
+   minutes, and only until the hub restarts) and the exact commands for the new machine.
+2. On the new machine, install the prerequisites for its platform (below), then:
+
+   ```sh
+   git clone https://github.com/davidlahuta/switchboard
+   cd switchboard
+   npm ci
+   node src/cli.ts desk join https://<hub>.<tailnet>.ts.net <code>
+   node src/cli.ts service install --desk
+   ```
+
+   `desk join` takes `--name <name>` if the machine's host name is not what you want to see on the
+   board.
+3. It appears on the hub's Desks page as online within a few seconds, with the tools it found
+   (claude, git, gh, az, tmux) and the repositories under its clone folder.
+
+Check it from the satellite with `node src/cli.ts desk status` (which hub, whether the agent runs,
+whether it is connected) and `node src/cli.ts service status --desk`.
+
+A machine is either a hub or a satellite: `service install --desk` replaces a daemon's automatic
+start if the machine had one. The satellite needs nothing to be open on its side — the agent only
+listens on `127.0.0.1` and dials out to the hub.
+
+Afterwards, **Update Switchboard** on the Desks page runs `git pull` (and `npm ci` when the lockfile
+changed) on that desk and restarts its agent; its sessions keep running through it. When
+Switchboard keeps Claude Code updated, it runs `claude update` on every online satellite too, and a
+new version restarts only that desk's sessions, each once it is idle.
+
+### When a satellite goes away
+
+A satellite can sleep, lose its network or be carried to a meeting, and nothing is lost. Within a
+minute the hub marks it offline and says so: the Desks page shows it as **offline** (or **away**
+for a portable desk), and each of its sessions carries an *offline* badge where its desk name is.
+Its sessions are not moved or restarted somewhere else, since their conversations and working copies
+are on that machine. They wait for it, without using up revive attempts, and the coordination board
+keeps their claims and work as they were.
+
+When the machine wakes, the agent notices it slept and reconnects at once, and every session
+reattaches by itself within seconds, with the transcripts written meanwhile caught up. For a minute
+after it reconnects the desk shows **reconnecting**, and nothing there is brought back or judged
+dead while its sessions find their way back. A session whose claude really did end while the desk
+was away is then resumed as usual. A laptop with internet keeps working through Tailscale wherever
+it is, so it stays online away from the desk too.
+
+Mark a laptop **Portable** on the Desks page. New sessions go to it only when you pick it, or when
+every desk that stays is at its recommended maximum, so sessions you didn't put there don't leave
+with it.
+
+### Windows satellite
+
+Prerequisites:
+
+```powershell
+winget install OpenJS.NodeJS Git.Git Tailscale.Tailscale Microsoft.WindowsTerminal
+irm https://claude.ai/install.ps1 | iex     # Claude Code
 ```
 
-The last line keeps the agent running: a logon task on Windows, and on Linux a systemd user unit
-that starts at **boot**, before anyone signs in (it enables lingering), restarts it whenever it
-exits, and leaves its sessions running when it does. On Linux a session opens in the desktop's
-terminal when the agent has a display, and in a detached tmux session (`tmux ls`) when it does
-not — which is always the case for an agent started at boot. The Desks page can update a
-satellite's Switchboard and restart its agent without anybody at it.
+Sign in to Tailscale, open a new terminal so `node`, `git` and `claude` are on `PATH`, then run the
+commands above. Optionally `winget install GitHub.cli Microsoft.AzureCLI` if sessions there should
+use `gh` and `az`.
 
-**Credentials.** A fresh desk can clone and push without logging in to anything when the hub holds
-the credentials: **Desks → Credentials for sessions** takes a GitHub App (recommended: one-hour
-tokens per repository owner, minted on the hub), GitHub or Azure DevOps tokens, and an Azure
-service principal. git reaches them through a credential helper scoped to those hosts, gh and az
-through shims that fetch a fresh token on every call; nothing is written to a satellite's disk.
+- `service install --desk` registers the logon task **Switchboard desk**, the same supervisor the
+  hub uses, restarting the agent within seconds if it exits. The log is
+  `%LOCALAPPDATA%\switchboard\desk.log`.
+- Sessions open as Windows Terminal tabs, as on the hub.
+- It starts at **logon**, not at boot, for the reason in [Always on](#always-on): terminal tabs need
+  an interactive desktop. A satellite laptop that reboots is offline until someone signs in; its
+  sessions wait for it (they are not moved to another desk, and do not use up revive attempts) and
+  come back where they were. To sign in by itself after updates, turn on *Settings → Accounts →
+  Sign-in options → Use my sign-in info to automatically finish setting up after an update*.
+- The desk token is sealed with DPAPI in `%LOCALAPPDATA%\switchboard\desk.json`.
+
+### Linux satellite
+
+Any systemd distribution: Arch and its derivatives (including Omarchy, below), Fedora, Debian,
+Ubuntu. Prerequisites: Node.js 24+, git, tmux, Tailscale and Claude Code. On Debian or Ubuntu, for
+example:
+
+```sh
+sudo apt install git tmux
+curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up
+curl -fsSL https://claude.ai/install.sh | bash      # Claude Code
+# Node.js 24+ from nodejs.org, NodeSource or your version manager: distribution packages are often older
+```
+
+- `service install --desk` writes the systemd **user** unit `~/.config/systemd/user/switchboard-desk.service`,
+  enables and starts it, and turns on lingering (`loginctl enable-linger`), so it starts at
+  **boot**, before anyone signs in. If enabling lingering needs root it says so; run the command it
+  prints once.
+- The unit restarts the agent whenever it exits, five seconds later and with no limit on retries, so
+  a hub that is unreachable for an hour is simply retried until it answers. It uses
+  `KillMode=process`: a restart of the agent leaves tmux and every claude in it running.
+- The unit records the `PATH` and the `node` it was installed with. If you move either — a new Node
+  version from a version manager, claude installed somewhere else — run `service install --desk`
+  again.
+- Logs: `~/.local/share/switchboard/desk.log` and `journalctl --user -u switchboard-desk`. The desk
+  token is in `~/.local/share/switchboard/desk.json`, readable only by you.
+- **Where sessions open.** An agent started at boot has no display, so sessions open in detached
+  tmux sessions named `sb-<run>-…`. Drive them from the web terminal as any other, or at the machine
+  with `tmux ls` and `tmux attach -t <name>`. An agent started from a desktop session (`node
+  src/cli.ts desk`) opens a terminal window instead: `xdg-terminal-exec`, then ghostty, alacritty,
+  kitty, foot, wezterm, gnome-terminal, konsole or xterm, whichever is found first.
+  `SWITCHBOARD_TERMINAL=tmux` (or the name of a terminal) fixes the choice; set it before
+  `service install --desk` and the unit keeps it.
+
+### Omarchy satellite
+
+[Omarchy](https://omarchy.org) is Arch with Hyprland, so everything under Linux applies; the
+packages:
+
+```sh
+sudo pacman -S --needed git tmux tailscale github-cli
+sudo systemctl enable --now tailscaled
+sudo tailscale up
+curl -fsSL https://claude.ai/install.sh | bash      # Claude Code, into ~/.local/bin
+```
+
+Node.js: Omarchy manages it with mise. `mise use -g node@24` gives a Node.js new enough. Run
+`service install --desk` from a shell where `node --version` shows 24 or newer, because the unit
+keeps that exact `node`. mise removes old versions when you upgrade, so run `service install --desk`
+again after moving to a new Node version. Alternatively, `sudo pacman -S nodejs npm` gives a `node`
+whose path never changes; check it is 24 or newer.
+
+Omarchy's terminal is Alacritty or Ghostty, both supported when the agent runs from the desktop. The
+service started at boot uses tmux, as above. Hyprland's idle lock and suspend do not stop the agent,
+but a suspended machine is offline: on an always-on desk station, turn off suspend on idle in
+Omarchy's power settings (or `hypridle.conf`).
+
+`az`, if sessions need it: `yay -S azure-cli` (AUR).
+
+### Credentials
+
+A fresh desk can clone and push without logging in to anything when the hub holds the credentials.
+**Desks → Credentials for sessions** takes:
+
+- **A GitHub App** (recommended). Create one under your account or organization's *Settings →
+  Developer settings → GitHub Apps* with repository permissions *Contents*, *Pull requests* and
+  *Issues* read and write, and *Metadata* read; install it on the repositories (or all of them),
+  then paste its App ID and private key. The hub mints one-hour tokens for each repository owner.
+- **GitHub or Azure DevOps personal access tokens**, each limited to the hosts or organizations you
+  give it.
+- **An Azure service principal** for `az` and the Azure SDKs.
+
+git reaches them through a credential helper placed in front of only those hosts; `gh` and `az` go
+through shims that fetch a fresh token on every call, so a long session never holds a stale one.
+They are applied to sessions on every desk, the hub included, and nothing is written to a
+satellite's disk. With no credentials saved nothing changes: sessions use whatever logins the
+machine already has.
 
 ## Claude Code updates
 

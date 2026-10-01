@@ -50,6 +50,13 @@ const MIRROR_CHUNK = 1024 * 1024;
 /** Files at most this big that are not transcripts are sent whole whenever they change. */
 const SMALL_FILE = 256 * 1024;
 const STATUS_EVERY_MS = 5000;
+/**
+ * Every connection to the hub is pinged this often and dropped when the last ping went unanswered.
+ * Without it a connection the hub has already given up on — the machine slept, the network changed
+ * under it — looks open here for as long as nothing is sent on it, and an idle session's terminal
+ * never reattaches.
+ */
+const HEARTBEAT_MS = 15_000;
 const LOGIN_TICK_MS = 2000;
 const REPO_SCAN_EVERY_MS = 10 * 60_000;
 const TOOLS_EVERY_MS = 10 * 60_000;
@@ -172,6 +179,10 @@ export class DeskAgent {
   /** hash of the login content the hub last gave each run, and of what was last sent back */
   private readonly loginWritten = new Map<string, string>();
   private readonly pids = new Map<string, number>();
+  /** this desk's connections to the hub: the control channel and every relayed one */
+  private readonly upstreams = new Set<WebSocket>();
+  private readonly unanswered = new WeakSet<WebSocket>();
+  private lastBeat = Date.now();
   private readonly follows = new Map<string, Follow>();
   /** transcripts the hooks named, followed even before the run list says so */
   private readonly hookFiles = new Map<string, { root: MirrorRoot; rel: string; abs: string }>();
@@ -205,6 +216,7 @@ export class DeskAgent {
     this.connect();
     this.timers.push(setInterval(() => this.mirrorTick(), MIRROR_TICK_MS));
     this.timers.push(setInterval(() => this.sendStatus(), STATUS_EVERY_MS));
+    this.timers.push(setInterval(() => this.heartbeat(), HEARTBEAT_MS));
     this.timers.push(setInterval(() => this.loginTick(), LOGIN_TICK_MS));
     this.timers.push(setInterval(() => void this.scanRepos().catch(() => undefined), REPO_SCAN_EVERY_MS));
     this.timers.push(setInterval(() => void this.refreshTools(), TOOLS_EVERY_MS));
@@ -325,6 +337,7 @@ export class DeskAgent {
     const runner = pathname === '/ws/runner';
     let runId: string | null = null;
     const upstream = new WebSocket(`${this.hubWs}${pathname}`, { headers: { authorization: `Bearer ${this.token}` }, maxPayload: 8 * 1024 * 1024 });
+    this.watch(upstream);
     const early: Array<{ data: WebSocket.RawData; binary: boolean }> = [];
     let inbound: Promise<void> = Promise.resolve();
     local.on('message', (data, binary) => {
@@ -535,9 +548,14 @@ export class DeskAgent {
 
   private connect(): void {
     const ws = new WebSocket(`${this.hubWs}/ws/desk`, { headers: { authorization: `Bearer ${this.token}` }, maxPayload: 16 * 1024 * 1024 });
+    this.watch(ws);
     ws.on('open', () => {
       this.control = ws;
       this.backoff = 1000;
+      // Whatever was sent on the connection before this one may never have arrived. Transcripts heal
+      // themselves (the hub asks for a resync at the first gap); small files are sent whole only when
+      // they change, so they are sent again now.
+      for (const f of this.follows.values()) if (!f.rel.endsWith('.jsonl')) f.mtime = 0;
       log.info('connected to the hub', { hub: this.cfg.hub });
       void this.hello();
     });
@@ -560,6 +578,32 @@ export class DeskAgent {
       this.backoff = Math.min(this.backoff * 2, 30_000);
     });
     ws.on('error', (err) => log.debug('hub connection error', err.message));
+  }
+
+  private watch(ws: WebSocket): void {
+    this.upstreams.add(ws);
+    ws.on('pong', () => this.unanswered.delete(ws));
+    ws.on('close', () => this.upstreams.delete(ws));
+  }
+
+  /**
+   * Ping every connection to the hub, and drop each one that did not answer the last ping. A beat
+   * that comes far later than it should means this machine was asleep: every connection is dropped
+   * at once then, so the sessions here reattach in seconds rather than a heartbeat or two later.
+   */
+  private heartbeat(): void {
+    const late = Date.now() - this.lastBeat > HEARTBEAT_MS * 3;
+    this.lastBeat = Date.now();
+    if (late) log.info('this machine was asleep; reconnecting to the hub');
+    for (const ws of this.upstreams) {
+      if (ws.readyState !== ws.OPEN) continue;
+      if (late || this.unanswered.has(ws)) {
+        ws.terminate();
+        continue;
+      }
+      this.unanswered.add(ws);
+      ws.ping();
+    }
   }
 
   private send(msg: DeskToHub): boolean {
