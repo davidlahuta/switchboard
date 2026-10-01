@@ -4,7 +4,9 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
-import { CLI_PATH, DATA_DIR, HOME_CLAUDE_DIR, IS_WINDOWS, PROFILES_DIR, RUNTIME_DIR, VERSION, ensureDirs } from '../config.ts';
+import { CLI_PATH, DATA_DIR, HOME_CLAUDE_DIR, IS_WINDOWS, PACKAGE_ROOT, PROFILES_DIR, RUNTIME_DIR, VERSION, ensureDirs } from '../config.ts';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { claudeCommand, findClaude, projectSlug, readJson, writeJson } from '../daemon/claude.ts';
 import { transcriptTitle } from '../daemon/transcript.ts';
 import { CREDENTIALS_FILE, writeCredentials } from '../daemon/credsync.ts';
@@ -35,6 +37,7 @@ import { ensureShims, gitHelperEnv, pathWithShims } from './credential.ts';
 import { toolStatus } from './tools.ts';
 
 const log = logger('desk');
+const execFileP = promisify(execFile);
 
 export const DESK_CONFIG = path.join(DATA_DIR, 'desk.json');
 export const DEFAULT_DESK_PORT = 4477;
@@ -685,11 +688,35 @@ export class DeskAgent {
       }
       case 'tools':
         return this.refreshTools();
+      case 'update':
+        return this.selfUpdate();
       case 'recentSessions':
         return this.recentSessions(String(args?.cwd ?? ''));
       default:
         throw new Error(`unknown request ${method}`);
     }
+  }
+
+  /**
+   * Bring this desk's Switchboard up to date with its own clone's remote, and restart the agent on
+   * it: `git pull --ff-only`, `npm ci` when the lockfile moved, then exit for the supervisor (the
+   * logon task, or systemd) to start it again. Sessions here keep running through it, as they do
+   * through any agent restart, and reattach when it is back.
+   */
+  private async selfUpdate(): Promise<{ from: string; to: string; restarting: boolean }> {
+    const git = async (...args: string[]): Promise<string> => (await execFileP('git', ['-C', PACKAGE_ROOT, ...args], { windowsHide: true, timeout: 120_000 })).stdout.trim();
+    const from = await git('rev-parse', '--short', 'HEAD');
+    const lockBefore = await git('rev-parse', 'HEAD:package-lock.json').catch(() => '');
+    await git('pull', '--ff-only');
+    const to = await git('rev-parse', '--short', 'HEAD');
+    if (from === to) return { from, to, restarting: false };
+    const lockAfter = await git('rev-parse', 'HEAD:package-lock.json').catch(() => '');
+    if (lockBefore !== lockAfter) {
+      await execFileP(IS_WINDOWS ? 'npm.cmd' : 'npm', ['ci', '--omit=dev', '--no-audit', '--no-fund'], { cwd: PACKAGE_ROOT, windowsHide: true, timeout: 10 * 60_000, shell: IS_WINDOWS });
+    }
+    log.info('updated; restarting the agent', { from, to });
+    setTimeout(() => process.exit(0), 500);
+    return { from, to, restarting: true };
   }
 
   private async scanRepos(refresh = false): Promise<DeskRepo[]> {

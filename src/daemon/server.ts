@@ -467,6 +467,10 @@ export function createServer(s: Services): http.Server {
     if (params[0] === 'local') return s.desks.scanLocal();
     return s.desks.rpc(params[0], 'scanRepos', {}, 120_000);
   });
+  route('POST', '/api/desks/:id/update', ({ params }) => {
+    if (params[0] === 'local') fail(400, 'The hub updates from its own clone: pull it and restart the daemon.');
+    return s.desks.rpc(params[0], 'update', {}, 15 * 60_000);
+  });
   route('POST', '/api/desks/:id/clone', async ({ params, body }) => {
     if (typeof body.url !== 'string' || !body.url) fail(400, 'url is required');
     const repo = await s.desks.clone(params[0], body.url, s.vault.snapshot.hosts);
