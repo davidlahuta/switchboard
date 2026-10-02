@@ -1,4 +1,5 @@
 import type { Server } from 'node:http';
+import { startStallWatch } from './stalls.ts';
 import { BIND_HOSTS, DATA_DIR, HOME_CLAUDE_DIR, PORT, VERSION, ensureDirs } from '../config.ts';
 import { logger } from '../log.ts';
 import { AgentHub } from './agents.ts';
@@ -193,8 +194,14 @@ export async function startDaemon(): Promise<void> {
   watch.poll();
   // Retention runs far less often than the liveness sweep: it is a bulk delete, and an hour of
   // extra history costs nothing next to doing it on every pass.
-  const prune = setInterval(() => coord.prune(), 3600_000);
+  const prune = setInterval(() => {
+    coord.prune();
+    subs.prune();
+    db.optimize();
+  }, 3600_000);
   coord.prune();
+  subs.prune();
+  const stopStallWatch = startStallWatch();
   // /rename and /model inside a session write to disk at once and fire no hook, so an idle session
   // renamed or switched there would not show up here until someone typed something into it.
   // Every session's copy of its login kept on its subscription's newest; see CredentialSync.
@@ -236,6 +243,7 @@ export async function startDaemon(): Promise<void> {
     clearInterval(notify);
     clearInterval(windows);
     clearInterval(prune);
+    stopStallWatch();
     clearInterval(titles);
     clearInterval(logins);
     clearInterval(deskUpkeep);

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { stallReport } from './stalls.ts';
 import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
@@ -69,6 +70,7 @@ export interface Diagnostics {
   };
   runs: RunDiagnostics[];
   boards: BoardHealth[];
+  stalls?: ReturnType<typeof stallReport>;
 }
 
 export interface Services {
@@ -279,6 +281,7 @@ export function createServer(s: Services): http.Server {
         },
         runs: s.runs.diagnostics(),
         boards: s.coord.boardHealth(),
+        stalls: stallReport(),
       };
     },
     'local',

@@ -136,6 +136,11 @@ async function diag(asJson: boolean, screen: boolean): Promise<void> {
     `daemon ${k.version} pid ${k.pid} · up ${dur(k.uptimeS * 1000)} · ${k.rssMb} MB · claude ${k.claude ?? '?'}` +
       `${k.staleCode ? ' · CODE CHANGED SINCE START' : ''}${k.supervised ? '' : ' · not supervised'}`,
   );
+  if (d.stalls?.minutes.length) {
+    const st = d.stalls;
+    const git = st.minutes.reduce((a, m) => a + m.gitSpawned, 0);
+    console.log(`responsiveness, last ${st.minutes.length}m: worst stall ${st.worstMs} ms · ${st.noticeable} minute(s) with a stall over 250 ms · ${git} git process(es)`);
+  }
   for (const r of d.runs) {
     const notes: string[] = [];
     if (!r.runner.attached) notes.push('RUNNER NOT ATTACHED');
