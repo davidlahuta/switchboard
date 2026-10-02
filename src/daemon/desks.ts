@@ -41,6 +41,13 @@ const SILENT_OFFLINE_MS = 45_000;
  * judged in between looks dead and would be opened a second time.
  */
 const SETTLE_MS = 60_000;
+/*
+ * This machine's cores and memory, asked once. os.cpus() reads every core's details from the system,
+ * which on Windows took up to 1.8 s a call, and it was being called each time the state was built,
+ * holding the daemon (and every web terminal) for that long, several times a minute.
+ */
+const HUB_CORES = os.availableParallelism();
+const HUB_MEM_GB = os.totalmem() / 2 ** 30;
 
 interface DeskRow {
   id: string;
@@ -189,7 +196,7 @@ export class DeskManager {
     const r = this.row(id);
     if (!r) return 0;
     if (r.max_sessions !== null) return r.max_sessions;
-    const info = r.id === LOCAL_DESK ? { cores: os.cpus().length, memGb: os.totalmem() / 2 ** 30 } : this.info(r);
+    const info = r.id === LOCAL_DESK ? { cores: HUB_CORES, memGb: HUB_MEM_GB } : this.info(r);
     return defaultMaxSessions(info.cores ?? null, info.memGb ?? null);
   }
 
@@ -302,8 +309,8 @@ export class DeskManager {
   private dto(r: DeskRow): Desk {
     const hub = r.id === LOCAL_DESK;
     const info = this.info(r);
-    const cores = hub ? os.cpus().length : (info.cores ?? null);
-    const memGb = hub ? Math.round(os.totalmem() / 2 ** 30) : (info.memGb ?? null);
+    const cores = hub ? HUB_CORES : (info.cores ?? null);
+    const memGb = hub ? Math.round(HUB_MEM_GB) : (info.memGb ?? null);
     let roots: string[] = [];
     try {
       roots = r.repo_roots ? (JSON.parse(r.repo_roots) as string[]) : [];

@@ -451,6 +451,12 @@ const MIGRATIONS: string[] = [
   -- ask read the whole table, so the sweep grew with the square of the messages ever sent.
   CREATE INDEX IF NOT EXISTS messages_reply_to ON messages (reply_to);
   `,
+  `
+  -- Each board's unread count for the operator is read every time the state is built. Through the
+  -- repo index that read every message the board ever had, 15 ms a board and growing with each one;
+  -- unread messages to the operator are a handful, and this index holds only those.
+  CREATE INDEX IF NOT EXISTS messages_unread_human ON messages (repo_id) WHERE to_id = 'human' AND human_read_at IS NULL;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;
