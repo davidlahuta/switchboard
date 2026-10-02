@@ -152,6 +152,8 @@ export interface PendingRespawn {
   windDownAt?: number;
 }
 
+/** How long a session file that was not found anywhere is not looked for everywhere again. */
+const SESSION_FILE_RESCAN_MS = 60_000;
 const LIVE: RunStatus[] = ['starting', 'running', 'swapping', 'disconnected'];
 const CONTINUE_DELAY_MS = 2500;
 /**
@@ -1262,6 +1264,12 @@ export class RunManager {
 
   /** Files Claude Code keeps for a session, once found; see sessionFileKey. */
   private readonly sessionFiles = new Map<string, string>();
+  /**
+   * When each session file was last looked for and not found. Most sessions never get a
+   * custom-title.json, and looking for one lists every project folder of every profile: done on each
+   * poll, for each session, that was most of a second of the daemon's time every few seconds.
+   */
+  private readonly sessionFileMissed = new Map<string, number>();
   /** Size and mtime of each transcript when it was last read, so an unchanged one is not reread. */
   private readonly transcriptSeen = new Map<string, string>();
 
@@ -1277,14 +1285,18 @@ export class RunManager {
     const roots = this.claudeRoots(r);
     const remember = (file: string): string => {
       this.sessionFiles.set(key, file);
+      this.sessionFileMissed.delete(key);
       return file;
     };
+    // Where it would be first, every time: that is where a new one appears.
     for (const root of roots) {
       for (const dir of new Set([r.last_cwd ?? r.cwd, r.cwd])) {
         const file = path.join(root, 'projects', projectSlug(dir), r.session_id, name);
         if (fs.existsSync(file)) return remember(file);
       }
     }
+    const missed = this.sessionFileMissed.get(key);
+    if (missed !== undefined && Date.now() - missed < SESSION_FILE_RESCAN_MS) return null;
     // The session may have been started somewhere else entirely (a resumed GUID, a moved cwd).
     for (const root of roots) {
       let projects: string[];
@@ -1298,6 +1310,7 @@ export class RunManager {
         if (fs.existsSync(file)) return remember(file);
       }
     }
+    this.sessionFileMissed.set(key, Date.now());
     return null;
   }
 
@@ -2115,6 +2128,14 @@ export class RunManager {
   }
 
   private onRunnerMessage(runId: string, msg: RunnerToDaemon): void {
+    // The terminal's output is most of what a runner sends, and it needs nothing from the database.
+    if (msg.type === 'data') {
+      const m = this.mirrors.get(runId);
+      if (m) {
+        m.write(msg.data);
+        return;
+      }
+    }
     const r = this.row(runId);
     if (!r) return;
     switch (msg.type) {

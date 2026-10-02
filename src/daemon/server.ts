@@ -186,7 +186,22 @@ export function createServer(s: Services): http.Server {
   /** The satellite a request comes from, by the token it presents; null for anything else. */
   const deskOf = (req: IncomingMessage): string | null => s.desks.deskOfToken(req.headers.authorization);
 
+  /*
+   * One build of the state for every page that asks after the same change. Each change is announced
+   * to every open page (a desktop tab or two, the phone), and each fetched its own build of the whole
+   * thing: several a second while sessions were busy. A build is now kept until the next change, and
+   * a second at most, and only `local` is said per request.
+   */
+  let built: { at: number; value: StateSnapshot } | null = null;
+  s.bus.on('changed', (scopes) => {
+    if (scopes.includes('state')) built = null;
+  });
   const state = (req: IncomingMessage): StateSnapshot => {
+    if (!built || Date.now() - built.at > 1000) built = { at: Date.now(), value: buildState() };
+    const v = built.value;
+    return { ...v, daemon: { ...v.daemon, local: s.auth.isLocal(req) } };
+  };
+  const buildState = (): StateSnapshot => {
     const subscriptions = s.subs.list();
     const totals: Totals = {
       capacity: 0,
@@ -229,7 +244,7 @@ export function createServer(s: Services): http.Server {
         sourceChangedAt: sourceChanged ? new Date(sourceChanged).toISOString() : null,
         staleCode: sourceChanged > Date.parse(STARTED_AT),
         supervised: isSupervised(),
-        local: s.auth.isLocal(req),
+        local: false,
       },
       subscriptions,
       repos: s.coord.listRepos(),

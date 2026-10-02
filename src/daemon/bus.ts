@@ -8,11 +8,13 @@ const log = logger('toast');
  * UI change feed. Producers call `invalidate('state')` / `invalidate('repo:<id>')`; bursts are
  * coalesced so a flurry of hook calls results in one refetch per scope.
  */
-export class Bus extends EventEmitter<{ ui: [UiFrame] }> {
+export class Bus extends EventEmitter<{ ui: [UiFrame]; changed: [string[]] }> {
   private pending = new Set<string>();
   private timer: NodeJS.Timeout | null = null;
 
   invalidate(...scopes: string[]): void {
+    // At once, for what keeps a copy of the state (see server.ts); the pages are told after the burst.
+    this.emit('changed', scopes);
     for (const s of scopes) this.pending.add(s);
     if (!this.timer) this.timer = setTimeout(() => this.flush(), 120);
   }

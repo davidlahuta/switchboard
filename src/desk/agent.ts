@@ -644,7 +644,7 @@ export class DeskAgent {
       hostname: os.hostname(),
       platform: process.platform,
       user: os.userInfo().username,
-      cores: os.cpus().length,
+      cores: os.availableParallelism(),
       memGb: Math.round(os.totalmem() / 2 ** 30),
       tools,
       runnerSourceMtime: newestRunnerSourceMtime(),
