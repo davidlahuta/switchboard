@@ -386,6 +386,12 @@ export class SubscriptionManager {
     return value;
   }
 
+  /** Usage readings older than anything reads (two weeks at most), kept a little longer than that. */
+  prune(): void {
+    const n = this.db.run('DELETE FROM usage_history WHERE ts < ?', new Date(Date.now() - 30 * 86400_000).toISOString()).changes;
+    if (n) log.info('pruned old usage readings', { count: n });
+  }
+
   history(id: string, hours: number): UsagePoint[] {
     const since = new Date(Date.now() - hours * 3600_000).toISOString();
     return this.db

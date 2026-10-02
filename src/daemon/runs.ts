@@ -2261,7 +2261,11 @@ export class RunManager {
         this.send(runId, { type: 'restore-size' });
       }
     });
-    ws.on('close', () => {
+    const opened = Date.now();
+    ws.on('close', (code, reason) => {
+      // How a web terminal's connection ended: 1001 is the page going away, 1006 a connection that
+      // died without saying (a stalled daemon, a network change); the length says whether it was a blip.
+      log.info('a web terminal disconnected', { run: runId, code, reason: reason.toString() || undefined, openS: Math.round((Date.now() - opened) / 1000) });
       detach();
       this.markViewed(runId);
       // Last browser viewer gone: give the size back to the terminal window the session lives in,

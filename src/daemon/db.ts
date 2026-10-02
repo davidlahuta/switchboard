@@ -446,6 +446,11 @@ const MIGRATIONS: string[] = [
     expires_at TEXT NOT NULL
   );
   `,
+  `
+  -- "Has anybody answered this?" is asked of every open question on every sweep. Without an index each
+  -- ask read the whole table, so the sweep grew with the square of the messages ever sent.
+  CREATE INDEX IF NOT EXISTS messages_reply_to ON messages (reply_to);
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;
@@ -457,6 +462,19 @@ export class Db {
   /** False once closed. Async work in flight during shutdown must check this before querying. */
   get open(): boolean {
     return !this.closed;
+  }
+
+  /**
+   * Keep the query planner's statistics current as tables grow and shrink, and fold the write-ahead
+   * log back into the database. Both are cheap, and both otherwise only happen when nobody is looking.
+   */
+  optimize(): void {
+    if (this.closed) return;
+    try {
+      this.raw.exec('PRAGMA optimize; PRAGMA wal_checkpoint(PASSIVE);');
+    } catch {
+      // busy: next hour
+    }
   }
 
   close(): void {
