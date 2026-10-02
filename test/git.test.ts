@@ -89,6 +89,19 @@ describe('reading where a directory sits in git from its files', () => {
     }
   });
 
+  it('follows an include to the origin, as git does', async () => {
+    const inc = path.join(base, 'extra.gitconfig');
+    fs.writeFileSync(inc, '[remote "origin"]\n\turl = https://github.com/acme/moved.git\n');
+    git(repo, 'config', 'include.path', inc);
+    try {
+      const { originOf: fresh } = await import(`../src/git.ts?include=${Date.now()}`);
+      assert.equal(await fresh(repo), git(repo, 'config', '--get', 'remote.origin.url'));
+      assert.equal(await fresh(repo), 'https://github.com/acme/moved.git');
+    } finally {
+      git(repo, 'config', '--unset', 'include.path');
+    }
+  });
+
   it('reads the origin from the config file', async () => {
     assert.equal(await originOf(repo), 'https://github.com/acme/repo.git');
     const info = await resolveRepo(linked);

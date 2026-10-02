@@ -1,7 +1,6 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import { execFileOff } from '../spawnOff.ts';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { CLI_PATH, DATA_DIR, DAEMON_URL, IS_WINDOWS, ensureDirs } from '../config.ts';
 import type { ServiceStatus } from '../shared/types.ts';
 import * as systemd from './systemd.ts';
@@ -14,7 +13,7 @@ export function lastInstallNotes(): string[] {
   return installNotes;
 }
 
-const run = promisify(execFile);
+const run = execFileOff;
 
 /**
  * What the logon task keeps running: the daemon, on the hub, or the desk agent, on a satellite. A

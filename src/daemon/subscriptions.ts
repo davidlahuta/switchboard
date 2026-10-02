@@ -1,9 +1,8 @@
-import { execFile } from 'node:child_process';
+import { execFileOff } from '../spawnOff.ts';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, IS_WINDOWS, PROFILES_DIR, SPAWN_CWD, VERSION, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
 import type { BurnForecast, Subscription, SubscriptionKind, SubscriptionStatus, Usage, UsagePoint } from '../shared/types.ts';
@@ -17,7 +16,6 @@ import type { Launcher } from './launcher.ts';
 import { getSettings } from './settings.ts';
 
 const log = logger('subscriptions');
-const execFileP = promisify(execFile);
 
 /** Folders shared with ~/.claude through junctions so sessions can resume across subscriptions. */
 export const SHARED_DIRS = ['projects', 'file-history', 'todos', 'plans', 'plugins', 'skills', 'agents', 'commands', 'output-styles'];
@@ -1031,7 +1029,7 @@ export class SubscriptionManager {
       if (r.kind === 'default') delete env.CLAUDE_CONFIG_DIR;
       else env.CLAUDE_CONFIG_DIR = r.config_dir;
       const cmd = claudeCommand(claude, ['doctor']);
-      await execFileP(cmd.file, cmd.args, { cwd: SPAWN_CWD, env, timeout: 60_000, windowsHide: true });
+      await execFileOff(cmd.file, cmd.args, { cwd: SPAWN_CWD, env, timeout: 60_000, windowsHide: true });
     } catch (err) {
       log.debug('token renewal failed', err instanceof Error ? err.message : err);
     }

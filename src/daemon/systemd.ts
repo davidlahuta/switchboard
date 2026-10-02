@@ -1,12 +1,11 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import { execFileOff } from '../spawnOff.ts';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { CLI_PATH, DATA_DIR, ensureDirs } from '../config.ts';
 import type { ServiceStatus } from '../shared/types.ts';
 
-const run = promisify(execFile);
+const run = execFileOff;
 
 /*
  * Always on, on Linux: a systemd user unit, started at boot.

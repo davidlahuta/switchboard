@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFileOff } from '../spawnOff.ts';
 import os from 'node:os';
 import { IS_WINDOWS } from '../config.ts';
 import { logger } from '../log.ts';
@@ -61,11 +61,12 @@ export function ensureNormalPriority(): void {
   } catch (err) {
     log.warn('could not set a normal CPU priority', err instanceof Error ? err.message : err);
   }
-  execFile(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', RAISE_SCRIPT(process.pid)],
-    { windowsHide: true, timeout: 180_000 },
-    (err, stdout) => {
+  void execFileOff('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', RAISE_SCRIPT(process.pid)], { windowsHide: true, timeout: 180_000 })
+    .then(
+      (r) => ({ err: null as Error | null, stdout: r.stdout }),
+      (err: Error & { stdout?: string }) => ({ err, stdout: err.stdout ?? '' }),
+    )
+    .then(({ err, stdout }) => {
       const said = (stdout ?? '').trim().split(/\r?\n/).pop() ?? '';
       if (err || !said.includes('->')) {
         log.warn('could not set normal memory and I/O priority', err instanceof Error ? err.message.split('\n')[0] : said);
@@ -74,6 +75,5 @@ export function ensureNormalPriority(): void {
       const [before, after] = said.split('->').map((x) => x.trim());
       if (before !== after) log.info('raised to normal memory and I/O priority', { memoryIo: said, note: 'the process that started the daemon was running at low priority' });
       else log.debug('memory and I/O priority already normal', { memoryIo: after });
-    },
-  );
+    });
 }

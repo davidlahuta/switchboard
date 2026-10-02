@@ -1,11 +1,10 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execFileOff } from '../spawnOff.ts';
 import { SPAWN_CWD, withoutParentSession } from '../config.ts';
 import { findClaude } from '../daemon/claude.ts';
 import type { DeskTools } from '../shared/desk.ts';
 import { logger } from '../log.ts';
 
-const run = promisify(execFile);
+const run = execFileOff;
 const log = logger('tools');
 
 /**

@@ -1,14 +1,13 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import { execFileOff } from '../spawnOff.ts';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, SPAWN_CWD, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
 import type { IntegrationStatus } from '../shared/types.ts';
 import { claudeCommand, findClaude, HOOK_EVENTS, type HookEvent, hooksConfig, isSwitchboardHookUrl, mcpServerEntry, readJson, writeJson } from './claude.ts';
 
 const log = logger('integration');
-const run = promisify(execFile);
+const run = execFileOff;
 const SETTINGS = path.join(HOME_CLAUDE_DIR, 'settings.json');
 
 type HookEntry = { matcher?: string; hooks?: Array<{ url?: unknown }> };
