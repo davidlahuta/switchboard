@@ -1,11 +1,9 @@
-import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { IS_WINDOWS } from './config.ts';
-
-const run = promisify(execFile);
+import { execFileOff as run } from './spawnOff.ts';
 
 export interface RepoInfo {
   /** Main worktree directory: the group key shared by all linked worktrees. */
@@ -39,14 +37,13 @@ const inflight = new Map<string, Promise<RepoInfo>>();
  * is how a worktree ends up filed as a repository of its own.
  */
 async function git(dir: string, args: string[]): Promise<{ out: string } | { failed: boolean }> {
-  // One at a time: on Windows starting a process holds the event loop for the whole CreateProcess,
-  // and a burst of them back to back was a burst of the daemon not answering anything.
+  // One at a time, so a burst of lookups does not become a burst of git processes.
   const turn = gitQueue.then(() => undefined);
   let done!: () => void;
   gitQueue = new Promise<void>((r) => (done = r));
   await turn;
   try {
-    const { stdout } = await run('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    const { stdout } = await run('git', ['-C', dir, ...args], { timeout: 5000, windowsHide: true });
     return { out: stdout.trim() };
   } catch (err) {
     const code = (err as { code?: unknown }).code;
@@ -119,22 +116,40 @@ export async function repoFromFiles(dir: string): Promise<RepoInfo | null | unde
 async function originFromFiles(root: string): Promise<string | null | undefined> {
   const dotgit = path.join(root, '.git');
   const st = await fs.stat(dotgit).catch(() => null);
-  const configDir = st?.isDirectory() ? dotgit : st ? undefined : root; // a bare-style common dir is its own config's home
+  const configDir = st?.isDirectory() ? dotgit : st ? undefined : root; // a submodule's common dir holds its own config
   if (!configDir) return undefined;
-  const text = await readText(path.join(configDir, 'config'));
-  if (text === null) return undefined;
-  if (/^\s*\[include/im.test(text)) return undefined; // git follows includes; this does not
-  let inOrigin = false;
+  return originInConfig(path.join(configDir, 'config'), 0);
+}
+
+/**
+ * The last remote.origin.url in a config file and the files it includes, as git reads it. A
+ * conditional include (includeIf) depends on more than the file, so that is left to git.
+ */
+async function originInConfig(file: string, depth: number): Promise<string | null | undefined> {
+  if (depth > 5) return undefined;
+  const text = await readText(file);
+  if (text === null) return depth === 0 ? undefined : null; // git skips an include that is not there
+  let url: string | null = null;
+  let section = '';
   for (const line of text.split(/\r?\n/)) {
-    const section = line.match(/^\s*\[([^\]]+)\]/);
-    if (section) {
-      inOrigin = /^remote\s+"origin"$/i.test(section[1].trim());
+    const head = line.match(/^\s*\[([^\]]+)\]/);
+    if (head) {
+      section = head[1].trim();
+      if (/^includeIf\b/i.test(section)) return undefined;
       continue;
     }
-    const kv = inOrigin && line.match(/^\s*url\s*=\s*(.*?)\s*$/i);
-    if (kv) return kv[1].replace(/^"(.*)"$/, '$1') || null;
+    const kv = line.match(/^\s*([A-Za-z][\w-]*)\s*=\s*(.*?)\s*$/);
+    if (!kv) continue;
+    const value = kv[2].replace(/^"(.*)"$/, '$1');
+    if (/^remote\s+"origin"$/i.test(section) && kv[1].toLowerCase() === 'url') url = value || null;
+    else if (section.toLowerCase() === 'include' && kv[1].toLowerCase() === 'path') {
+      const target = value.startsWith('~/') ? path.join(os.homedir(), value.slice(2)) : path.resolve(path.dirname(file), value);
+      const inner = await originInConfig(target, depth + 1);
+      if (inner === undefined) return undefined;
+      if (inner !== null) url = inner;
+    }
   }
-  return null;
+  return url;
 }
 
 export function pathKey(p: string): string {
@@ -146,10 +161,9 @@ export function pathKey(p: string): string {
  * Where `dir` sits in git: its main worktree (the group key every linked worktree shares), the
  * worktree containing it, and the branch.
  *
- * Asynchronous on purpose. This shells out, and git can take seconds on a repo whose object store
- * is being repacked or whose disk is saturated — done synchronously that would block the daemon's
- * event loop, so one busy repository would stall every session's hooks, the web UI and the sockets
- * together. Answered from a short-lived cache the rest of the time.
+ * Asynchronous on purpose, and read from the files git keeps (repoFromFiles) rather than asked of
+ * git wherever it can be: starting a process holds the daemon's event loop on Windows, and this is
+ * asked for every directory a session touches. Answered from a short-lived cache the rest of the time.
  */
 export async function resolveRepo(dir: string): Promise<RepoInfo> {
   const key = pathKey(dir);

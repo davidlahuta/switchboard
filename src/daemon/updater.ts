@@ -1,6 +1,5 @@
-import { execFile } from 'node:child_process';
 import path from 'node:path';
-import { promisify } from 'node:util';
+import { execFileOff } from '../spawnOff.ts';
 import { HOME_CLAUDE_DIR, SPAWN_CWD, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
 import type { UpdateStatus } from '../shared/types.ts';
@@ -14,7 +13,7 @@ import { LOCAL_DESK } from '../shared/desk.ts';
 import { getSettings } from './settings.ts';
 
 const log = logger('updater');
-const run = promisify(execFile);
+const run = execFileOff;
 
 const TICK_MS = 5 * 60_000;
 const UPDATE_TIMEOUT_MS = 10 * 60_000;

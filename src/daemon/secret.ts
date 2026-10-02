@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFileOff } from '../spawnOff.ts';
 import { IS_WINDOWS } from '../config.ts';
 import { logger } from '../log.ts';
 
@@ -23,22 +23,18 @@ const SCRIPT_UNPROTECT =
   "Add-Type -AssemblyName System.Security; $t=[Console]::In.ReadToEnd().Trim(); $b=[Convert]::FromBase64String($t); [Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($b,$null,'CurrentUser'))";
 
 function powershell(script: string, input: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const child = execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
-      { windowsHide: true, timeout: 20_000, maxBuffer: 8 * 1024 * 1024 },
-      (err, stdout) => {
-        if (err) {
-          log.warn('DPAPI call failed', err.message);
-          resolve(null);
-          return;
-        }
-        resolve(stdout.replace(/\r?\n$/, ''));
-      },
-    );
-    child.stdin?.end(input);
-  });
+  return execFileOff('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    windowsHide: true,
+    timeout: 20_000,
+    maxBuffer: 8 * 1024 * 1024,
+    input,
+  }).then(
+    ({ stdout }) => stdout.replace(/\r?\n$/, ''),
+    (err: Error) => {
+      log.warn('DPAPI call failed', err.message);
+      return null;
+    },
+  );
 }
 
 /** Seal a secret to this Windows user, or null when that is not possible here. */

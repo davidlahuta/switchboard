@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
+import { execFileOff } from '../spawnOff.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -394,7 +394,7 @@ export class DeskManager {
       return fixed;
     }
     const out = await new Promise<string | null>((resolve) =>
-      execFile('tailscale', ['serve', 'status', '--json'], { timeout: 10_000, windowsHide: true }, (err, stdout) => resolve(err ? null : stdout)),
+      execFileOff('tailscale', ['serve', 'status', '--json'], { timeout: 10_000, windowsHide: true }).then((r) => resolve(r.stdout), () => resolve(null)),
     );
     try {
       const web = (JSON.parse(out ?? '{}') as { Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }> }).Web ?? {};

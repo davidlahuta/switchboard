@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnOff } from '../spawnOff.ts';
 import { IS_WINDOWS } from '../config.ts';
 import { logger } from '../log.ts';
 
@@ -197,24 +197,23 @@ export function keepFocus(action: () => void, what: string): void {
     act();
   }, READY_WAIT_MS);
   let out = '';
-  const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', WATCH_SCRIPT], {
+  const ps = spawnOff('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', WATCH_SCRIPT], {
     windowsHide: true,
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stream: true,
   });
-  ps.stdout.setEncoding('utf8');
-  ps.stdout.on('data', (chunk: string) => {
+  ps.on('stdout', (chunk: string) => {
     out += chunk;
     if (!acted && out.includes('ready')) {
       clearTimeout(timer);
       act();
     }
   });
-  ps.on('error', (err) => {
+  ps.on('error', (err: Error) => {
     clearTimeout(timer);
     log.warn('could not start the focus watcher', { what, error: err.message });
     act();
   });
-  ps.on('close', () => {
+  ps.on('exit', () => {
     clearTimeout(timer);
     act();
     const said = out.trim().split(/\r?\n/).pop() ?? '';
@@ -300,14 +299,13 @@ public static class SwitchboardWindows {
 export function repairTerminalWindows(): void {
   if (!IS_WINDOWS) return;
   let out = '';
-  const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', REPAIR_SCRIPT], {
+  const ps = spawnOff('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', REPAIR_SCRIPT], {
     windowsHide: true,
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stream: true,
   });
-  ps.stdout.setEncoding('utf8');
-  ps.stdout.on('data', (chunk: string) => (out += chunk));
-  ps.on('error', (err) => log.warn('could not check the terminal windows', { error: err.message }));
-  ps.on('close', () => {
+  ps.on('stdout', (chunk: string) => (out += chunk));
+  ps.on('error', (err: Error) => log.warn('could not check the terminal windows', { error: err.message }));
+  ps.on('exit', () => {
     const said = out.trim().split(/\r?\n/).pop() ?? '';
     if (said.startsWith('repaired')) log.warn('brought a Windows Terminal window back from off screen', { windows: said.slice('repaired '.length) });
   });

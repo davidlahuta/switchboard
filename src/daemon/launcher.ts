@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnOff as spawn } from '../spawnOff.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CLI_PATH, IS_WINDOWS } from '../config.ts';
@@ -130,17 +130,16 @@ export class Launcher {
       const wt = this.wtPath;
       // Windows Terminal brings its window to the front for every new tab; see keepFocus.
       keepFocus(() => {
-        const child = spawn(wt, args, { detached: true, stdio: 'ignore' });
+        const child = spawn(wt, args, { detached: true, ignoreOutput: true });
         /*
          * wt exiting 0 says only that the request was delivered, never that a process started in
          * the tab — that is what RunManager.openTerminalFor waits for. A non-zero exit or a spawn
          * error is the one failure visible from here, so it is at least said out loud.
          */
         child.on('error', (err) => log.error('could not run Windows Terminal', { title: spec.title, error: err.message }));
-        child.on('exit', (code) => {
+        child.on('exit', (code: number | null) => {
           if (code) log.warn('Windows Terminal refused a tab', { title: spec.title, code });
         });
-        child.unref();
       }, `opening ${spec.title}`);
       return;
     }
@@ -148,7 +147,7 @@ export class Launcher {
       const quote = (s: string): string => `"${s}"`;
       log.info('opening a console window', { title: spec.title, cwd, why: spec.withoutWindowsTerminal ? 'Windows Terminal is not starting processes' : 'Windows Terminal is not installed' });
       const cmdline = ['start', quote(spec.title), '/D', quote(cwd), quote(node), quote(CLI_PATH), ...spec.args.map(quote)].join(' ');
-      spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', cmdline], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
+      spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', cmdline], { detached: true, ignoreOutput: true, windowsVerbatimArguments: true });
       return;
     }
     if (process.platform === 'darwin') {
@@ -156,8 +155,8 @@ export class Launcher {
       const command = `cd ${sh(cwd)} && ${[node, CLI_PATH, ...spec.args].map(sh).join(' ')}`;
       spawn('osascript', ['-e', `tell application "Terminal" to do script ${JSON.stringify(command)}`, '-e', 'tell application "Terminal" to activate'], {
         detached: true,
-        stdio: 'ignore',
-      }).unref();
+        ignoreOutput: true,
+      });
       return;
     }
     if (process.platform === 'linux') {
@@ -172,9 +171,8 @@ export class Launcher {
     if (choice.kind === 'gui') {
       const term = LINUX_TERMINALS.find((t) => t.bin === choice.bin)!;
       log.info('opening a terminal window', { title: spec.title, cwd, terminal: term.bin });
-      const child = spawn(term.bin, term.argv(spec.title, cwd, cmd), { cwd, detached: true, stdio: 'ignore' });
-      child.on('error', (err) => log.error('could not open a terminal', { terminal: term.bin, error: err.message }));
-      child.unref();
+      const child = spawn(term.bin, term.argv(spec.title, cwd, cmd), { cwd, detached: true, ignoreOutput: true });
+      child.on('error', (err: Error) => log.error('could not open a terminal', { terminal: term.bin, error: err.message }));
       return;
     }
     if (choice.kind === 'tmux') {
@@ -186,12 +184,11 @@ export class Launcher {
       const at = spec.args.indexOf('--run-id');
       const name = `sb-${at >= 0 ? spec.args[at + 1] : 'run'}-${Date.now().toString(36)}`;
       log.info('opening a detached tmux session', { title: spec.title, cwd, session: name });
-      const child = spawn('tmux', ['new-session', '-d', '-s', name, '-n', spec.title.slice(0, 40), '-x', '200', '-y', '50', '-c', cwd, ...cmd], { cwd, detached: true, stdio: 'ignore' });
-      child.on('error', (err) => log.error('could not start tmux', { error: err.message }));
-      child.on('exit', (code) => {
+      const child = spawn('tmux', ['new-session', '-d', '-s', name, '-n', spec.title.slice(0, 40), '-x', '200', '-y', '50', '-c', cwd, ...cmd], { cwd, detached: true, ignoreOutput: true });
+      child.on('error', (err: Error) => log.error('could not start tmux', { error: err.message }));
+      child.on('exit', (code: number | null) => {
         if (code) log.warn('tmux refused a session', { session: name, code });
       });
-      child.unref();
       return;
     }
     throw new Error('No terminal to open a session in: install tmux, or run the desk agent inside a graphical session with a terminal such as alacritty, ghostty, kitty or foot.');
