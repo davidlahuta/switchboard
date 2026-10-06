@@ -250,6 +250,14 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
 
         <div className="setting">
           <div className="setting-text">
+            <div className="setting-name">You should know</div>
+            <div className="setting-desc">New sessions start with Claude Code's built-in You should know plugin: a side agent that watches longer tasks and surfaces what is worth knowing above the prompt.</div>
+          </div>
+          <Toggle checked={draft.defaultYouShouldKnow} onChange={(v) => set('defaultYouShouldKnow', v)} label="Enable You should know by default" />
+        </div>
+
+        <div className="setting">
+          <div className="setting-text">
             <div className="setting-name">Open sessions in the terminal window I am using</div>
             <div className="setting-desc">
               A new session joins the Windows Terminal window you were last in, as another tab. Turn this off to keep

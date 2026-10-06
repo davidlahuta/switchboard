@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { youShouldKnowStatus } from './plugins.ts';
 import { stallReport } from './stalls.ts';
 import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
@@ -255,6 +256,7 @@ export function createServer(s: Services): http.Server {
       update: s.updater.status(),
       models: s.models.list(),
       desks: s.desks.list(),
+      youShouldKnowAvailable: youShouldKnowStatus().available,
     };
   };
 
@@ -396,6 +398,7 @@ export function createServer(s: Services): http.Server {
       autoCompactTokens: typeof body.autoCompactTokens === 'number' ? body.autoCompactTokens : undefined,
       skipPermissions: typeof body.skipPermissions === 'boolean' ? body.skipPermissions : undefined,
       diffPanel: typeof body.diffPanel === 'boolean' ? body.diffPanel : undefined,
+      youShouldKnow: typeof body.youShouldKnow === 'boolean' ? body.youShouldKnow : undefined,
       continueOnResume: typeof body.continueOnResume === 'boolean' ? body.continueOnResume : undefined,
       desk: typeof body.desk === 'string' && body.desk ? body.desk : undefined,
       cwdDesk: typeof body.cwdDesk === 'string' && body.cwdDesk ? body.cwdDesk : undefined,

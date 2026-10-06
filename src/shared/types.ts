@@ -348,6 +348,8 @@ export interface Run {
   skipPermissions: boolean;
   /** Claude Code's /diff panel opens beside the conversation, resolved against the global default */
   diffPanel: boolean;
+  /** started with the You should know plugin enabled, resolved against the global default */
+  youShouldKnow: boolean;
   /** told to carry on when it comes back, resolved against the global setting */
   continueOnResume: boolean;
   /** a swap now moves it without restarting it, so it is taken at once, mid-turn or not */
@@ -442,6 +444,8 @@ export interface Settings {
   defaultSkipPermissions: boolean;
   /** Pre-tick "open the diff panel" in the new-session dialog */
   defaultDiffPanel: boolean;
+  /** Pre-tick "You should know" (Claude Code's built-in side-agent plugin) in the new-session dialog */
+  defaultYouShouldKnow: boolean;
   /**
    * Move a session to another subscription without restarting it, by changing the login it reads.
    * Needs the session to have been started with its own copy of its login, which every session is
@@ -603,6 +607,8 @@ export interface StateSnapshot {
   models: Model[];
   /** the hub and its satellites */
   desks: Desk[];
+  /** whether this claude has the You should know plugin; null until checked */
+  youShouldKnowAvailable?: boolean | null;
 }
 
 /**
@@ -665,6 +671,8 @@ export interface CreateRunRequest {
   skipPermissions?: boolean;
   /** open Claude Code's diff panel beside the conversation; omit to follow the global default */
   diffPanel?: boolean;
+  /** enable Claude Code's You should know plugin; omit to follow the global default */
+  youShouldKnow?: boolean;
   /** type the continue message when this session comes back; omit to follow the global setting */
   continueOnResume?: boolean;
 }

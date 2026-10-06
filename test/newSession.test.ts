@@ -49,6 +49,7 @@ const CHANGES: Record<(typeof NEW_SESSION_FIELDS)[number], { form: Partial<NewSe
   autoCompactTokens: { form: { autoCompactTokens: 300_000 }, tool: { autoCompactTokens: 300_000 } },
   skipPermissions: { form: { skipPermissions: !DEFAULT_SETTINGS.defaultSkipPermissions }, tool: { skipPermissions: !DEFAULT_SETTINGS.defaultSkipPermissions } },
   diffPanel: { form: { diffPanel: !DEFAULT_SETTINGS.defaultDiffPanel }, tool: { diffPanel: !DEFAULT_SETTINGS.defaultDiffPanel } },
+  youShouldKnow: { form: { youShouldKnow: !DEFAULT_SETTINGS.defaultYouShouldKnow }, tool: { youShouldKnow: !DEFAULT_SETTINGS.defaultYouShouldKnow } },
   autoSwap: { form: { autoSwap: !DEFAULT_SETTINGS.autoSwap }, tool: { autoSwap: !DEFAULT_SETTINGS.autoSwap } },
   continueOnResume: { form: { continueOnResume: !DEFAULT_SETTINGS.continueOnResume }, tool: { continueOnResume: !DEFAULT_SETTINGS.continueOnResume } },
   args: { form: { args: ['--verbose'] }, tool: { args: ['--verbose'] } },

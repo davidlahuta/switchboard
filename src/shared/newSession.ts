@@ -28,6 +28,8 @@ export interface NewSessionForm {
   autoCompactTokens: number;
   skipPermissions: boolean;
   diffPanel: boolean;
+  /** Claude Code's built-in You should know plugin. */
+  youShouldKnow: boolean;
   autoSwap: boolean;
   continueOnResume: boolean;
   /** Extra claude arguments for this session only. */
@@ -47,6 +49,7 @@ export const NEW_SESSION_FIELDS = [
   'autoCompactTokens',
   'skipPermissions',
   'diffPanel',
+  'youShouldKnow',
   'autoSwap',
   'continueOnResume',
   'args',
@@ -66,6 +69,7 @@ export function newSessionDefaults(settings: Settings, cwd: string): NewSessionF
     autoCompactTokens: settings.defaultAutoCompactTokens,
     skipPermissions: settings.defaultSkipPermissions,
     diffPanel: settings.defaultDiffPanel,
+    youShouldKnow: settings.defaultYouShouldKnow,
     autoSwap: settings.autoSwap,
     continueOnResume: settings.continueOnResume,
     args: [],
@@ -89,6 +93,7 @@ export function newSessionRequest(form: NewSessionForm): CreateRunRequest {
     autoCompactTokens: clampCompactTokens(form.autoCompactTokens),
     skipPermissions: form.skipPermissions,
     diffPanel: form.diffPanel,
+    youShouldKnow: form.youShouldKnow,
     continueOnResume: form.continueOnResume,
     ...(form.name.trim() ? { name: form.name.trim() } : {}),
     ...(form.worktree.trim() && !resume ? { worktree: form.worktree.trim() } : {}),
@@ -119,6 +124,7 @@ export const NEW_SESSION_TOOL_PROPERTIES: Record<(typeof NEW_SESSION_FIELDS)[num
   autoCompactTokens: { type: 'integer', description: `Context tokens at which to auto-compact (${COMPACT_MIN}-${COMPACT_MAX}). Default from Switchboard settings.` },
   skipPermissions: { type: 'boolean', description: 'Run tools without approval prompts. Default from Switchboard settings.' },
   diffPanel: { type: 'boolean', description: "Open Claude Code's /diff panel beside the conversation. Default from Switchboard settings." },
+  youShouldKnow: { type: 'boolean', description: "Enable Claude Code's You should know plugin (a side agent that surfaces what is worth knowing). Default from Switchboard settings." },
   autoSwap: { type: 'boolean', description: 'Move to another subscription when this one hits a limit. Default from Switchboard settings.' },
   continueOnResume: { type: 'boolean', description: 'Tell the session to carry on whenever it comes back after a restart or swap. Default from Switchboard settings.' },
   args: { type: 'array', items: { type: 'string' }, description: 'Extra claude arguments for this session only.' },

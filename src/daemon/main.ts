@@ -1,4 +1,5 @@
 import type { Server } from 'node:http';
+import { ensureYouShouldKnow } from './plugins.ts';
 import { startStallWatch } from './stalls.ts';
 import { BIND_HOSTS, DATA_DIR, HOME_CLAUDE_DIR, PORT, VERSION, ensureDirs } from '../config.ts';
 import { logger } from '../log.ts';
@@ -177,6 +178,7 @@ export async function startDaemon(): Promise<void> {
       await coord.backfillRemotes().catch((err) => log.warn('could not read the remotes of existing boards', err instanceof Error ? err.message : err));
       await desks.scanLocal().catch(() => undefined);
       refreshTools();
+      await ensureYouShouldKnow().catch(() => undefined);
     })();
   }, 60_000).unref?.();
   // What this desk has and can do changes rarely; looked at again every ten minutes.

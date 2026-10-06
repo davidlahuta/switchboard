@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { ensureYouShouldKnow } from './plugins.ts';
 import { execFileOff } from '../spawnOff.ts';
 import { HOME_CLAUDE_DIR, SPAWN_CWD, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
@@ -181,6 +182,8 @@ export class Updater {
     if (changed) {
       this.lastUpdate = { from: before, to: after, at: this.lastCheckAt };
       log.info('claude updated', { from: before, to: after });
+      // A new claude may ship (or drop) the built-in plugins sessions are started with.
+      void ensureYouShouldKnow().catch(() => undefined);
       this.bus.toast('info', `Claude Code updated: ${before} → ${after}`);
       if (getSettings(this.db).restartAfterUpdate) {
         const n = this.runs.restartAll(`claude ${after}`, { trigger: 'update', deskId: LOCAL_DESK });

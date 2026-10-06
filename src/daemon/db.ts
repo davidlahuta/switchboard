@@ -457,6 +457,10 @@ const MIGRATIONS: string[] = [
   -- unread messages to the operator are a handful, and this index holds only those.
   CREATE INDEX IF NOT EXISTS messages_unread_human ON messages (repo_id) WHERE to_id = 'human' AND human_read_at IS NULL;
   `,
+  `
+  -- Whether a session starts with Claude Code's You should know plugin; NULL follows the setting.
+  ALTER TABLE runs ADD COLUMN you_should_know INTEGER;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

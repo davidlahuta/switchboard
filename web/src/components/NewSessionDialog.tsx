@@ -50,6 +50,7 @@ export function NewSessionDialog({
   const [continueOnResume, setContinueOnResume] = useState(initial.continueOnResume);
   const [skipPermissions, setSkipPermissions] = useState(initial.skipPermissions);
   const [diffPanel, setDiffPanel] = useState(initial.diffPanel);
+  const [youShouldKnow, setYouShouldKnow] = useState(initial.youShouldKnow);
   const [argsText, setArgsText] = useState(initial.args.join(' '));
   const [recent, setRecent] = useState<RecentSession[] | null>(null);
   const [discovered, setDiscovered] = useState<DiscoveredRepo[] | null>(null);
@@ -74,6 +75,7 @@ export function NewSessionDialog({
     setCompactTokens(d.autoCompactTokens);
     setSkipPermissions(d.skipPermissions);
     setDiffPanel(d.diffPanel);
+    setYouShouldKnow(d.youShouldKnow);
     setContinueOnResume(d.continueOnResume);
     setArgsText(d.args.join(' '));
     setError(null);
@@ -158,6 +160,7 @@ export function NewSessionDialog({
       autoCompactTokens: compactTokens,
       skipPermissions,
       diffPanel,
+      youShouldKnow,
       autoSwap,
       continueOnResume,
       args: parsed.args,
@@ -379,6 +382,14 @@ export function NewSessionDialog({
             <span>
               Open the diff panel
               <span className="field-hint">Show Claude Code's /diff panel beside the conversation. You can still toggle it with /diff.</span>
+            </span>
+          </label>
+
+          <label className="check">
+            <input type="checkbox" checked={youShouldKnow} onChange={(e) => setYouShouldKnow(e.target.checked)} />
+            <span>
+              You should know
+              <span className="field-hint">Claude Code's side agent: watches longer tasks and surfaces what is worth knowing above the prompt.</span>
             </span>
           </label>
 

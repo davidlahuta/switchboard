@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import { youShouldKnowStatus } from './plugins.ts';
+import { YOU_SHOULD_KNOW_PLUGIN } from '../shared/plugins.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { WebSocket } from 'ws';
@@ -82,6 +84,7 @@ interface RunRow {
   auto_compact: number | null;
   auto_compact_tokens: number | null;
   skip_permissions: number | null;
+  you_should_know: number | null;
   diff_panel: number | null;
   creds_sub: string | null;
   host_sub: string | null;
@@ -1189,6 +1192,7 @@ export class RunManager {
       autoCompactTokens: r.auto_compact_tokens ?? getSettings(this.db).defaultAutoCompactTokens,
       skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
       diffPanel: r.diff_panel === null ? getSettings(this.db).defaultDiffPanel : bool(r.diff_panel),
+      youShouldKnow: r.you_should_know === null ? getSettings(this.db).defaultYouShouldKnow : bool(r.you_should_know),
       continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
       swapsInPlace: this.swapsInPlace(r),
       work,
@@ -1650,6 +1654,7 @@ export class RunManager {
     autoCompactTokens?: number;
     skipPermissions?: boolean;
     diffPanel?: boolean;
+    youShouldKnow?: boolean;
     continueOnResume?: boolean;
     /** the desk the session runs on, whose path `cwd` is; omitted for the hub's own */
     deskId?: string | null;
@@ -1701,8 +1706,8 @@ export class RunManager {
       );
     }
     this.db.run(
-      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, diff_panel, continue_on_resume, last_viewed_at, created_at, desk_id)
-       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, diff_panel, continue_on_resume, last_viewed_at, created_at, desk_id, you_should_know)
+       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       name.slice(0, 80),
       cwd,
@@ -1722,6 +1727,7 @@ export class RunManager {
       now(),
       now(),
       desk,
+      spec.youShouldKnow === undefined ? null : spec.youShouldKnow ? 1 : 0,
     );
     this.subs.syncProfile(subscriptionId);
     this.bus.invalidate('state');
@@ -1913,6 +1919,12 @@ export class RunManager {
       wheelScrollAccelerationEnabled: false,
       // Full-screen renderer, always; see CLAUDE_CODE_NO_FLICKER in the environment below.
       tui: 'fullscreen',
+      /*
+       * Claude Code's own You should know plugin, on or off as the session was started. Said either
+       * way, so a session started without it does not get it from the user's settings. Left out only
+       * when this claude does not have the plugin at all (see plugins.ts), which it would warn about.
+       */
+      ...(youShouldKnowStatus().available === false ? {} : { enabledPlugins: { [YOU_SHOULD_KNOW_PLUGIN]: this.dto(r).youShouldKnow } }),
     };
     if (!hooksInstalledIn(path.join(sub.config_dir, 'settings.json'))) runSettings.hooks = hooksConfig();
     const settingsFile = writeRuntimeJson(`settings-${r.id}.json`, runSettings);
