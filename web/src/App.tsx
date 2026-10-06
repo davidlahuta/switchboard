@@ -3,6 +3,7 @@ import type { AuthStatus } from '@shared/types.ts';
 import { request, UNAUTHORIZED_EVENT } from './lib/api.ts';
 import { useRoute, type Route } from './lib/router.ts';
 import { pageTitle } from './lib/title.ts';
+import { useAppBadge } from './lib/appBadge.ts';
 import { StoreProvider, useStore } from './lib/store.tsx';
 import { Layout } from './components/Layout.tsx';
 import { Toasts } from './components/Toasts.tsx';
@@ -83,6 +84,7 @@ export function App() {
 
 function Routed({ route, auth }: { route: Route; auth: AuthStatus }) {
   const { state, loadError, refresh } = useStore();
+  useAppBadge(state?.runs);
   const repos = state?.repos;
   const title = pageTitle(route, (id) => repos?.find((r) => r.id === id)?.name);
   // After a terminal page's own cleanup has put the tab back, since React runs unmounts first.

@@ -1,6 +1,7 @@
 /*
- * Switchboard's service worker. It does two things only: shows the notifications the daemon pushes,
- * and opens the session one points at when it is tapped. No fetch handler, deliberately: the app
+ * Switchboard's service worker. It shows the notifications the daemon pushes, puts the count of
+ * sessions waiting on you on the app's icon, and opens the session a notification points at when it
+ * is tapped. No fetch handler, deliberately: the app
  * is always loaded fresh from the desk, so nothing here can serve a stale build.
  */
 self.addEventListener('install', () => self.skipWaiting());
@@ -14,8 +15,13 @@ self.addEventListener('push', (event) => {
     data = { body: event.data ? event.data.text() : '' };
   }
   const title = data.title || 'Switchboard';
+  // The app may be closed: the icon's number is set from here then. Nothing to set it on, nothing set.
+  const badge =
+    typeof data.badge === 'number' && self.navigator.setAppBadge
+      ? (data.badge > 0 ? self.navigator.setAppBadge(data.badge) : self.navigator.clearAppBadge()).catch(() => undefined)
+      : Promise.resolve();
   event.waitUntil(
-    self.registration.showNotification(title, {
+    Promise.all([badge, self.registration.showNotification(title, {
       body: data.body || '',
       tag: data.tag || undefined,
       // A session asking again after being answered is news, even under the same tag.
@@ -23,7 +29,7 @@ self.addEventListener('push', (event) => {
       icon: '/icon-192.png',
       badge: '/icon-192.png',
       data: { url: data.url || '/' },
-    }),
+    })]),
   );
 });
 

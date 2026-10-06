@@ -161,3 +161,26 @@ describe('where the operator is working', () => {
     assert.equal(sent.length, 0);
   });
 });
+
+describe('the number on the app icon', () => {
+  it('counts sessions waiting on you: a question, a message to you, a finished turn nobody has read', async () => {
+    const { appBadgeCount } = await import('../src/shared/badge.ts');
+    assert.equal(appBadgeCount([]), 0);
+    assert.equal(appBadgeCount([run({ attention: { waiting: true, unread: 0, unseen: false } })]), 1, 'asking');
+    assert.equal(appBadgeCount([run({ attention: { waiting: false, unread: 2, unseen: false } })]), 1, 'wrote to you');
+    assert.equal(appBadgeCount([run({ attention: { waiting: false, unread: 0, unseen: true } })]), 1, 'done, unread');
+    assert.equal(appBadgeCount([run({ attention: { waiting: false, unread: 0, unseen: false } })]), 0, 'done, already read');
+    assert.equal(appBadgeCount([run({ agentStatus: 'working', attention: { waiting: false, unread: 0, unseen: true } })]), 0, 'still working');
+    assert.equal(appBadgeCount([run({ status: 'exited', attention: { waiting: true, unread: 1, unseen: true } })]), 0, 'ended');
+    assert.equal(appBadgeCount([run({ id: 'a', attention: { waiting: true, unread: 1, unseen: true } }), run({ id: 'b', attention: { waiting: false, unread: 0, unseen: true } })]), 2, 'one each');
+  });
+
+  it('goes out with every notification, so the icon is right while the app is closed', () => {
+    const d = desk();
+    d.at({ agentStatus: 'working' });
+    d.at({ attention: { waiting: false, unread: 0, unseen: true } }, 1000);
+    d.at({ attention: { waiting: false, unread: 0, unseen: true } }, DONE_SETTLE_MS);
+    assert.equal(d.sent.length, 1);
+    assert.equal(d.sent[0]!.badge, 1);
+  });
+});

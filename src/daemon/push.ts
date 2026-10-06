@@ -40,6 +40,8 @@ export interface PushMessage {
   /** one notification per session: a newer one replaces the last */
   tag: string;
   kind: keyof PushPrefs | 'test';
+  /** the number for the app's icon; see appBadgeCount */
+  badge?: number;
 }
 
 /**
@@ -153,7 +155,7 @@ export class PushService {
       .filter((r) => (onlyEndpoint ? r.endpoint === onlyEndpoint : msg.kind === 'needsYou' ? r.needs_you === 1 : msg.kind === 'done' ? r.done === 1 : true));
     if (!rows.length) return 0;
     const { publicKey, privateKey } = this.vapid();
-    const payload = JSON.stringify({ title: msg.title, body: msg.body, url: msg.url, tag: msg.tag });
+    const payload = JSON.stringify({ title: msg.title, body: msg.body, url: msg.url, tag: msg.tag, badge: msg.badge });
     let sent = 0;
     await Promise.all(
       rows.map(async (r) => {

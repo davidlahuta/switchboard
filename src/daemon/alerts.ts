@@ -1,4 +1,4 @@
-import { atRest } from '../shared/marks.ts';
+import { appBadgeCount, isDone, needsYou } from '../shared/badge.ts';
 import type { Run } from '../shared/types.ts';
 import { logger } from '../log.ts';
 import type { PushMessage, PushService } from './push.ts';
@@ -14,20 +14,7 @@ export const DONE_SETTLE_MS = 60_000;
 /** A question has to still be on screen a moment later: a permission asked and answered at once is not one. */
 export const NEEDS_YOU_SETTLE_MS = 4000;
 
-/** Whether nothing moves in this session until the operator does something. */
-export function needsYou(run: Run): boolean {
-  if (run.status === 'exited') return false;
-  return run.attention.waiting || (!!run.stalled && !run.stalled.nextTry);
-}
-
-/**
- * Whether a session is finished for now: running, its turn over, and nothing of its own going or
- * booked — no subagent, workflow, shell, monitor, loop or schedule. A restart queued for it, or one
- * in flight, is not finished: it is about to come back.
- */
-export function isDone(run: Run): boolean {
-  return run.status === 'running' && !run.waiting && atRest(run) && !needsYou(run);
-}
+export { isDone, needsYou };
 
 /** A page not heard from in this long is closed, asleep, or on a device that went away. */
 export const PRESENCE_STALE_MS = 75_000;
@@ -157,9 +144,11 @@ export class SessionAlerts {
       log.info('not notifying', { why: quiet, held: out.map((m) => m.title) });
       return [];
     }
+    // Every notification carries the icon's count, which is how it stays right while the app is closed.
+    const badge = out.length ? appBadgeCount(this.source.runs()) : 0;
     for (const msg of out) {
-      log.info('notifying', { kind: msg.kind, title: msg.title });
-      void this.push.send(msg);
+      log.info('notifying', { kind: msg.kind, title: msg.title, badge });
+      void this.push.send({ ...msg, badge });
     }
     return out;
   }
