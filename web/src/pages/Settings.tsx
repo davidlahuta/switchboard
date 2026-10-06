@@ -258,6 +258,14 @@ function SettingsForm({ settings, update, models }: { settings: Settings; update
 
         <div className="setting">
           <div className="setting-text">
+            <div className="setting-name">Playwright</div>
+            <div className="setting-desc">New sessions get the Playwright MCP server: a browser the session can drive, with a fresh profile of its own each time.</div>
+          </div>
+          <Toggle checked={draft.defaultPlaywright} onChange={(v) => set('defaultPlaywright', v)} label="Give sessions Playwright by default" />
+        </div>
+
+        <div className="setting">
+          <div className="setting-text">
             <div className="setting-name">Open sessions in the terminal window I am using</div>
             <div className="setting-desc">
               A new session joins the Windows Terminal window you were last in, as another tab. Turn this off to keep

@@ -11,6 +11,11 @@ export interface NewSessionCaller {
   deskId?: string | null;
   /** That desk's path rules. */
   pathOf?: (deskId: string | null | undefined) => typeof path;
+  /**
+   * The accounts the calling session has, by id and email. A session it starts may only be given
+   * some of these, and gets none unless it lists them.
+   */
+  accounts?: Array<{ id: string; email: string }>;
 }
 
 export interface NewSessionDeps {
@@ -40,6 +45,15 @@ export function newSessionToolRequest(args: Record<string, unknown>, caller: New
   const deskRef = form.desk.trim().toLowerCase();
   const byName = deps.desks?.().find((d) => d.id !== form.desk && d.name.toLowerCase() === deskRef);
   if (byName) form.desk = byName.id;
+  // Only accounts the caller has, and only the ones it names.
+  if (form.accounts.length) {
+    const mine = caller.accounts ?? [];
+    form.accounts = form.accounts.map((ref) => {
+      const a = mine.find((m) => m.id === ref.trim().toLowerCase() || m.email.toLowerCase() === ref.trim().toLowerCase());
+      if (!a) throw new Error(`Your session does not have the account ${ref}, so it cannot give it to another. Accounts you have: ${mine.map((m) => `${m.id} (${m.email})`).join(', ') || 'none'}.`);
+      return a.id;
+    });
+  }
   const req = newSessionRequest(form);
   // A session an agent on a satellite starts is asked for on that satellite; placement may still move it.
   return caller.deskId ? { ...req, cwdDesk: caller.deskId } : req;

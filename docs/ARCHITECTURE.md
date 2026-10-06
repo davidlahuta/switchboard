@@ -649,6 +649,42 @@ first on PATH, which fetch a fresh token — or sign az in as a service principa
 its own — on every call, so a one-hour App token never goes stale inside a long session. On a
 satellite these ask the agent, which relays as its desk. With an empty vault none of it is applied.
 
+## Accounts (Google and Microsoft)
+
+`src/daemon/accounts.ts` (AccountStore) holds the two apps (`account_apps`) and the accounts
+(`accounts`, unique on provider + subject). Refresh tokens and the Google client secret are sealed with
+`protect`. Sign-in is the authorization-code flow with PKCE against whichever origin the hub was reached
+at (`/oauth/<provider>/callback`, a public route that only accepts a state it issued in the last ten
+minutes, once). Microsoft personal accounts sign in and refresh against `consumers`, work accounts
+against `organizations` and then their own tenant. Microsoft rotates refresh tokens, and the newest is
+always stored. `invalid_grant`, `interaction_required` and `consent_required` mark an account
+`needs-reconsent` and push a notification.
+
+A session's accounts are rows in `run_accounts`. On every spawn the hub issues the run a fresh ticket
+(`t…`, only its hash kept in `runs.account_ticket_hash`) and writes one MCP server per account into the
+run's `--mcp-config` file. Each server trades the ticket for an access token at `POST /api/cred/account`,
+which checks four things: the run is live, the request comes from the run's desk, the account is one of
+the run's, and the account is in good standing. Every mint is logged in `account_mints`. Tokens are cached
+until five minutes before they expire, and concurrent refreshes share one request.
+
+- Google: one `workspace-mcp` per machine (`src/accounts/mcpHost.ts`), stateless, in external-OAuth
+  mode on `127.0.0.1:<port+20>`. A daemon restart adopts the one already running (`mcp/google.json`), and
+  a watchdog restarts it. The session's entry is `type: http` with a `headersHelper`
+  (`cli.ts account-token`), which Claude Code reruns on each connection and on a 401.
+- Microsoft: `ms-365-mcp-server` per account per session, with `ms365-preload.mjs` loaded through
+  `--import`. The preload replaces `AuthManager.getToken` and its token cache with calls to Switchboard.
+  `--org-mode` is passed for work accounts.
+
+A satellite gets the MCP file with `{{sb:…}}` placeholders (`DESK_PATHS`). Its agent installs what is
+missing, starts its own Google server when the session has a Google account (`DeskSpawnExtras.mcp`), and
+fills in its own paths (`fillDeskPaths`). A server it could not install in time is left out, and
+Playwright falls back to `npx`. The agent relays `/api/cred/account` to the hub as the desk. An agent
+that does not announce the `mcp` feature in its hello gets sessions without these servers, rather than
+placeholders it would pass to claude unchanged.
+
+A child session started through `sb_new_session` may only be given accounts its parent has, and gets
+none unless the parent names them.
+
 ## Security
 
 * The daemon binds to `127.0.0.1` only. Remote access is meant to go through `tailscale serve`.

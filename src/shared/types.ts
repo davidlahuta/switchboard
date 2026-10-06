@@ -1,6 +1,7 @@
 // API contract shared by the daemon and the web UI. Keep this file dependency-free and
 // erasable-syntax only: the daemon runs it directly with Node's type stripping.
 
+import type { AccountsSnapshot, RunAccount } from './accounts.ts';
 import type { Desk } from './desk.ts';
 
 export type SubscriptionKind = 'default' | 'profile';
@@ -350,6 +351,10 @@ export interface Run {
   diffPanel: boolean;
   /** started with the You should know plugin enabled, resolved against the global default */
   youShouldKnow: boolean;
+  /** started with the Playwright MCP server, resolved against the global default */
+  playwright: boolean;
+  /** the Google and Microsoft accounts the session can use */
+  accounts: RunAccount[];
   /** told to carry on when it comes back, resolved against the global setting */
   continueOnResume: boolean;
   /** a swap now moves it without restarting it, so it is taken at once, mid-turn or not */
@@ -446,6 +451,8 @@ export interface Settings {
   defaultDiffPanel: boolean;
   /** Pre-tick "You should know" (Claude Code's built-in side-agent plugin) in the new-session dialog */
   defaultYouShouldKnow: boolean;
+  /** Pre-tick "Playwright" (a browser the session can drive, through the Playwright MCP server) */
+  defaultPlaywright: boolean;
   /**
    * Move a session to another subscription without restarting it, by changing the login it reads.
    * Needs the session to have been started with its own copy of its login, which every session is
@@ -609,6 +616,8 @@ export interface StateSnapshot {
   desks: Desk[];
   /** whether this claude has the You should know plugin; null until checked */
   youShouldKnowAvailable?: boolean | null;
+  /** Google and Microsoft accounts sessions can be given; a provider shows only once its app is configured */
+  accounts?: AccountsSnapshot;
 }
 
 /**
@@ -673,6 +682,10 @@ export interface CreateRunRequest {
   diffPanel?: boolean;
   /** enable Claude Code's You should know plugin; omit to follow the global default */
   youShouldKnow?: boolean;
+  /** give the session the Playwright MCP server; omit to follow the global default */
+  playwright?: boolean;
+  /** Google and Microsoft accounts (ids or emails) the session may use */
+  accounts?: string[];
   /** type the continue message when this session comes back; omit to follow the global setting */
   continueOnResume?: boolean;
 }

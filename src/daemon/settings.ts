@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultSkipPermissions: true,
   defaultDiffPanel: false,
   defaultYouShouldKnow: true,
+  defaultPlaywright: true,
   hotSwap: true,
   autoSwap: true,
   autoRevive: true,
@@ -84,6 +85,7 @@ export function updateSettings(db: Db, patch: Partial<Settings>): Settings {
   if (typeof patch.defaultSkipPermissions === 'boolean') next.defaultSkipPermissions = patch.defaultSkipPermissions;
   if (typeof patch.defaultDiffPanel === 'boolean') next.defaultDiffPanel = patch.defaultDiffPanel;
   if (typeof patch.defaultYouShouldKnow === 'boolean') next.defaultYouShouldKnow = patch.defaultYouShouldKnow;
+  if (typeof patch.defaultPlaywright === 'boolean') next.defaultPlaywright = patch.defaultPlaywright;
   if (typeof patch.hotSwap === 'boolean') next.hotSwap = patch.hotSwap;
   if (patch.defaultAutoCompactTokens !== undefined) {
     next.defaultAutoCompactTokens = n(patch.defaultAutoCompactTokens, 20_000, 990_000, current.defaultAutoCompactTokens);

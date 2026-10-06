@@ -45,7 +45,8 @@ export function RunTags({
   const quiet = run.status !== 'exited' && run.agentStatus === 'working' ? quietMs(run, now) : 0;
   // Which machine it runs on, said only when that is not the hub: on a desk of one it is noise.
   const remote = run.deskId && run.deskId !== 'local';
-  if (!remote && !model && !settings && !run.staleRunner && !run.waiting && !work && !next && !run.stalled && quiet < QUIET_NOTE_MS) return null;
+  const accounts = run.accounts ?? [];
+  if (!remote && !accounts.length && !model && !settings && !run.staleRunner && !run.waiting && !work && !next && !run.stalled && quiet < QUIET_NOTE_MS) return null;
   return (
     <span className={className ? `run-tags ${className}` : 'run-tags'}>
       {remote && (
@@ -61,6 +62,15 @@ export function RunTags({
           {run.deskOffline ? ' · offline' : ''}
         </Badge>
       )}
+      {accounts.map((a) => (
+        <Badge
+          key={a.id}
+          tone={a.status === 'ok' ? 'muted' : 'warn'}
+          title={`${a.email}: tools under ${a.server}${a.status !== 'ok' ? '. Needs reconnecting on the Accounts page' : ''}`}
+        >
+          <Icon name="user" size={12} /> {a.provider === 'google' ? 'G' : 'MS'} {a.id}
+        </Badge>
+      ))}
       {run.stalled && (
         <Badge
           tone="warn"

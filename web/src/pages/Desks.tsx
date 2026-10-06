@@ -456,7 +456,7 @@ function AddDeskDialog({ open, onClose, now }: { open: boolean; onClose: () => v
   );
 }
 
-function Copyable({ text }: { text: string }) {
+export function Copyable({ text }: { text: string }) {
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text);

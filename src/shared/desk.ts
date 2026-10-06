@@ -103,6 +103,12 @@ export interface DeskSpawnExtras {
    * helper and the shims with its own Node and its own install.
    */
   vault?: { hosts: string[]; shims: boolean; env: Record<string, string> };
+  /**
+   * The session's extra MCP servers (Playwright, Google and Microsoft accounts) are in the MCP file
+   * with placeholders for this desk's paths; the agent installs what is missing and fills them in.
+   * googleClientId: the desk runs its own Google server for that app.
+   */
+  mcp?: { googleClientId: string | null };
 }
 
 /** Everything a desk profile is seeded with: the hub's own customisations, carried as contents. */
@@ -153,6 +159,8 @@ export type DeskToHub =
       runnerSourceMtime: number;
       repoRoots: string[];
       cloneRoot: string;
+      /** what this agent can do beyond the first version; see DESK_FEATURES */
+      features?: string[];
     }
   | { type: 'rpc-result'; id: number; ok: boolean; value?: unknown; error?: string }
   /** A piece of a file the hub mirrors: appended at `offset`, or the whole file when `truncate`. */
@@ -160,6 +168,12 @@ export type DeskToHub =
   | { type: 'login-changed'; runId: string; content: string }
   | { type: 'status'; runs: Record<string, DeskRunInfo>; runnerSourceMtime: number; tools?: DeskTools }
   | { type: 'repos'; repos: DeskRepo[] };
+
+/**
+ * Things an agent says it can do, so a hub never asks an older one for them. 'mcp': it fills in the
+ * DESK_PATHS placeholders of a session's extra MCP servers (DeskSpawnExtras.mcp).
+ */
+export const DESK_FEATURES = ['mcp'] as const;
 
 /** The prefix a satellite puts on a hook's transcript_path, for the hub to turn into its mirror. */
 export const DESK_PATH_PREFIX = 'desk://';

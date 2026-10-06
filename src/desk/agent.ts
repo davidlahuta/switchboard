@@ -23,6 +23,7 @@ import {
   type DeskRun,
   type DeskRunInfo,
   type DeskSpawnExtras,
+  DESK_FEATURES,
   type DeskToHub,
   type DeskTools,
   type HubToDesk,
@@ -33,6 +34,7 @@ import {
 import type { RunnerToDaemon, SpawnSpec } from '../shared/protocol.ts';
 import { protect, unprotect } from '../daemon/secret.ts';
 import { cloneRepo } from './clone.ts';
+import { fillDeskPaths, McpHost, type McpPaths } from '../accounts/mcpHost.ts';
 import { ensureShims, gitHelperEnv, pathWithShims } from './credential.ts';
 import { toolStatus } from './tools.ts';
 
@@ -198,12 +200,15 @@ export class DeskAgent {
   private readonly hookFiles = new Map<string, { root: MirrorRoot; rel: string; abs: string }>();
   private readonly transcripts = new Map<string, string>();
   private readonly scanner: RepoScanner;
+  /** Playwright, Microsoft 365 and Google servers for this desk's sessions; the Google one on port+20, like the hub's. */
+  private readonly mcpHost: McpHost;
   private tools: DeskTools | null = null;
   private readonly timers: NodeJS.Timeout[] = [];
 
   constructor(cfg: DeskConfig) {
     this.cfg = cfg;
     this.localUrl = `http://127.0.0.1:${cfg.port}`;
+    this.mcpHost = new McpHost(DATA_DIR, cfg.port + 20);
     this.hubWs = hubHttp(cfg.hub).replace(/^http/, 'ws');
     this.scanner = new RepoScanner(() => this.repoRoots());
   }
@@ -268,7 +273,7 @@ export class DeskAgent {
     if (!this.isLocal(req) || req.headers.origin) return reply(403, { error: 'desk agent: local only' });
     if (url.pathname === '/healthz') return reply(200, { ok: true, desk: this.cfg.deskId, hub: this.online(), version: VERSION });
     // The vault, for git's helper and the gh/az shims of sessions on this desk: relayed as this desk.
-    if (req.method === 'POST' && (url.pathname === '/api/cred/git' || url.pathname === '/api/cred/tool')) {
+    if (req.method === 'POST' && ['/api/cred/git', '/api/cred/tool', '/api/cred/account'].includes(url.pathname)) {
       const chunks: Buffer[] = [];
       for await (const c of req) chunks.push(c as Buffer);
       try {
@@ -422,11 +427,12 @@ export class DeskAgent {
     });
     const dir = path.join(RUNTIME_DIR, 'spawn');
     fs.mkdirSync(dir, { recursive: true });
+    const mcpPaths = x.mcp ? await this.prepareMcp(x.mcp, Object.values(x.files).join('\n')) : null;
     const files = new Map<string, string>();
     for (const [hubPath, content] of Object.entries(x.files)) {
       const name = path.basename(hubPath.replace(/\\/g, '/')).replace(/[^A-Za-z0-9._-]/g, '_');
       const local = path.join(dir, name);
-      fs.writeFileSync(local, this.localise(content));
+      fs.writeFileSync(local, this.localise(mcpPaths ? fillDeskPaths(content, mcpPaths) : content));
       files.set(hubPath, local);
     }
     const args = x.claudeArgs.map((a) => files.get(a) ?? a);
@@ -449,6 +455,22 @@ export class DeskAgent {
     env.CLAUDE_SECURESTORAGE_CONFIG_DIR = x.privateLogin ? await this.loginReady(runId) : null;
     const { desk: _drop, ...rest } = spec;
     return { ...rest, file: cmd.file, args: cmd.args, env };
+  }
+
+  /**
+   * This desk's own Playwright, Microsoft 365 and Google servers for a session that has them, installed
+   * on first use. Waited for a while, not forever: a server still installing is left out (see
+   * fillDeskPaths) and the session starts without it.
+   */
+  private async prepareMcp(want: { googleClientId: string | null }, files: string): Promise<McpPaths> {
+    const bounded = <T>(p: Promise<T>, ms: number): Promise<T | null> =>
+      Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms).unref?.())]);
+    const waits: Promise<unknown>[] = [];
+    if (files.includes('{{sb:playwright}}')) waits.push(bounded(this.mcpHost.ensure('playwright'), 120_000));
+    if (files.includes('{{sb:ms365}}')) waits.push(bounded(this.mcpHost.ensure('ms365'), 120_000));
+    if (want.googleClientId) waits.push(bounded(this.mcpHost.ensureGoogle(want.googleClientId), 120_000));
+    await Promise.all(waits);
+    return this.mcpHost.paths(this.localUrl);
   }
 
   /** The MCP server entry for this desk: its own Node and CLI, pointed at this agent. */
@@ -650,6 +672,7 @@ export class DeskAgent {
       runnerSourceMtime: newestRunnerSourceMtime(),
       repoRoots: this.repoRoots(),
       cloneRoot: this.cloneRoot(),
+      features: [...DESK_FEATURES],
     });
     // Everything mirrored is offered again from where the hub's copy is; it says resync if not.
     void this.scanRepos().catch(() => undefined);

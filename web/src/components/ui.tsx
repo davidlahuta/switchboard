@@ -43,6 +43,7 @@ const ICONS = {
   pencil: 'M4 20h4L20 8l-4-4L4 16zM14 6l4 4',
   handoff: 'M3 5h18v11H3zM8 20h8M12 16v4M7 10h7M14 7l3 3-3 3',
   desk: 'M3 4h18v12H3zM8 20h8M12 16v4',
+  user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0',
 } as const;
 
 export type IconName = keyof typeof ICONS;

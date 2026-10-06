@@ -146,6 +146,9 @@ export async function exportHub(out: string, opts: { dryRun: boolean }): Promise
   try {
     if (opts.dryRun) {
       tryExec(db, 'UPDATE cred_profiles SET secret = NULL, sealed = 0');
+      // A trial gets the accounts' names, never their tokens or the apps' secrets.
+      tryExec(db, "UPDATE accounts SET refresh_token = NULL, sealed = 0, status = 'needs-reconsent'");
+      tryExec(db, 'UPDATE account_apps SET secret = NULL, sealed = 0');
       tryExec(db, 'DELETE FROM push_subscriptions');
       tryExec(db, 'DELETE FROM devices');
       tryExec(db, 'UPDATE desks SET token_hash = NULL');
@@ -156,6 +159,24 @@ export async function exportHub(out: string, opts: { dryRun: boolean }): Promise
         if (plain === null) throw new Error(`The secret of the credential "${r.label}" could not be opened here.`);
         db.prepare('UPDATE cred_profiles SET secret = ?, sealed = 0 WHERE id = ?').run(plain, r.id);
         secrets++;
+      }
+      // Google and Microsoft: each account's refresh token and the Google client secret, the same way.
+      for (const [table, key, col] of [
+        ['accounts', 'id', 'refresh_token'],
+        ['account_apps', 'provider', 'secret'],
+      ] as const) {
+        let rows: Array<{ k: string; v: string; sealed: number }> = [];
+        try {
+          rows = db.prepare(`SELECT ${key} AS k, ${col} AS v, sealed FROM ${table} WHERE ${col} IS NOT NULL`).all() as typeof rows;
+        } catch {
+          rows = []; // a hub from before accounts
+        }
+        for (const r of rows) {
+          const plain = r.sealed ? await unprotect(r.v) : r.v;
+          if (plain === null) throw new Error(`A secret in ${table} (${r.k}) could not be opened here.`);
+          db.prepare(`UPDATE ${table} SET ${col} = ?, sealed = 0 WHERE ${key} = ?`).run(plain, r.k);
+          secrets++;
+        }
       }
     }
     const live = db.prepare("SELECT id, creds_sub FROM runs WHERE status <> 'exited'").all() as Array<{ id: string; creds_sub: string | null }>;
@@ -290,6 +311,14 @@ export async function importHub(file: string, opts: { force?: boolean; name?: st
   for (const r of db.all<{ id: string; secret: string }>('SELECT id, secret FROM cred_profiles WHERE secret IS NOT NULL AND sealed = 0')) {
     const box = await protect(r.secret);
     if (box) db.run('UPDATE cred_profiles SET secret = ?, sealed = 1 WHERE id = ?', box, r.id);
+  }
+  for (const r of db.all<{ id: string; refresh_token: string }>('SELECT id, refresh_token FROM accounts WHERE refresh_token IS NOT NULL AND sealed = 0')) {
+    const box = await protect(r.refresh_token);
+    if (box) db.run('UPDATE accounts SET refresh_token = ?, sealed = 1 WHERE id = ?', box, r.id);
+  }
+  for (const r of db.all<{ provider: string; secret: string }>('SELECT provider, secret FROM account_apps WHERE secret IS NOT NULL AND sealed = 0')) {
+    const box = await protect(r.secret);
+    if (box) db.run('UPDATE account_apps SET secret = ?, sealed = 1 WHERE provider = ?', box, r.provider);
   }
   db.close();
   for (const [sub, files] of Object.entries(bundle.profiles)) {

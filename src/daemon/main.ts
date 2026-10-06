@@ -1,4 +1,6 @@
 import type { Server } from 'node:http';
+import { AccountStore } from './accounts.ts';
+import { McpHost } from '../accounts/mcpHost.ts';
 import { ensureYouShouldKnow } from './plugins.ts';
 import { startStallWatch } from './stalls.ts';
 import { BIND_HOSTS, DATA_DIR, HOME_CLAUDE_DIR, PORT, VERSION, ensureDirs } from '../config.ts';
@@ -89,6 +91,17 @@ export async function startDaemon(): Promise<void> {
   runs.desks = desks;
   const vault = new Vault(db, bus);
   runs.vault = vault;
+  // Google and Microsoft accounts for sessions, and the MCP servers sessions get; see accounts.ts.
+  const accounts = new AccountStore(db, bus);
+  const mcpHost = new McpHost(DATA_DIR, PORT + 20);
+  runs.accounts = accounts;
+  runs.mcpHost = mcpHost;
+  /** Install or start what the configured providers need: called at start and whenever an app changes. */
+  const prepareMcp = (): void => {
+    if (getSettings(db).defaultPlaywright) void mcpHost.ensure('playwright');
+    if (accounts.enabled('microsoft')) void mcpHost.ensure('ms365');
+    void mcpHost.ensureGoogle(accounts.googleClientId());
+  };
   void vault.refreshSnapshot();
   void desks.detectHubUrl();
   /*
@@ -117,7 +130,10 @@ export async function startDaemon(): Promise<void> {
   coord.setRunName((runId) => runs.row(runId)?.name ?? null);
   coord.setHandedOver((runId, from, messageId) => runs.watchHandoff(runId, from, messageId));
   coord.setSessionStarter(async (caller, args) => {
-    const { run, text } = await runNewSessionTool(args, { ...caller, deskId: caller.desk_id, pathOf: (id) => desks.pathOf(id) }, {
+    // What the calling session may hand on: its own accounts, and only those.
+    const parent = runs.bySession(caller.id);
+    const callerAccounts = parent ? accounts.runAccounts(parent.id).map((a) => ({ id: a.id, email: a.email })) : [];
+    const { run, text } = await runNewSessionTool(args, { ...caller, deskId: caller.desk_id, pathOf: (id) => desks.pathOf(id), accounts: callerAccounts }, {
       settings: () => getSettings(db),
       subscriptions: () => subs.list().map((s) => ({ id: s.id, label: s.label, ready: s.status === 'ready' })),
       desks: () => desks.list().map((d) => ({ id: d.id, name: d.name })),
@@ -130,6 +146,11 @@ export async function startDaemon(): Promise<void> {
   // The transcripts, read back to catch what the hooks miss; see TranscriptWatch.
   // Notifications to phones and browsers that asked for them; see SessionAlerts.
   const push = new PushService(db);
+  // An account whose grant is gone stops every session using it: worth a notification.
+  accounts.onNeedsReconsent = (a) =>
+    void push.send({ kind: 'needsYou', title: `${a.email} needs reconnecting`, body: 'Its sessions cannot use it until it is reconnected on the Accounts page.', url: '/#/accounts', tag: `account-${a.id}` });
+  // Delayed like the rest of the startup work: installing and starting servers is a burst of processes.
+  setTimeout(prepareMcp, 45_000).unref?.();
   const presence = new Presence();
   const alerts = new SessionAlerts(
     {
@@ -199,6 +220,7 @@ export async function startDaemon(): Promise<void> {
   const prune = setInterval(() => {
     coord.prune();
     subs.prune();
+    accounts.prune();
     db.optimize();
   }, 3600_000);
   coord.prune();
@@ -221,7 +243,7 @@ export async function startDaemon(): Promise<void> {
   // extra address (a Tailscale IP, say) for direct remote access. They share all state.
   const servers: Server[] = [];
   for (const host of BIND_HOSTS) {
-    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch, push, presence, desks, vault });
+    const server = createServer({ db, bus, coord, subs, runs, auth, launcher, hub, updater, models, scanner, watch, push, presence, desks, vault, accounts, mcpHost, prepareMcp });
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') log.error(`${host}:${PORT} is already in use — is another Switchboard daemon running? Set SWITCHBOARD_PORT to change it.`);
       else if (err.code === 'EADDRNOTAVAIL') log.error(`Cannot bind ${host}: no interface has that address. Check SWITCHBOARD_BIND.`);

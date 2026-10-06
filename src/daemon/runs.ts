@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import type { AccountStore } from './accounts.ts';
+import { DESK_PATHS, type McpHost, googleEntry, ms365Entry, playwrightEntry } from '../accounts/mcpHost.ts';
 import { youShouldKnowStatus } from './plugins.ts';
 import { YOU_SHOULD_KNOW_PLUGIN } from '../shared/plugins.ts';
 import fs from 'node:fs';
@@ -85,6 +87,7 @@ interface RunRow {
   auto_compact_tokens: number | null;
   skip_permissions: number | null;
   you_should_know: number | null;
+  playwright: number | null;
   diff_panel: number | null;
   creds_sub: string | null;
   host_sub: string | null;
@@ -905,6 +908,10 @@ export class RunManager {
   private readonly readySince = new Map<string, number>();
   /** Runs the operator has asked to stop, so the death that follows is not treated as an accident. */
   private readonly stopping = new Set<string>();
+  /** Google and Microsoft accounts sessions can be given; set by the daemon. */
+  accounts: AccountStore | null = null;
+  /** The MCP servers sessions get besides Switchboard's own (Playwright, accounts); set by the daemon. */
+  mcpHost: McpHost | null = null;
   /** When each run was last taken down and brought back, so nothing takes it again mid-flight. */
   private readonly lastRespawn = new Map<string, number>();
   private readonly lastLimit = new Map<string, number>();
@@ -1193,6 +1200,8 @@ export class RunManager {
       skipPermissions: r.skip_permissions === null ? getSettings(this.db).defaultSkipPermissions : bool(r.skip_permissions),
       diffPanel: r.diff_panel === null ? getSettings(this.db).defaultDiffPanel : bool(r.diff_panel),
       youShouldKnow: r.you_should_know === null ? getSettings(this.db).defaultYouShouldKnow : bool(r.you_should_know),
+      playwright: r.playwright === null ? getSettings(this.db).defaultPlaywright : bool(r.playwright),
+      accounts: this.accounts?.runAccounts(r.id) ?? [],
       continueOnResume: r.continue_on_resume === null ? getSettings(this.db).continueOnResume : bool(r.continue_on_resume),
       swapsInPlace: this.swapsInPlace(r),
       work,
@@ -1655,6 +1664,7 @@ export class RunManager {
     skipPermissions?: boolean;
     diffPanel?: boolean;
     youShouldKnow?: boolean;
+    playwright?: boolean;
     continueOnResume?: boolean;
     /** the desk the session runs on, whose path `cwd` is; omitted for the hub's own */
     deskId?: string | null;
@@ -1706,8 +1716,8 @@ export class RunManager {
       );
     }
     this.db.run(
-      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, diff_panel, continue_on_resume, last_viewed_at, created_at, desk_id, you_should_know)
-       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, name, cwd, repo_id, session_id, subscription_id, status, auto_swap, worktree, resume, extra_args, model, auto_compact, auto_compact_tokens, skip_permissions, diff_panel, continue_on_resume, last_viewed_at, created_at, desk_id, you_should_know, playwright)
+       VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       name.slice(0, 80),
       cwd,
@@ -1728,6 +1738,7 @@ export class RunManager {
       now(),
       desk,
       spec.youShouldKnow === undefined ? null : spec.youShouldKnow ? 1 : 0,
+      spec.playwright === undefined ? null : spec.playwright ? 1 : 0,
     );
     this.subs.syncProfile(subscriptionId);
     this.bus.invalidate('state');
@@ -1737,7 +1748,11 @@ export class RunManager {
   async create(req: CreateRunRequest): Promise<Run> {
     const placed = await this.place(req);
     if (placed.deskId === LOCAL_DESK && !findClaude()) throw httpError(500, 'claude executable not found on PATH');
+    // Checked before anything is created: an unknown account is the request's mistake, not the session's.
+    const accountIds = req.accounts?.length ? (this.accounts ? this.accounts.resolveRefs(req.accounts) : []) : [];
+    if (req.accounts?.length && !this.accounts) throw httpError(409, 'Accounts are not available on this Switchboard');
     const r = await this.insertRun({ ...req, cwd: placed.cwd, deskId: placed.deskId });
+    if (accountIds.length) this.accounts!.setRunAccounts(r.id, accountIds);
     // A new session's terminal can open empty just as a relaunched one's can, and a session that
     // never starts is the easiest of all to miss; launch watches for it. See watchTerminal.
     this.launch(r, r.cwd);
@@ -1862,6 +1877,48 @@ export class RunManager {
     return dir;
   }
 
+  /**
+   * The MCP servers a session gets besides Switchboard's own: Playwright, and one server per Google or
+   * Microsoft account it was started with. For a session on a satellite the paths are placeholders the
+   * desk agent fills in with its own (DESK_PATHS). Account servers carry a ticket made for this spawn,
+   * which is all they can show to get their account's tokens; see AccountStore.mintForRun.
+   */
+  private runAccountsOf(runId: string): { provider: string }[] {
+    return this.accounts ? this.accounts.runAccounts(runId) : [];
+  }
+
+  private extraMcpServers(r: RunRow, remote: boolean): Record<string, Record<string, unknown>> {
+    const out: Record<string, Record<string, unknown>> = {};
+    const host = this.mcpHost;
+    if (!host) return out;
+    // An agent from before these servers would hand claude the placeholders as they are.
+    if (remote && !this.desks?.hasFeature(this.deskOf(r), 'mcp')) {
+      if (this.dto(r).playwright || this.runAccountsOf(r.id).length) log.warn('this desk\'s agent is too old for Playwright and accounts; the session starts without them', { run: r.id, desk: r.desk_id });
+      return out;
+    }
+    const paths = remote ? DESK_PATHS : host.paths();
+    if (this.dto(r).playwright) out.playwright = playwrightEntry(paths);
+    const accounts = this.accounts;
+    const mine = accounts ? accounts.runAccounts(r.id) : [];
+    if (!accounts || !mine.length) return out;
+    const ticket = accounts.issueTicket(r.id);
+    const msClient = accounts.microsoftClientId();
+    const googleClient = accounts.googleClientId();
+    if (googleClient && !remote && mine.some((a) => a.provider === 'google')) void host.ensureGoogle(googleClient);
+    for (const a of mine) {
+      if (a.provider === 'google' && googleClient) out[a.server] = googleEntry(paths, { account: a.server, ticket });
+      if (a.provider === 'microsoft' && msClient) {
+        const entry = ms365Entry(paths, { account: a.server, ticket, clientId: msClient, work: a.kind === 'work', run: r.id });
+        if (entry) out[a.server] = entry;
+        else {
+          log.warn('the Microsoft 365 MCP server is still being installed; this session starts without it', { run: r.id, account: a.id });
+          this.bus.toast('warn', `${r.name}: the Microsoft 365 server is still installing, so ${a.email} is not available this time. Restart the session in a minute.`);
+        }
+      }
+    }
+    return out;
+  }
+
   private buildSpec(r: RunRow, subscriptionId: string, resume: boolean): SpawnSpec & { desk?: DeskSpawnExtras } {
     // A satellite runs its own claude; the hub only builds the arguments for it.
     const remote = this.isRemote(r);
@@ -1901,7 +1958,7 @@ export class RunManager {
      * Passing it per launch settles the question at the point of use, and carries the run id so the
      * shim knows which session it belongs to, which the registered copy cannot.
      */
-    const mcpData = { mcpServers: { switchboard: mcpServerEntry({ SWITCHBOARD_RUN_ID: r.id }) } };
+    const mcpData = { mcpServers: { switchboard: mcpServerEntry({ SWITCHBOARD_RUN_ID: r.id }), ...this.extraMcpServers(r, remote) } };
     const file = writeRuntimeJson(`mcp-${r.id}.json`, mcpData);
     args.push('--mcp-config', file);
     args.push('--dangerously-load-development-channels', 'server:switchboard');
@@ -1990,6 +2047,9 @@ export class RunManager {
         privateLogin: loginDir !== null,
         resume: canResume,
         ...(vaulted ? { vault } : {}),
+        ...(JSON.stringify(mcpData).includes('{{sb:')
+          ? { mcp: { googleClientId: this.runAccountsOf(r.id).some((a) => a.provider === 'google') ? (this.accounts?.googleClientId() ?? null) : null } }
+          : {}),
       },
     };
   }
@@ -2429,6 +2489,21 @@ export class RunManager {
   }
 
   /** Restart a session on the same subscription, e.g. to pick up a new claude build. */
+  /**
+   * Change the accounts of a live session. An MCP server cannot be added to a claude that is running,
+   * so the session restarts onto them, waiting for its turn to end as every restart does.
+   */
+  setAccounts(runId: string, refs: unknown): Run {
+    const r = this.row(runId);
+    if (!r) throw httpError(404, 'Unknown session');
+    if (!this.accounts) throw httpError(409, 'Accounts are not available on this Switchboard');
+    const ids = this.accounts.resolveRefs(refs);
+    const before = this.accounts.runAccounts(runId).map((a) => a.id).sort().join(',');
+    this.accounts.setRunAccounts(runId, ids);
+    if (before === [...ids].sort().join(',') || r.status === 'exited') return this.dto(this.row(runId)!);
+    return this.restart(runId, 'its accounts changed', false, 'manual');
+  }
+
   restart(runId: string, reason: string, force = false, trigger: RespawnTrigger = 'manual'): Run {
     const r = this.liveRun(runId);
     // An update can always wait: no deadline, however long the turn runs.

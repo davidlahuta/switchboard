@@ -30,6 +30,10 @@ export interface NewSessionForm {
   diffPanel: boolean;
   /** Claude Code's built-in You should know plugin. */
   youShouldKnow: boolean;
+  /** The Playwright MCP server: a browser the session can drive. */
+  playwright: boolean;
+  /** Google and Microsoft accounts the session may use, by id. */
+  accounts: string[];
   autoSwap: boolean;
   continueOnResume: boolean;
   /** Extra claude arguments for this session only. */
@@ -50,6 +54,8 @@ export const NEW_SESSION_FIELDS = [
   'skipPermissions',
   'diffPanel',
   'youShouldKnow',
+  'playwright',
+  'accounts',
   'autoSwap',
   'continueOnResume',
   'args',
@@ -70,6 +76,8 @@ export function newSessionDefaults(settings: Settings, cwd: string): NewSessionF
     skipPermissions: settings.defaultSkipPermissions,
     diffPanel: settings.defaultDiffPanel,
     youShouldKnow: settings.defaultYouShouldKnow,
+    playwright: settings.defaultPlaywright,
+    accounts: [],
     autoSwap: settings.autoSwap,
     continueOnResume: settings.continueOnResume,
     args: [],
@@ -94,6 +102,7 @@ export function newSessionRequest(form: NewSessionForm): CreateRunRequest {
     skipPermissions: form.skipPermissions,
     diffPanel: form.diffPanel,
     youShouldKnow: form.youShouldKnow,
+    playwright: form.playwright,
     continueOnResume: form.continueOnResume,
     ...(form.name.trim() ? { name: form.name.trim() } : {}),
     ...(form.worktree.trim() && !resume ? { worktree: form.worktree.trim() } : {}),
@@ -101,6 +110,7 @@ export function newSessionRequest(form: NewSessionForm): CreateRunRequest {
     ...(resume ? { resumeSessionId: resume } : {}),
     ...(form.model.trim() ? { model: form.model.trim() } : {}),
     ...(args.length ? { args } : {}),
+    ...(form.accounts.length ? { accounts: [...form.accounts] } : {}),
     ...(form.desk.trim() && form.desk.trim() !== 'auto' ? { desk: form.desk.trim() } : {}),
   };
 }
@@ -125,6 +135,13 @@ export const NEW_SESSION_TOOL_PROPERTIES: Record<(typeof NEW_SESSION_FIELDS)[num
   skipPermissions: { type: 'boolean', description: 'Run tools without approval prompts. Default from Switchboard settings.' },
   diffPanel: { type: 'boolean', description: "Open Claude Code's /diff panel beside the conversation. Default from Switchboard settings." },
   youShouldKnow: { type: 'boolean', description: "Enable Claude Code's You should know plugin (a side agent that surfaces what is worth knowing). Default from Switchboard settings." },
+  playwright: { type: 'boolean', description: 'Give the session the Playwright MCP server (a browser it can drive). Default from Switchboard settings.' },
+  accounts: {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'Google/Microsoft accounts (ids or emails) the new session may use. Only accounts your own session has; none unless you list them.',
+  },
   autoSwap: { type: 'boolean', description: 'Move to another subscription when this one hits a limit. Default from Switchboard settings.' },
   continueOnResume: { type: 'boolean', description: 'Tell the session to carry on whenever it comes back after a restart or swap. Default from Switchboard settings.' },
   args: { type: 'array', items: { type: 'string' }, description: 'Extra claude arguments for this session only.' },
@@ -136,13 +153,13 @@ export const NEW_SESSION_TOOL_PROPERTIES: Record<(typeof NEW_SESSION_FIELDS)[num
  * defaults the dialog would have opened with. Anything else is ignored rather than guessed at.
  */
 export function newSessionFormFromTool(args: Record<string, unknown>, defaults: NewSessionForm): NewSessionForm {
-  const form: NewSessionForm = { ...defaults, args: [...defaults.args] };
+  const form: NewSessionForm = { ...defaults, args: [...defaults.args], accounts: [...defaults.accounts] };
   const target = form as unknown as Record<string, unknown>;
   for (const field of NEW_SESSION_FIELDS) {
     const v = args[field];
     const want = typeof defaults[field];
-    if (field === 'args') {
-      if (Array.isArray(v)) form.args = v.filter((a): a is string => typeof a === 'string');
+    if (field === 'args' || field === 'accounts') {
+      if (Array.isArray(v)) form[field] = v.filter((a): a is string => typeof a === 'string' && a.trim() !== '');
     } else if (want === 'number') {
       if (typeof v === 'number' && Number.isFinite(v)) target[field] = v;
     } else if (typeof v === want) {

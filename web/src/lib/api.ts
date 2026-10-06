@@ -8,7 +8,7 @@ export class ApiError extends Error {
   }
 }
 
-type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 /** Fired on window when any API call comes back 401 (e.g. the device was revoked). */
 export const UNAUTHORIZED_EVENT = 'sb:unauthorized';
@@ -59,6 +59,7 @@ export async function call<T>(method: Method, path: string, body?: unknown): Pro
 export const api = {
   get: <T>(path: string) => call<T>('GET', path),
   post: <T>(path: string, body?: unknown) => call<T>('POST', path, body ?? {}),
+  put: <T>(path: string, body: unknown) => call<T>('PUT', path, body),
   patch: <T>(path: string, body: unknown) => call<T>('PATCH', path, body),
   del: <T>(path: string) => call<T>('DELETE', path),
 };

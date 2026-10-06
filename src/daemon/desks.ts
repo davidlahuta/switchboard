@@ -74,6 +74,7 @@ interface DeskInfo {
   tools?: DeskTools;
   cloneRoot?: string;
   repoRoots?: string[];
+  features?: string[];
 }
 
 interface Conn {
@@ -169,6 +170,12 @@ export class DeskManager {
     return this.rows()
       .filter((r) => r.id !== LOCAL_DESK)
       .map((r) => r.id);
+  }
+
+  /** Whether a desk's agent said it can do this (DESK_FEATURES), when it last connected. */
+  hasFeature(id: string, feature: string): boolean {
+    const r = this.row(id);
+    return !!r && (this.info(r).features ?? []).includes(feature);
   }
 
   private info(r: DeskRow): DeskInfo {
@@ -545,6 +552,7 @@ export class DeskManager {
           tools: msg.tools,
           cloneRoot: msg.cloneRoot,
           repoRoots: msg.repoRoots,
+          features: msg.features ?? [],
         };
         this.db.run('UPDATE desks SET hostname = ?, info_json = ?, version = ?, last_seen = ? WHERE id = ?', msg.hostname, JSON.stringify(info), msg.version, now(), deskId);
         conn.runnerSourceMtime = msg.runnerSourceMtime;

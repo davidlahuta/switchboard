@@ -26,7 +26,8 @@ import type { Settings } from '../src/shared/types.ts';
  */
 
 const HERE = path.resolve(os.tmpdir(), 'sb-repo', '.claude', 'worktrees', 'lane');
-const caller = { worktree: HERE, cwd: path.join(HERE, 'src') };
+// A calling session with one account it may hand on to sessions it starts.
+const caller = { worktree: HERE, cwd: path.join(HERE, 'src'), accounts: [{ id: 'work', email: 'me@example.com' }] };
 const subscriptions = [
   { id: 'max-1', label: 'Max 20x', ready: true },
   { id: 'pro-2', label: 'Pro', ready: false },
@@ -50,6 +51,8 @@ const CHANGES: Record<(typeof NEW_SESSION_FIELDS)[number], { form: Partial<NewSe
   skipPermissions: { form: { skipPermissions: !DEFAULT_SETTINGS.defaultSkipPermissions }, tool: { skipPermissions: !DEFAULT_SETTINGS.defaultSkipPermissions } },
   diffPanel: { form: { diffPanel: !DEFAULT_SETTINGS.defaultDiffPanel }, tool: { diffPanel: !DEFAULT_SETTINGS.defaultDiffPanel } },
   youShouldKnow: { form: { youShouldKnow: !DEFAULT_SETTINGS.defaultYouShouldKnow }, tool: { youShouldKnow: !DEFAULT_SETTINGS.defaultYouShouldKnow } },
+  playwright: { form: { playwright: !DEFAULT_SETTINGS.defaultPlaywright }, tool: { playwright: !DEFAULT_SETTINGS.defaultPlaywright } },
+  accounts: { form: { accounts: ['work'] }, tool: { accounts: ['work'] } },
   autoSwap: { form: { autoSwap: !DEFAULT_SETTINGS.autoSwap }, tool: { autoSwap: !DEFAULT_SETTINGS.autoSwap } },
   continueOnResume: { form: { continueOnResume: !DEFAULT_SETTINGS.continueOnResume }, tool: { continueOnResume: !DEFAULT_SETTINGS.continueOnResume } },
   args: { form: { args: ['--verbose'] }, tool: { args: ['--verbose'] } },
@@ -121,6 +124,13 @@ describe('the New session dialog and sb_new_session', () => {
 });
 
 describe('what only an agent needs', () => {
+  it('hands on only accounts its own session has, by id or email, and none unless it names them', () => {
+    assert.equal(newSessionToolRequest({}, caller, deps()).accounts, undefined);
+    assert.deepEqual(newSessionToolRequest({ accounts: ['ME@example.com'] }, caller, deps()).accounts, ['work']);
+    assert.throws(() => newSessionToolRequest({ accounts: ['other'] }, caller, deps()), /does not have the account other/);
+    assert.throws(() => newSessionToolRequest({ accounts: ['work'] }, { worktree: HERE, cwd: HERE }, deps()), /Accounts you have: none/);
+  });
+
   it('starts in the worktree the agent is in, and reads a relative folder from where it is', () => {
     assert.equal(newSessionToolRequest({}, caller, deps()).cwd, HERE);
     assert.equal(newSessionToolRequest({ cwd: '../tests' }, caller, deps()).cwd, path.join(HERE, 'tests'));

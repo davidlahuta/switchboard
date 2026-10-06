@@ -67,6 +67,11 @@ registered with Task Scheduler, it restarts itself within seconds if it ever die
 - Runs as a Task Scheduler logon task with a supervisor that brings the daemon back if it exits.
 - Sessions outlive their terminals. After a crash, a power cut or an exit, they are still listed — **Resume** opens a new terminal on the same conversation.
 
+**Accounts and tools**
+
+- Google and Microsoft accounts, kept in Switchboard like subscriptions and given to each session you choose: several at once, of either provider, each under its own MCP server. Sessions only ever see short-lived tokens. See [Google and Microsoft accounts](#google-and-microsoft-accounts).
+- Every session gets a Playwright browser and Claude Code's *You should know* plugin, each a checkbox away from without.
+
 ---
 
 ## Requirements
@@ -620,6 +625,112 @@ Switchboard can keep `claude` current itself (Settings → Claude Code version).
 `claude update` on a schedule, and when the version changes it restarts hosted sessions onto the
 new build by resuming the same session GUID — each one waits until its agent is idle, so no turn
 is interrupted.
+
+## Google and Microsoft accounts
+
+Sessions can work in your mail, files and calendars: Gmail, Drive, Calendar, Docs, Sheets, Slides,
+Contacts and Tasks for Google; Outlook mail and calendar, OneDrive, To Do, OneNote, contacts and, for
+work accounts, Teams chats and channels plus SharePoint for Microsoft. You add accounts once on the
+**Accounts** page and choose which of them each session gets when you start it. A session can have
+several accounts, of either provider, at the same time.
+
+The whole feature is off until you give it an app (below). Without one the Accounts page explains what
+to do and nothing else changes: no picker in the new-session dialog, no extra servers.
+
+**How it works.** Switchboard keeps each account's refresh token sealed (DPAPI on Windows, like the
+subscriptions' secrets) and gives a session's MCP servers short-lived access tokens, and only for the
+accounts that session was started with. Each session gets one MCP server per account, named
+`google-<id>` or `ms-<id>`, so its tools read `mcp__google-work__…` and the agent always knows which
+account it is acting as.
+
+- Google: [`workspace-mcp`](https://github.com/taylorwilsdon/google_workspace_mcp) (pinned version),
+  one shared server per machine on `127.0.0.1:<port+20>` in external-token mode. It keeps no tokens of
+  its own. Claude Code asks Switchboard for the account's token on every connection.
+- Microsoft: [`@softeria/ms-365-mcp-server`](https://github.com/Softeria/ms-365-mcp-server) (pinned
+  version), one process per account per session. A small preload makes it take its token from
+  Switchboard instead of signing in or keeping a token cache.
+
+Both are installed on first use under `%LOCALAPPDATA%\switchboard\mcp` (or `~/.local/share/switchboard/mcp`):
+npm for Microsoft, [`uv`](https://docs.astral.sh/uv/) for Google, so install uv first
+(`winget install astral-sh.uv`, or `sudo pacman -S uv`). A satellite installs and runs its own copies;
+the tokens still come from the hub.
+
+A session can send mail and messages without asking you first. That is deliberate: give a session only
+the accounts its work needs. A session that starts another one can pass on some or all of its own
+accounts, or none of them. It can never pass on an account it does not have.
+
+You can change a running session's accounts from the person icon in its header. A claude cannot be
+given new MCP servers while it runs, so the session restarts onto them once its turn is over, and the
+conversation carries on.
+
+### The apps
+
+Both providers need an app registration before anything can read a mailbox. You register your own; it
+does not need to be reviewed or verified, because only you and the accounts you add use it.
+
+**Google** (in [Google Cloud Console](https://console.cloud.google.com), any project):
+
+1. *APIs & Services → Library*: enable the Gmail, Google Drive, Google Calendar, Google Docs, Google
+   Sheets, Google Slides, People and Google Tasks APIs.
+2. *OAuth consent screen* (Google Auth Platform): User type **External**, then *Audience → Publish app*,
+   so it is **In production**. In *Testing*, refresh tokens expire after 7 days. An unverified app in
+   production works without that limit. Google shows a "Google hasn't verified this app" warning when
+   you sign in (*Advanced → Go to …*), and the app is capped at 100 accounts over its lifetime.
+3. *Data access*: you can leave the scopes empty; Switchboard asks for them when signing in:
+   `openid`, `userinfo.email`, `userinfo.profile`, `https://mail.google.com/`, `drive`, `calendar`,
+   `documents`, `spreadsheets`, `presentations`, `contacts`, `tasks`.
+4. *Clients → Create client*: type **Web application**. Under *Authorized redirect URIs*, add the
+   addresses the Accounts page lists: `http://localhost:4477/oauth/google/callback` and, if you use the
+   hub from other devices, `https://<your hub>/oauth/google/callback`.
+5. Paste the **client ID** and **client secret** into Accounts → Google.
+
+**Microsoft** (in [Microsoft Entra](https://entra.microsoft.com) or with `az`; a free tenant of your own
+works):
+
+1. *App registrations → New registration*: supported account types **Accounts in any organizational
+   directory and personal Microsoft accounts**.
+2. *Authentication → Add a platform → Mobile and desktop applications*: add the redirect URIs from the
+   Accounts page: `http://localhost:4477/oauth/microsoft/callback` and
+   `https://<your hub>/oauth/microsoft/callback`. Set **Allow public client flows** to *Yes*. This is a
+   public client: there is no secret, and sign-in uses PKCE.
+3. *API permissions → Microsoft Graph → Delegated*: `offline_access`, `openid`, `profile`, `email`,
+   `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All`,
+   `Contacts.ReadWrite`, `Tasks.ReadWrite`, `Notes.ReadWrite`, plus, for work accounts, `Sites.Read.All`,
+   `Chat.ReadWrite`, `ChatMessage.Send`, `ChannelMessage.Send`, `Team.ReadBasic.All`,
+   `Channel.ReadBasic.All` and `People.Read`. (Switchboard asks for these when signing in, so listing
+   them here only makes the consent screen predictable.)
+4. Paste the **Application (client) ID** into Accounts → Microsoft.
+
+With `az`:
+
+```sh
+az ad app create --display-name Switchboard --sign-in-audience AzureADandPersonalMicrosoftAccount \
+  --public-client-redirect-uris http://localhost:4477/oauth/microsoft/callback https://<your hub>/oauth/microsoft/callback \
+  --is-fallback-public-client true
+```
+
+**Work accounts.** Many organisations let users consent to apps themselves. Others (and anyone under
+Microsoft's default policy for unverified apps) need an admin to consent once for the tenant. If signing
+in stops at "Need admin approval", the account row offers an *admin consent* link to send to your admin.
+
+**When an account stops working.** A revoked or expired grant, a changed password, or a new policy
+marks the account *needs reconnecting*. You get a notification, and the sessions using it get an error
+from its tools until you press **Reconnect** on the Accounts page. Nothing needs restarting.
+
+The apps, accounts and refresh tokens move with `hub export` / `hub import` like everything else. A
+dry-run export leaves the tokens out.
+
+## Playwright and You should know
+
+Every session also gets, unless you untick it when starting it:
+
+- **Playwright**: the [Playwright MCP server](https://github.com/microsoft/playwright-mcp) (pinned
+  version, `--isolated`), a browser the session can drive with a fresh profile of its own, so sessions
+  never share cookies or collide. Installed on first use; until then, `npx` runs the same version.
+- **You should know**: Claude Code's built-in `cc-plugin-you-should-know` plugin, enabled through the
+  session's settings either way, so a session started without it does not inherit it from yours.
+
+Both defaults are in Settings.
 
 ## Remote access (phone)
 

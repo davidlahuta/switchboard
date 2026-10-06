@@ -14,6 +14,7 @@ import { Sessions } from './pages/Sessions.tsx';
 import { Subscriptions } from './pages/Subscriptions.tsx';
 import { SettingsPage } from './pages/Settings.tsx';
 import { DesksPage } from './pages/Desks.tsx';
+import { AccountsPage } from './pages/Accounts.tsx';
 import { PairPage } from './pages/Pair.tsx';
 
 const TerminalPage = lazy(() => import('./pages/Terminal.tsx'));
@@ -173,6 +174,12 @@ function Routed({ route, auth }: { route: Route; auth: AuthStatus }) {
       return (
         <Layout route={route}>
           <DesksPage state={state} />
+        </Layout>
+      );
+    case 'accounts':
+      return (
+        <Layout route={route}>
+          <AccountsPage state={state} />
         </Layout>
       );
     case 'settings':

@@ -51,6 +51,8 @@ export function NewSessionDialog({
   const [skipPermissions, setSkipPermissions] = useState(initial.skipPermissions);
   const [diffPanel, setDiffPanel] = useState(initial.diffPanel);
   const [youShouldKnow, setYouShouldKnow] = useState(initial.youShouldKnow);
+  const [playwright, setPlaywright] = useState(initial.playwright);
+  const [accounts, setAccounts] = useState<string[]>(initial.accounts);
   const [argsText, setArgsText] = useState(initial.args.join(' '));
   const [recent, setRecent] = useState<RecentSession[] | null>(null);
   const [discovered, setDiscovered] = useState<DiscoveredRepo[] | null>(null);
@@ -76,6 +78,8 @@ export function NewSessionDialog({
     setSkipPermissions(d.skipPermissions);
     setDiffPanel(d.diffPanel);
     setYouShouldKnow(d.youShouldKnow);
+    setPlaywright(d.playwright);
+    setAccounts(d.accounts);
     setContinueOnResume(d.continueOnResume);
     setArgsText(d.args.join(' '));
     setError(null);
@@ -161,6 +165,8 @@ export function NewSessionDialog({
       skipPermissions,
       diffPanel,
       youShouldKnow,
+      playwright,
+      accounts,
       autoSwap,
       continueOnResume,
       args: parsed.args,
@@ -368,6 +374,8 @@ export function NewSessionDialog({
           </div>
         </div>
 
+        <AccountPicker state={state} selected={accounts} onChange={setAccounts} />
+
         <div className="check-grid">
           <label className="check">
             <input type="checkbox" checked={skipPermissions} onChange={(e) => setSkipPermissions(e.target.checked)} />
@@ -390,6 +398,14 @@ export function NewSessionDialog({
             <span>
               You should know
               <span className="field-hint">Claude Code's side agent: watches longer tasks and surfaces what is worth knowing above the prompt.</span>
+            </span>
+          </label>
+
+          <label className="check">
+            <input type="checkbox" checked={playwright} onChange={(e) => setPlaywright(e.target.checked)} />
+            <span>
+              Playwright
+              <span className="field-hint">A browser the session can drive (the Playwright MCP server), with a fresh profile of its own.</span>
             </span>
           </label>
 
@@ -660,3 +676,30 @@ function DirectoryField({
   );
 }
 
+/**
+ * Google and Microsoft accounts for the session, shown only when an app is set up and accounts exist.
+ * The session can use exactly these; an account that needs reconnecting can still be picked, and the
+ * session is told so when it asks for it.
+ */
+export function AccountPicker({ state, selected, onChange }: { state: StateSnapshot; selected: string[]; onChange: (ids: string[]) => void }) {
+  const snap = state.accounts;
+  const list = (snap?.accounts ?? []).filter((a) => snap?.enabled[a.provider]);
+  if (!list.length) return null;
+  const toggle = (id: string) => onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  return (
+    <div className="field">
+      <span className="field-label">Accounts</span>
+      <div className="account-chips" role="group" aria-label="Accounts this session may use">
+        {list.map((a) => (
+          <label key={a.id} className={selected.includes(a.id) ? 'account-chip on' : 'account-chip'} title={`${a.server}${a.status !== 'ok' ? ' · needs reconnecting' : ''}`}>
+            <input type="checkbox" checked={selected.includes(a.id)} onChange={() => toggle(a.id)} />
+            <span className="account-chip-provider">{a.provider === 'google' ? 'G' : 'MS'}</span>
+            <span>{a.email}</span>
+            {a.status !== 'ok' && <span className="warn-text"> · reconnect</span>}
+          </label>
+        ))}
+      </div>
+      <span className="field-hint">Each picked account gets its own MCP server in the session (Gmail, Drive, Calendar · Outlook, OneDrive, Teams).</span>
+    </div>
+  );
+}

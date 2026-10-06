@@ -266,6 +266,9 @@ async function main(): Promise<void> {
     // git's credential helper and the gh/az shims; see src/desk/credential.ts.
     case 'credential':
       return (await import('./desk/credential.ts')).gitCredentialHelper(rest[0] ?? '');
+    // A session's account token, for its Google and Microsoft MCP servers; see src/accounts/tokenCli.ts.
+    case 'account-token':
+      return (await import('./accounts/tokenCli.ts')).accountToken(f);
     case 'cred-exec': {
       const [tool, ...toolArgs] = rest;
       return (await import('./desk/credential.ts')).credExec(tool ?? '', toolArgs);

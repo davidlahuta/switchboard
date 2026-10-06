@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { SessionAccountsButton } from '../components/SessionAccounts.tsx';
 import { Terminal as XTerm, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WHEEL_LINES, WHEEL_REPORT_GAP_MS } from '@shared/scroll.ts';
@@ -923,6 +924,7 @@ export default function TerminalPage({ runId, state }: { runId: string; state: S
             />
           )}
           {run && <QuickPromptsButton run={run} disabled={exited} />}
+          {run && !exited && <SessionAccountsButton run={run} state={state} />}
           {run && (
             <ManageMenu
               run={{ ...run, status: status ?? run.status }}

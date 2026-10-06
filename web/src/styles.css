@@ -3857,3 +3857,102 @@ a.list-main:hover {
   white-space: nowrap;
   font-size: 12px;
 }
+
+/* ---------- accounts ---------- */
+.account-list {
+  display: grid;
+  gap: 8px;
+}
+.account-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.account-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+.account-title {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.account-title .card-title {
+  overflow-wrap: anywhere;
+}
+.account-actions,
+.app-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.app-cards {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+}
+.app-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.warn-text {
+  color: var(--warn);
+}
+.inline-form {
+  display: inline;
+}
+.choice-buttons {
+  display: grid;
+  gap: 8px;
+}
+.choice-buttons .btn {
+  display: grid;
+  justify-items: start;
+  text-align: left;
+  padding: 10px 12px;
+  height: auto;
+}
+.mcp-status {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.account-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.account-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 13px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.account-chip.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.account-chip input {
+  margin: 0;
+}
+.account-chip-provider {
+  font-weight: 600;
+  font-size: 11px;
+  opacity: 0.75;
+}
+

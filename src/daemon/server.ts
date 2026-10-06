@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import type { AccountStore } from './accounts.ts';
+import type { McpHost } from '../accounts/mcpHost.ts';
+import type { Provider } from '../shared/accounts.ts';
 import { youShouldKnowStatus } from './plugins.ts';
 import { stallReport } from './stalls.ts';
 import fs from 'node:fs';
@@ -91,6 +94,10 @@ export interface Services {
   presence: Presence;
   desks: DeskManager;
   vault: Vault;
+  accounts: AccountStore;
+  mcpHost: McpHost;
+  /** install or start the MCP servers the configured providers need */
+  prepareMcp: () => void;
 }
 
 type Body = Record<string, any>;
@@ -257,6 +264,7 @@ export function createServer(s: Services): http.Server {
       models: s.models.list(),
       desks: s.desks.list(),
       youShouldKnowAvailable: youShouldKnowStatus().available,
+      accounts: s.accounts.snapshot(),
     };
   };
 
@@ -399,6 +407,8 @@ export function createServer(s: Services): http.Server {
       skipPermissions: typeof body.skipPermissions === 'boolean' ? body.skipPermissions : undefined,
       diffPanel: typeof body.diffPanel === 'boolean' ? body.diffPanel : undefined,
       youShouldKnow: typeof body.youShouldKnow === 'boolean' ? body.youShouldKnow : undefined,
+      playwright: typeof body.playwright === 'boolean' ? body.playwright : undefined,
+      accounts: Array.isArray(body.accounts) ? body.accounts.filter((a: unknown): a is string => typeof a === 'string') : undefined,
       continueOnResume: typeof body.continueOnResume === 'boolean' ? body.continueOnResume : undefined,
       desk: typeof body.desk === 'string' && body.desk ? body.desk : undefined,
       cwdDesk: typeof body.cwdDesk === 'string' && body.cwdDesk ? body.cwdDesk : undefined,
@@ -408,6 +418,68 @@ export function createServer(s: Services): http.Server {
     s.runs.swap(params[0], typeof body.subscriptionId === 'string' ? body.subscriptionId : 'auto', 'you asked', { force: body.force === true, trigger: 'manual' }),
   );
   route('POST', '/api/runs/:id/restart', ({ params, body }) => s.runs.restart(params[0], 'you asked', body.force === true, 'manual'));
+  // A live session's accounts: kept with the run, in effect from its next start, which this queues for when it is idle.
+  route('PUT', '/api/runs/:id/accounts', ({ params, body }) => s.runs.setAccounts(params[0], body.accounts));
+
+  // ------------------------------------------------------------ accounts (Google, Microsoft)
+  const providerOf = (v: string): Provider => (v === 'google' || v === 'microsoft' ? v : fail(400, 'Unknown provider'));
+  route('GET', '/api/accounts', ({ req }) => ({
+    apps: s.accounts.apps(s.desks.hubUrl ?? (hubUrlOf(req).startsWith('https://') ? hubUrlOf(req) : null)),
+    ...s.accounts.snapshot(),
+    mcp: s.mcpHost.status(),
+  }));
+  // The apps hold the Google client secret: set from the desk only.
+  route(
+    'PUT',
+    '/api/account-apps/:provider',
+    async ({ params, body }) => {
+      const app = await s.accounts.saveApp(providerOf(params[0]), body);
+      s.prepareMcp();
+      return app;
+    },
+    'local',
+  );
+  route(
+    'DELETE',
+    '/api/account-apps/:provider',
+    ({ params }) => {
+      s.accounts.removeApp(providerOf(params[0]));
+      s.prepareMcp();
+      return { ok: true };
+    },
+    'local',
+  );
+  route('POST', '/api/accounts/oauth/start', ({ req, body }) =>
+    s.accounts.start({
+      provider: providerOf(String(body.provider ?? '')),
+      kind: body.kind === 'work' ? 'work' : body.kind === 'personal' ? 'personal' : undefined,
+      accountId: typeof body.accountId === 'string' ? body.accountId : null,
+      origin: hubUrlOf(req),
+    }),
+  );
+  // Where Google and Microsoft send the browser back: public, but only good for a sign-in this daemon started.
+  route(
+    'GET',
+    '/oauth/:provider/callback',
+    async ({ params, url, res }) => {
+      let target: string;
+      try {
+        const a = await s.accounts.callback(providerOf(params[0]), url.searchParams);
+        target = `/#/accounts?added=${encodeURIComponent(a.id)}`;
+      } catch (err) {
+        target = `/#/accounts?error=${encodeURIComponent(err instanceof Error ? err.message : String(err))}`;
+      }
+      res.writeHead(302, { location: target, 'cache-control': 'no-store' });
+      res.end();
+      return undefined;
+    },
+    'public',
+  );
+  route('PATCH', '/api/accounts/:id', ({ params, body }) => (typeof body.id === 'string' ? s.accounts.rename(params[0], body.id) : fail(400, 'Nothing to change')));
+  route('DELETE', '/api/accounts/:id', async ({ params }) => (await s.accounts.remove(params[0]), { ok: true }));
+  route('POST', '/api/accounts/:id/test', ({ params }) => s.accounts.test(params[0]));
+  // A session's MCP servers asking for an access token: this machine or the desk the session runs on.
+  route('POST', '/api/cred/account', ({ req, body }) => s.accounts.mintForRun({ ticket: body.ticket, account: body.account, deskId: deskOf(req) }), 'desk');
   route('PATCH', '/api/runs/:id', ({ params, body }) => {
     if (typeof body.continueOnResume === 'boolean') return s.runs.setContinueOnResume(params[0], body.continueOnResume);
     if (typeof body.name === 'string') return s.runs.rename(params[0], body.name);
@@ -601,7 +673,7 @@ export function createServer(s: Services): http.Server {
     let body: Body = {};
     let error: string | undefined;
     try {
-      const isApi = url.pathname.startsWith('/api/') || url.pathname.startsWith('/hooks/') || url.pathname === '/healthz';
+      const isApi = url.pathname.startsWith('/api/') || url.pathname.startsWith('/hooks/') || url.pathname.startsWith('/oauth/') || url.pathname === '/healthz';
       if (!isApi) {
         if (req.method !== 'GET' && req.method !== 'HEAD') fail(405, 'Method not allowed');
         serveStatic(req, res, url);

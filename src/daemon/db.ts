@@ -461,6 +461,57 @@ const MIGRATIONS: string[] = [
   -- Whether a session starts with Claude Code's You should know plugin; NULL follows the setting.
   ALTER TABLE runs ADD COLUMN you_should_know INTEGER;
   `,
+  `
+  -- Google and Microsoft accounts for sessions (see accounts.ts). One app per provider, the operator's
+  -- own: without it the provider is not offered at all. Refresh tokens and the Google client secret
+  -- are sealed with DPAPI where sealed = 1, and never leave the hub.
+  CREATE TABLE account_apps (
+    provider TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    tenant TEXT,
+    secret TEXT,
+    sealed INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE accounts (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    email TEXT NOT NULL,
+    display_name TEXT,
+    subject TEXT NOT NULL,
+    tenant TEXT,
+    scopes TEXT NOT NULL,
+    refresh_token TEXT,
+    sealed INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    last_error TEXT,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (provider, subject)
+  );
+  -- Which accounts a session has. Kept with the run, so a restart, resume or swap keeps them.
+  CREATE TABLE run_accounts (
+    run_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    PRIMARY KEY (run_id, account_id)
+  );
+  -- Every access token handed to a session: which account, for which run, from which desk.
+  CREATE TABLE account_mints (
+    ts TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    run_id TEXT,
+    desk_id TEXT,
+    cached INTEGER NOT NULL
+  );
+  CREATE INDEX account_mints_ts ON account_mints (ts);
+  CREATE INDEX account_mints_account ON account_mints (account_id, ts);
+  -- The hash of the ticket a session's MCP servers present for its accounts' tokens; new every spawn.
+  ALTER TABLE runs ADD COLUMN account_ticket_hash TEXT;
+  -- Whether a session starts with the Playwright MCP server; NULL follows the setting.
+  ALTER TABLE runs ADD COLUMN playwright INTEGER;
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;
