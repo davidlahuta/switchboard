@@ -165,21 +165,33 @@ describe('where the operator is working', () => {
 describe('the number on the app icon', () => {
   it('counts sessions waiting on you: a question, a message to you, a finished turn nobody has read', async () => {
     const { appBadgeCount } = await import('../src/shared/badge.ts');
-    assert.equal(appBadgeCount([]), 0);
-    assert.equal(appBadgeCount([run({ attention: { waiting: true, unread: 0, unseen: false } })]), 1, 'asking');
-    assert.equal(appBadgeCount([run({ attention: { waiting: false, unread: 2, unseen: false } })]), 1, 'wrote to you');
-    assert.equal(appBadgeCount([run({ attention: { waiting: false, unread: 0, unseen: true } })]), 1, 'done, unread');
-    assert.equal(appBadgeCount([run({ attention: { waiting: false, unread: 0, unseen: false } })]), 0, 'done, already read');
-    assert.equal(appBadgeCount([run({ agentStatus: 'working', attention: { waiting: false, unread: 0, unseen: true } })]), 0, 'still working');
-    assert.equal(appBadgeCount([run({ status: 'exited', attention: { waiting: true, unread: 1, unseen: true } })]), 0, 'ended');
-    assert.equal(appBadgeCount([run({ id: 'a', attention: { waiting: true, unread: 1, unseen: true } }), run({ id: 'b', attention: { waiting: false, unread: 0, unseen: true } })]), 2, 'one each');
+    const now = Date.parse('2026-10-06T12:00:00Z');
+    const recent = { lastActivity: '2026-10-06T11:55:00Z' };
+    const count = (runs: Run[]) => appBadgeCount(runs, now);
+    assert.equal(count([]), 0);
+    assert.equal(count([run({ ...recent, attention: { waiting: true, unread: 0, unseen: false } })]), 1, 'asking');
+    assert.equal(count([run({ ...recent, attention: { waiting: false, unread: 2, unseen: false } })]), 1, 'wrote to you');
+    assert.equal(count([run({ ...recent, attention: { waiting: false, unread: 0, unseen: true } })]), 1, 'done, unread');
+    assert.equal(count([run({ ...recent, attention: { waiting: false, unread: 0, unseen: false } })]), 0, 'done, already read');
+    assert.equal(count([run({ ...recent, agentStatus: 'working', attention: { waiting: false, unread: 0, unseen: true } })]), 0, 'still working');
+    assert.equal(count([run({ ...recent, status: 'exited', attention: { waiting: true, unread: 1, unseen: true } })]), 0, 'ended');
+    assert.equal(count([run({ ...recent, id: 'a', attention: { waiting: true, unread: 1, unseen: true } }), run({ ...recent, id: 'b', attention: { waiting: false, unread: 0, unseen: true } })]), 2, 'one each');
+  });
+
+  it('leaves out a finished session once it is parked, but never one that is asking', async () => {
+    const { appBadgeCount } = await import('../src/shared/badge.ts');
+    const now = Date.parse('2026-10-06T12:00:00Z');
+    const parked = { lastActivity: '2026-10-06T10:00:00Z' };
+    assert.equal(appBadgeCount([run({ ...parked, attention: { waiting: false, unread: 0, unseen: true } })], now), 0, 'done and left');
+    assert.equal(appBadgeCount([run({ ...parked, attention: { waiting: true, unread: 0, unseen: true } })], now), 1, 'asking, however long ago');
+    assert.equal(appBadgeCount([run({ ...parked, attention: { waiting: false, unread: 1, unseen: true } })], now), 1, 'wrote to you');
   });
 
   it('goes out with every notification, so the icon is right while the app is closed', () => {
     const d = desk();
-    d.at({ agentStatus: 'working' });
-    d.at({ attention: { waiting: false, unread: 0, unseen: true } }, 1000);
-    d.at({ attention: { waiting: false, unread: 0, unseen: true } }, DONE_SETTLE_MS);
+    d.at({ agentStatus: 'working', lastActivity: new Date(1_000_000).toISOString() });
+    d.at({ lastActivity: new Date(1_001_000).toISOString(), attention: { waiting: false, unread: 0, unseen: true } }, 1000);
+    d.at({ lastActivity: new Date(1_001_000).toISOString(), attention: { waiting: false, unread: 0, unseen: true } }, DONE_SETTLE_MS);
     assert.equal(d.sent.length, 1);
     assert.equal(d.sent[0]!.badge, 1);
   });

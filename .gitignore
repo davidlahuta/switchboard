@@ -19,3 +19,10 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# Never committed, wherever they are made: a hub export holds every login and secret in the clear,
+# desk.json a desk's token, .credentials.json a Claude Code login, and a CPU profile the daemon's memory.
+*.gz
+desk.json
+.credentials.json
+*.cpuprofile

@@ -145,7 +145,7 @@ export class SessionAlerts {
       return [];
     }
     // Every notification carries the icon's count, which is how it stays right while the app is closed.
-    const badge = out.length ? appBadgeCount(this.source.runs()) : 0;
+    const badge = out.length ? appBadgeCount(this.source.runs(), now) : 0;
     for (const msg of out) {
       log.info('notifying', { kind: msg.kind, title: msg.title, badge });
       void this.push.send({ ...msg, badge });

@@ -20,7 +20,7 @@ describe('which account a subscription is really on', () => {
   });
 
   it('accepts the same address however it was typed', () => {
-    assert.equal(accountMismatch('owner@example.com', 'owner@example.com'), false);
+    assert.equal(accountMismatch('Owner@Example.com', 'owner@example.com'), false);
     assert.equal(accountMismatch(' owner@example.com ', 'owner@example.com'), false);
   });
 

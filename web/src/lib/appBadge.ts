@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { appBadgeCount } from '@shared/badge.ts';
 import type { Run } from '@shared/types.ts';
 
@@ -11,7 +11,13 @@ type BadgingNavigator = Navigator & { setAppBadge?: (n?: number) => Promise<void
  * the service worker sets it (see sw.js).
  */
 export function useAppBadge(runs: readonly Run[] | undefined): void {
-  const count = runs ? appBadgeCount(runs) : null;
+  // A finished session leaves the count when it is parked, which is time passing rather than news.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(t);
+  }, []);
+  const count = runs ? appBadgeCount(runs, now) : null;
   useEffect(() => {
     if (count === null) return;
     const nav = navigator as BadgingNavigator;
