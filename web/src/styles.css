@@ -2249,6 +2249,32 @@ a.list-main:hover {
   background: var(--crit-soft);
   border: 1px solid color-mix(in srgb, var(--crit) 35%, transparent);
 }
+.callout-ok {
+  background: var(--ok-soft, color-mix(in srgb, var(--ok) 12%, transparent));
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+}
+.login-panel {
+  display: grid;
+  gap: 10px;
+}
+.login-panel p {
+  margin: 0;
+}
+.login-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.login-code {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.login-code .input {
+  flex: 1 1 220px;
+  min-width: 0;
+}
 .sub-usage {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));

@@ -148,8 +148,12 @@ shared folders to `~/.claude` (`projects`, `file-history`, `todos`, `plans`, `pl
 `agents`, `commands`, `output-styles`) and copies `settings.json`, `CLAUDE.md` and
 `keybindings.json`. Your existing `~/.claude` login is imported as the *default* subscription.
 
-Adding a subscription opens a terminal running `claude auth login` inside the new profile; the
-daemon watches for credentials and reads the account (email, plan) from the OAuth profile endpoint.
+Adding a subscription runs `claude auth login` inside the new profile, from the daemon rather than in a
+terminal on the desk (`claudeLogin.ts`), so it can be finished from anywhere. claude opens a browser on
+the desk as usual. The fallback link it prints is read out of its output and shown on the card
+(`Subscription.login`), and the code that link's page ends on comes back through
+`/api/subscriptions/:id/login/code` and is written to claude's stdin. The daemon watches for
+credentials and reads the account (email, plan) from the OAuth profile endpoint.
 
 **Tokens are renewed before they die.** A Claude Code token lasts about eight hours and the CLI
 renews it on the next API call it makes — which a session sitting at a prompt never makes, and a

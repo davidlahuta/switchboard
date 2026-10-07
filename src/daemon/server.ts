@@ -345,6 +345,8 @@ export function createServer(s: Services): http.Server {
   route('PATCH', '/api/subscriptions/:id', ({ params, body }) => s.subs.update(params[0], body));
   route('DELETE', '/api/subscriptions/:id', ({ params, url }) => (s.subs.remove(params[0], url.searchParams.get('purge') === '1'), { ok: true }));
   route('POST', '/api/subscriptions/:id/login', ({ params }) => (s.subs.openLogin(params[0]), { ok: true }));
+  route('POST', '/api/subscriptions/:id/login/code', ({ params, body }) => (s.subs.logins.submit(params[0], body.code), { ok: true }));
+  route('DELETE', '/api/subscriptions/:id/login', ({ params }) => (s.subs.logins.cancel(params[0]), { ok: true }));
   route('POST', '/api/subscriptions/:id/refresh', async ({ params }) => {
     if (!s.subs.row(params[0])) fail(404, 'not found');
     await s.subs.refreshIdentity(params[0]);

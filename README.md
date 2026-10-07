@@ -103,9 +103,11 @@ npm run daemon  # daemon + UI on http://127.0.0.1:4477
 ### 1. Subscriptions
 
 Your existing `~/.claude` login is imported automatically as **Default**. To add another:
-**Subscriptions → Add subscription**. A terminal opens with `claude auth login` running inside the
-new profile. Sign in with the account you want (a private browser window helps if you are
-already signed in to claude.ai with another account). The card turns *ready* once the login lands.
+**Subscriptions → Add subscription**. Switchboard runs `claude auth login` for the new profile, which
+opens a browser on the desk. Sign in with the account you want (a private browser window helps if you
+are already signed in to claude.ai with another account). Not at the desk, or no browser opened? The
+card shows the sign-in link: open it on whatever device you are on, sign in, and paste the code the
+page ends on into the box under it. The card turns *ready* once the login lands.
 
 ### 2. Sessions
 

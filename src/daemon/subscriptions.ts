@@ -1,7 +1,6 @@
 import { execFileOff } from '../spawnOff.ts';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { HOME_CLAUDE_DIR, HOME_CLAUDE_JSON, IS_WINDOWS, PROFILES_DIR, SPAWN_CWD, VERSION, withoutParentSession } from '../config.ts';
 import { logger } from '../log.ts';
@@ -13,6 +12,7 @@ import { forecast, pointsOf } from './burn.ts';
 import { DEFAULT_WEEK_WINDOWS, isSpent, modelWindows, roomOf, type Room, weekWindowsFrom } from '../shared/capacity.ts';
 import { bool, type Db, now } from './db.ts';
 import type { Launcher } from './launcher.ts';
+import { ClaudeLogins } from './claudeLogin.ts';
 import { getSettings } from './settings.ts';
 
 const log = logger('subscriptions');
@@ -263,10 +263,14 @@ export class SubscriptionManager {
   private weekRatios: { at: number; byTier: Map<string, number>; all: number | null } | null = null;
   private timer: NodeJS.Timeout | null = null;
 
+  /** Sign-ins under way; see ClaudeLogins. */
+  readonly logins: ClaudeLogins;
+
   constructor(db: Db, bus: Bus, launcher: Launcher) {
     this.db = db;
     this.bus = bus;
     this.launcher = launcher;
+    this.logins = new ClaudeLogins(bus);
   }
 
   start(): void {
@@ -279,6 +283,7 @@ export class SubscriptionManager {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     for (const t of this.watchers.values()) clearInterval(t);
+    this.logins.stopAll();
   }
 
   // ---------------------------------------------------------------- reads
@@ -340,6 +345,7 @@ export class SubscriptionManager {
       usage,
       liveRuns: this.liveRunsFor(r.id),
       createdAt: r.created_at,
+      login: this.logins.get(r.id),
     };
   }
 
@@ -890,6 +896,7 @@ export class SubscriptionManager {
       throw Object.assign(new Error('The default login is re-imported from ~/.claude on every start. Disable it instead.'), { status: 400 });
     }
     if (this.liveRunsFor(id) > 0) throw Object.assign(new Error('Sessions are running on this subscription. Swap or stop them first.'), { status: 409 });
+    this.logins.cancel(id);
     this.db.run('DELETE FROM subscriptions WHERE id = ?', id);
     this.db.run('DELETE FROM usage_history WHERE subscription_id = ?', id);
     const w = this.watchers.get(id);
@@ -927,9 +934,8 @@ export class SubscriptionManager {
   openLogin(id: string): void {
     const r = this.row(id);
     if (!r) throw Object.assign(new Error('not found'), { status: 404 });
-    const args = ['login-shell', '--config-dir', r.kind === 'default' ? 'default' : r.config_dir, '--label', r.label];
-    if (r.email) args.push('--email', r.email);
-    this.launcher.openTerminal({ title: `Switchboard login · ${r.label}`, cwd: os.homedir(), args });
+    // Run here rather than in a terminal on the desk, so the web app can finish it from anywhere.
+    this.logins.start(id, { configDir: r.kind === 'default' ? null : r.config_dir, email: r.email, label: r.label });
     this.watchLogin(id);
   }
 

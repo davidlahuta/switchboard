@@ -24,17 +24,23 @@ export interface OffOptions {
   maxBuffer?: number;
   /** written to the process's stdin, which is then closed */
   input?: string;
-  /** stdout delivered as it comes ('stdout' events) rather than collected */
+  /** stdout and stderr delivered as they come ('stdout' and 'stderr' events) rather than collected */
   stream?: boolean;
+  /** stdin left open, for OffChild.write: a process that is answered as it goes */
+  stdin?: boolean;
   /** no pipes at all: for a process that outlives anybody's interest in it, like a terminal window */
   ignoreOutput?: boolean;
 }
 
-export type OffRequest = { op: 'run'; id: number; file: string; args: string[]; opts: OffOptions } | { op: 'kill'; id: number };
+export type OffRequest =
+  | { op: 'run'; id: number; file: string; args: string[]; opts: OffOptions }
+  | { op: 'kill'; id: number }
+  | { op: 'write'; id: number; data: string };
 
 export type OffEvent =
   | { id: number; type: 'spawned'; pid: number | null }
   | { id: number; type: 'stdout'; data: string }
+  | { id: number; type: 'stderr'; data: string }
   | { id: number; type: 'error'; message: string; code?: string }
   | { id: number; type: 'exit'; code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; killed: boolean };
 
@@ -48,6 +54,10 @@ export class OffChild extends EventEmitter {
   }
   kill(): void {
     send({ op: 'kill', id: this.id });
+  }
+  /** Write to its stdin; only for a process started with `stdin: true`. */
+  write(data: string): void {
+    send({ op: 'write', id: this.id, data });
   }
 }
 
@@ -66,6 +76,7 @@ function ensureWorker(): Worker {
       child.pid = e.pid;
       child.emit('spawned', e.pid);
     } else if (e.type === 'stdout') child.emit('stdout', e.data);
+    else if (e.type === 'stderr') child.emit('stderr', e.data);
     else {
       live.delete(e.id);
       idle();

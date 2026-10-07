@@ -79,6 +79,19 @@ export interface Subscription {
   usage: Usage | null;
   liveRuns: number;
   createdAt: string;
+  /** A `claude auth login` under way for it, or just ended; null otherwise. */
+  login: ClaudeLogin | null;
+}
+
+/**
+ * Signing a subscription in, run by the daemon. `url` is claude's link for when the browser on the
+ * desk does not open; the page it ends on shows a code, which goes back through the web app.
+ */
+export interface ClaudeLogin {
+  status: 'starting' | 'waiting' | 'submitted' | 'done' | 'failed';
+  url: string | null;
+  error: string | null;
+  startedAt: string;
 }
 
 export interface UsagePoint {

@@ -37,7 +37,7 @@ export function Subscriptions({ state }: { state: StateSnapshot }) {
         </div>
       )}
 
-      <AddSubscriptionDialog open={addOpen} onClose={() => setAddOpen(false)} />
+      <AddSubscriptionDialog open={addOpen} onClose={() => setAddOpen(false)} subs={state.subscriptions} />
       <RemoveDialog sub={removing} onClose={() => setRemoving(null)} />
     </div>
   );
@@ -96,9 +96,7 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
   };
 
   const relogin = async () => {
-    if (await api.post(`/api/subscriptions/${id}/login`)) {
-      emitToast('info', 'A terminal opened on the desk for claude auth login. Sign in with the intended account.');
-    }
+    await api.post(`/api/subscriptions/${id}/login`);
   };
 
   return (
@@ -176,14 +174,17 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
         </div>
       </div>
 
-      {sub.status === 'pending_login' && (
-        <div className="callout callout-warn">
-          Waiting for <span className="mono">claude auth login</span> to finish in the terminal window on the desk. Sign in with the
-          account you want for this subscription.{' '}
-          <button type="button" className="link-btn" onClick={() => void relogin()}>
-            Re-open login window
-          </button>
-        </div>
+      {sub.login ? (
+        <LoginPanel sub={sub} />
+      ) : (
+        sub.status === 'pending_login' && (
+          <div className="callout callout-warn">
+            Not signed in yet.{' '}
+            <button type="button" className="link-btn" onClick={() => void relogin()}>
+              Sign in
+            </button>
+          </div>
+        )
       )}
       {sub.accountMismatch && (
         <div className="callout callout-crit">
@@ -256,7 +257,92 @@ function SubscriptionCard({ sub, now, onRemove }: { sub: Subscription; now: numb
   );
 }
 
-function AddSubscriptionDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+/**
+ * A sign-in the daemon is running for a subscription. claude opens a browser on the desk, and signing
+ * in there finishes it. From anywhere else, its link opens here, and the code the page ends on is
+ * pasted back.
+ */
+function LoginPanel({ sub }: { sub: Subscription }) {
+  const login = sub.login;
+  const [code, setCode] = useState('');
+  const [sending, setSending] = useState(false);
+  const id = encodeURIComponent(sub.id);
+  useEffect(() => {
+    if (login?.status === 'failed' || login?.status === 'done') setCode('');
+  }, [login?.status]);
+  if (!login) return null;
+  const restart = () => void api.post(`/api/subscriptions/${id}/login`);
+  const cancel = () => void api.del(`/api/subscriptions/${id}/login`);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!code.trim()) return;
+    setSending(true);
+    await api.post(`/api/subscriptions/${id}/login/code`, { code: code.trim() });
+    setSending(false);
+  };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(login.url ?? '');
+      emitToast('info', 'Sign-in link copied');
+    } catch {
+      emitToast('error', 'Could not copy; long-press the button to copy the link instead.');
+    }
+  };
+  if (login.status === 'done') return <div className="callout callout-ok">Signed in. Checking which account it is…</div>;
+  if (login.status === 'failed') {
+    return (
+      <div className="callout callout-crit">
+        Sign-in did not finish: {login.error ?? 'claude auth login stopped.'}{' '}
+        <button type="button" className="link-btn" onClick={restart}>
+          Try again
+        </button>
+      </div>
+    );
+  }
+  if (login.status === 'starting' || !login.url) {
+    return <div className="callout callout-warn">Starting <span className="mono">claude auth login</span>…</div>;
+  }
+  const account = sub.email ? <strong>{sub.email}</strong> : 'the account you want for this subscription';
+  return (
+    <div className="callout callout-warn login-panel">
+      <p>
+        A browser opened on the desk to sign in. Not at the desk, or nothing opened? Open the sign-in page here and sign in
+        with {account}, then paste the code it shows you.
+      </p>
+      <div className="login-actions">
+        <a className="btn btn-sm btn-primary" href={login.url} target="_blank" rel="noreferrer noopener">
+          <Icon name="key" size={14} />
+          <span>Open sign-in page</span>
+        </a>
+        <button type="button" className="btn btn-sm" onClick={() => void copy()}>
+          <Icon name="copy" size={14} />
+          <span>Copy link</span>
+        </button>
+        <button type="button" className="link-btn" onClick={cancel}>
+          Cancel
+        </button>
+      </div>
+      <form className="login-code" onSubmit={submit}>
+        <input
+          className="input input-sm mono"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="Paste the code here"
+          aria-label="Sign-in code"
+          autoComplete="off"
+          autoCapitalize="off"
+          spellCheck={false}
+        />
+        <button type="submit" className="btn btn-sm" disabled={sending || !code.trim() || login.status === 'submitted'}>
+          {login.status === 'submitted' ? 'Checking…' : 'Submit code'}
+        </button>
+      </form>
+      <p className="small dim">Signed in with another account already? Use a private window, or the browser picks that one.</p>
+    </div>
+  );
+}
+
+function AddSubscriptionDialog({ open, onClose, subs }: { open: boolean; onClose: () => void; subs: Subscription[] }) {
   const [label, setLabel] = useState('');
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
@@ -280,6 +366,7 @@ function AddSubscriptionDialog({ open, onClose }: { open: boolean; onClose: () =
   };
 
   if (created) {
+    const live = subs.find((s) => s.id === created.id) ?? created;
     return (
       <Dialog
         open={open}
@@ -293,18 +380,16 @@ function AddSubscriptionDialog({ open, onClose }: { open: boolean; onClose: () =
       >
         <div className="prose">
           <p>
-            A terminal window opened on the desk running <span className="mono">claude auth login</span> for{' '}
-            <strong>{created.label}</strong>.
+            Sign <strong>{live.label}</strong> in with {live.email ? <strong>{live.email}</strong> : 'the account you want for this subscription'}.
+            When it is done, its card switches to “ready” on its own.
           </p>
-          <ol>
-            <li>Follow the link it shows and sign in with {created.email ? <strong>{created.email}</strong> : 'the account you want for this subscription'}.</li>
-            <li>
-              <strong>Tip:</strong> use a private/incognito browser window, or sign out of claude.ai first — otherwise the browser may
-              silently reuse the account you're already signed in with.
-            </li>
-            <li>When the login completes the card switches from “waiting for login” to “ready” on its own.</li>
-          </ol>
-          <p className="muted">No window? Use “Re-login” on the card to open it again.</p>
+          {live.login ? (
+            <LoginPanel sub={live} />
+          ) : live.status === 'ready' ? (
+            <div className="callout callout-ok">Signed in.</div>
+          ) : (
+            <p className="muted">The sign-in stopped. Use “Re-login” on the card to start it again.</p>
+          )}
         </div>
       </Dialog>
     );

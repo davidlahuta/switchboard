@@ -140,7 +140,7 @@ export function accountServer(provider: Provider, id: string): string {
   return `${PREFIX[provider]}-${id}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40);
 }
 
-/** An account id from an email: `david-lahuta` for david.lahuta@outlook.com, made unique by the caller. */
+/** An account id from an email: `jane-doe` for jane.doe@example.com, made unique by the caller. */
 export function accountIdFrom(email: string): string {
   const local = email.split('@')[0] ?? 'account';
   const slug = local

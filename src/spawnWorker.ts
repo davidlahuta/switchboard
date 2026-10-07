@@ -17,6 +17,10 @@ port.on('message', (m: OffRequest) => {
     children.get(m.id)?.kill();
     return;
   }
+  if (m.op === 'write') {
+    children.get(m.id)?.stdin?.write(m.data);
+    return;
+  }
   const o = m.opts;
   let child: ChildProcess;
   try {
@@ -27,7 +31,7 @@ port.on('message', (m: OffRequest) => {
       windowsHide: o.windowsHide ?? true,
       windowsVerbatimArguments: o.windowsVerbatimArguments,
       detached: o.detached,
-      stdio: [o.input !== undefined ? 'pipe' : 'ignore', o.ignoreOutput ? 'ignore' : 'pipe', o.ignoreOutput ? 'ignore' : 'pipe'],
+      stdio: [o.input !== undefined || o.stdin ? 'pipe' : 'ignore', o.ignoreOutput ? 'ignore' : 'pipe', o.ignoreOutput ? 'ignore' : 'pipe'],
     });
   } catch (err) {
     post({ id: m.id, type: 'error', message: err instanceof Error ? err.message : String(err), code: (err as NodeJS.ErrnoException).code });
@@ -51,8 +55,10 @@ port.on('message', (m: OffRequest) => {
     else if (stdout.length < max) stdout += d;
   });
   child.stderr?.on('data', (d: string) => {
+    if (o.stream) post({ id: m.id, type: 'stderr', data: d });
     if (stderr.length < max) stderr += d;
   });
+  child.stdin?.on('error', () => undefined); // a process that exits before reading what it was sent
   child.on('spawn', () => post({ id: m.id, type: 'spawned', pid: child.pid ?? null }));
   child.on('error', (err: NodeJS.ErrnoException) => {
     if (timer) clearTimeout(timer);

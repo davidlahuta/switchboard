@@ -35,15 +35,17 @@ Pairing link format: `<origin>/#/pair?code=<code>`.
 | Method | Path                                   | Body                                   | Returns          |
 |--------|----------------------------------------|----------------------------------------|------------------|
 | GET    | `/api/subscriptions`                   |                                        | `Subscription[]` |
-| POST   | `/api/subscriptions`                   | `{ label, email? }` – creates profile and opens `claude auth login` | `Subscription` |
+| POST   | `/api/subscriptions`                   | `{ label, email? }` – creates profile and starts `claude auth login` | `Subscription` |
 | PATCH  | `/api/subscriptions/:id`               | `{ label?, enabled?, priority? }`      | `Subscription`   |
 | DELETE | `/api/subscriptions/:id?purge=1`       | purge also deletes the profile dir     | `{ ok }`         |
-| POST   | `/api/subscriptions/:id/login`         | re-open login terminal                 | `{ ok }`         |
+| POST   | `/api/subscriptions/:id/login`         | (re)start `claude auth login`; progress in `Subscription.login` | `{ ok }` |
+| POST   | `/api/subscriptions/:id/login/code`    | `{ code }` – the code the sign-in link's page shows | `{ ok }` |
+| DELETE | `/api/subscriptions/:id/login`         | stop a sign-in under way               | `{ ok }`         |
 | POST   | `/api/subscriptions/:id/refresh`       | poll usage now                         | `Subscription`   |
 | GET    | `/api/subscriptions/:id/history?hours=48` |                                     | `UsagePoint[]`   |
 
 A `Subscription` carries two addresses. `email` is the account it is **for** — what was typed when
-it was created, and what the login window is opened with. `accountEmail` is the account its token is
+it was created, and what the sign-in is started with. `accountEmail` is the account its token is
 **on**, read from `/api/oauth/profile` at every login and identity refresh. When both are known and
 they differ, `accountMismatch` is true: the usage on that subscription is another account's usage,
 so its `headroom` is reported as 0, it is left out of the pooled burn forecast, and nothing is

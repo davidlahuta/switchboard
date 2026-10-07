@@ -61,11 +61,11 @@ describe('accounts: apps and signing in', () => {
         refresh_token: 'RT1',
         expires_in: 3600,
         scope: 'Mail.ReadWrite Mail.Send',
-        id_token: idToken({ oid: 'o-1', tid: MS_CONSUMER_TENANT, preferred_username: 'Me@Outlook.com', name: 'Me' }),
+        id_token: idToken({ oid: 'o-1', tid: MS_CONSUMER_TENANT, preferred_username: 'Me@Example.com', name: 'Me' }),
       },
     });
     const a = await accounts.callback('microsoft', new URLSearchParams({ state: stateOf(url), code: 'C1' }));
-    assert.equal(a.email, 'me@outlook.com');
+    assert.equal(a.email, 'me@example.com');
     assert.equal(a.kind, 'personal');
     assert.equal(a.tenant, 'consumers');
     assert.equal(a.server, 'ms-me');
@@ -210,7 +210,7 @@ describe('accounts: MCP entries in a session', () => {
   });
 
   it('names accounts and their servers predictably', () => {
-    assert.equal(accountIdFrom('David.Lahuta@outlook.com'), 'david-lahuta');
+    assert.equal(accountIdFrom('Jane.Doe@example.com'), 'jane-doe');
     assert.equal(accountServer('microsoft', 'work'), 'ms-work');
     assert.equal(accountServer('google', 'me'), 'google-me');
   });
